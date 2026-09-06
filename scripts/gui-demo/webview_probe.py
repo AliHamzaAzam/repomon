@@ -10,16 +10,50 @@ TITLES = {"Repomind", "orbit-api", "feat-rate-limit-headers", "meadow-web",
           "fix-nav-focus-trap", "forge-cli", "fix-windows-console", "atlas-docs"}
 
 
-def launch_command(root, helpers):
+def launch_command(root, helpers, executable, tour=False):
     library = root / "bin/webview-probe.dylib"
     sp.run(["xcrun", "clang", "-dynamiclib", "-fobjc-arc", "-framework", "Cocoa",
             "-framework", "WebKit", str(helpers / "webview_probe.m"), "-o", str(library)], check=True)
     script = root / "bin/webview-probe.js"
     shutil.copy2(helpers / "webview_probe.js", script)
+    if tour:
+        with script.open('a') as output:
+            output.write('\n' + (helpers / 'webview_tour.js').read_text())
     # Set DYLD variables after sandbox-exec: macOS strips them at protected system executables.
     return ["/usr/bin/env", f"DYLD_INSERT_LIBRARIES={library}",
             f"REPOMON_WEBVIEW_SCRIPT={script}", f"REPOMON_WEBVIEW_LOG={root}/out/webview.jsonl",
-            str(root / "bin/repomon-desktop")]
+            *([f"REPOMON_WEBVIEW_TOUR_COMMAND={root}/out/tour-command"] if tour else []),
+            str(executable)]
+
+
+def run_tour(root, phase):
+    command = root / 'out/tour-command'
+    command.write_text(phase)
+    started = time.monotonic()
+    seen = 0
+    with (root / 'out/tour.log').open('a') as log:
+        while time.monotonic() - started < 300:
+            path = root / 'out/webview.jsonl'
+            lines = path.read_text().splitlines() if path.exists() else []
+            for line in lines[seen:]:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                seen += 1
+                body = row.get('body', row)
+                if body.get('phase') != phase or not body.get('event', '').startswith('tour-'):
+                    continue
+                text = f"[webview {phase} +{time.monotonic() - started:.2f}s] {json.dumps(body)}"
+                print(text, flush=True)
+                log.write(text + '\n')
+                log.flush()
+                if body['event'] == 'tour-complete':
+                    return
+                if body['event'] == 'tour-error':
+                    raise RuntimeError(f"WebKit tour failed: {body}; see {root}/out/webview.jsonl")
+            time.sleep(0.2)
+    raise RuntimeError(f"WebKit tour {phase} timed out; see {root}/out/webview.jsonl")
 
 
 def rows(root, pid):

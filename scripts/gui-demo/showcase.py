@@ -8,15 +8,17 @@ from pathlib import Path
 import pwd
 import shutil
 import signal
+import socket
 import subprocess as sp
 import sys
 import tempfile
 import time
 
-from fixtures import git, seed, seed_usage, write
+from fixtures import seed, seed_usage, write
 from rpc import call
 from connection_probe import DesktopProbe
 import webview_probe
+import socket_audit
 
 HELPERS = Path(__file__).resolve().parent
 REPO = HELPERS.parent.parent
@@ -44,6 +46,12 @@ def daemon_pids():
                   if Path(line.split(None, 1)[1]).name == "repomond")
 
 
+def desktop_binary(root):
+    # Avoid ambiguous name-based System Events references after unix-id lookups.
+    # A unique basename prevents a reference from resolving to the operator's open app.
+    return root / "bin" / ("repomon-demo-" + root.name.split(".", 1)[1])
+
+
 def verify_desktop(root, app, probe, baseline_pids):
     lanes = call(root, "lane.list")
     def connected():
@@ -55,6 +63,8 @@ def verify_desktop(root, app, probe, baseline_pids):
             return evidence
         return None
     evidence = eventually(connected, "desktop fetched all 5 repos and 8 lanes from the seeded daemon and selected a viewport", 30)
+    evidence['socket_audit'] = socket_audit.verify(root, app.pid, os.getpid())
+    log("PASS lsof: all desktop socket peers belong to this sandbox or the desktop itself")
     after = daemon_pids()
     assert after == baseline_pids, f"repomond PID set changed during app launch: {baseline_pids} to {after}"
     evidence['repomond_pids_before_app'] = baseline_pids
@@ -95,7 +105,8 @@ def prepare(root, bin_dir):
     for directory in ("WebKit", "Caches", "Containers", "Application Support", "Preferences"):
         (root / "cocoa/Library" / directory).mkdir(parents=True)
     for name in ("repomond", "repomon-desktop", "repomon"):
-        shutil.copy2(bin_dir / name, root / "bin" / name)
+        destination = desktop_binary(root) if name == "repomon-desktop" else root / "bin" / name
+        shutil.copy2(bin_dir / name, destination)
     for name in ("fake_agent.py", "rpc.py"):
         shutil.copy2(HELPERS / name, root / "bin" / name)
     (root / "bin" / "fake_agent.py").chmod(0o755)
@@ -110,9 +121,17 @@ def prepare(root, bin_dir):
 (allow default)
 (deny file-read* file-write* (subpath {json.dumps(personal_home)}))
 (deny network-outbound (remote ip "*:*"))
+(deny file-read* file-write* network-outbound
+    (regex #"^(/private)?/tmp/repomon-[^/]*[.]sock$"))
+(deny file-read* file-write* network-outbound
+    (literal "/tmp/repomon-{pwd.getpwuid(os.getuid()).pw_name}.sock")
+    (literal "/private/tmp/repomon-{pwd.getpwuid(os.getuid()).pw_name}.sock"))
 ''')
     write(root / "app-guard.sb", (root / "guard.sb").read_text() +
-          f'(deny process-exec (literal {json.dumps(str(root / "bin/repomond"))}))\n')
+          f'''(deny network-outbound (remote unix-socket))
+(allow network-outbound (remote unix-socket (subpath {json.dumps(str(root))})))
+(deny process-exec (literal {json.dumps(str(root / "bin/repomond"))}))
+''')
     label = root.name.replace(".", "-")
     config = f'''socket_path = "{root}/app.sock"
 theme = "dark"
@@ -121,6 +140,8 @@ tmux_session = "{label}"
 auto_continue = true
 notify_sound_needs_you = false
 notify_sound_repomind_needs_you = false
+[usage]
+refresh_prices = false
 [repomind]
 home = "{root}/repomind"
 basic_memory_config_dir = "{root}/memory"
@@ -165,30 +186,20 @@ def environment(root):
 
 def fleet(root):
     rpc = lambda method, **params: call(root, method, params)
-    repos = {name: rpc("repo.add", path=str(root / "repos" / name))["id"]
-             for name in ("orbit-api", "meadow-web", "forge-cli", "atlas-docs")}
-    branches = {}
-    for name, branch, actor in [("orbit-api", "feat/rate-limit-headers", "permission"),
-                                 ("meadow-web", "fix/nav-focus-trap", "hero"),
-                                 ("forge-cli", "fix/windows-console", "encoding")]:
-        path = root / "worktrees" / branch.replace("/", "-")
-        lane = rpc("lane.create", repo_id=repos[name], branch=branch, path=str(path))
-        branches[actor] = lane["id"]
-    lanes = rpc("lane.list")
+    for name in ("orbit-api", "meadow-web", "forge-cli", "atlas-docs"):
+        rpc("repo.add", path=str(root / "repos" / name))
+    lanes = eventually(lambda: (rows if len(rows := rpc("lane.list")) == 8 else None),
+                       "all preseeded worktrees registered", 30)
+    branches = {actor: next(lane['id'] for lane in lanes if lane['worktree']['branch'] == branch)
+                for actor, branch in (("permission", "feat/rate-limit-headers"),
+                                      ("hero", "fix/nav-focus-trap"),
+                                      ("encoding", "fix/windows-console"))}
     controller = next(lane for lane in lanes if lane.get("role") == "controller")
     rpc("agent.pin", lane_id=controller["id"], pinned=True)
     roots = {lane["repo"]["name"]: lane["id"] for lane in lanes if lane["worktree"]["branch"] == "main"}
     assignments = {**branches, "api": roots["orbit-api"], "web": roots["meadow-web"],
                    "console": roots["forge-cli"], "docs": roots["atlas-docs"]}
     hero = root / "worktrees/fix-nav-focus-trap"
-    write(hero / "src/hooks/useMediaQuery.ts", 'export const isCompact = () => matchMedia("(max-width: 640px)").matches;\n')
-    git(hero, "add", "--", "src/hooks/useMediaQuery.ts")
-    git(hero, "commit", "-qm", "feat: detect compact navigation layouts")
-    menu = hero / "src/components/MobileMenu.tsx"
-    menu.write_text(menu.read_text().replace('  const [open, setOpen] = useState(false);',
-        '  const [open, setOpen] = useState(false);\n  // Restore focus to the trigger after closing the menu.'))
-    write(hero / "src/components/useFocusTrap.ts", 'export function useFocusTrap(root: HTMLElement) {\n  root.querySelector<HTMLElement>("a, button")?.focus();\n}\n')
-    write(root / "worktrees/feat-rate-limit-headers/src/routes/headers.ts", 'export const REMAINING_HEADER = "X-RateLimit-Remaining";\n')
     seed_usage(root, REPO, [root / "repos/orbit-api", hero, root / "repos/forge-cli"])
     rpc("playbook.save", name="release-review", content="# Release review\n\n1. Read the lane diff.\n2. Check tests and usage.\n3. Ask the operator before publishing.\n")
     rpc("supervision.set", lane_id=assignments["permission"], enabled=True, classes={"command_exec": "hold", "push_remote": "hold"})
@@ -223,6 +234,9 @@ def verify(root, assignments):
         return lanes
 
     lanes = eventually(classified, "lane.list: 5 repos, 8 lanes, 6 kinds and all four statuses")
+    hero_state = next(lane['state'] for lane in lanes if lane['id'] == assignments['hero'])
+    assert hero_state['dirty']['unstaged'] > 0 and hero_state['dirty']['untracked'] > 0, hero_state
+    assert not hero_state.get('merged'), hero_state
     for lane in lanes:
         sessions = lane["agent_sessions"]
         agent = sessions[0] if sessions else {"agent": "none", "status": "idle"}
@@ -262,12 +276,16 @@ def verify(root, assignments):
 
 def run_tour(root, tour, phase, children):
     """Tee AppleScript diagnostics to the terminal and retained sandbox evidence."""
+    if tour is None:
+        return webview_probe.run_tour(root, phase)
     with (root / "out/tour.log").open("a") as tour_log:
+        started = time.monotonic()
         log(f"Starting AX phase: {phase}; log: {root}/out/tour.log")
         process = sp.Popen([str(arg) for arg in tour + [phase, root / "out"]],
                            cwd=root, stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1)
         children.append(process)
         for line in process.stdout:
+            line = f"[{phase} +{time.monotonic() - started:.2f}s] {line}"
             print(line, end="", flush=True)
             tour_log.write(line)
             tour_log.flush()
@@ -281,13 +299,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="verify, launch, wait, clean up; never capture")
     parser.add_argument("--tour", action="store_true", help="also rehearse the tour during --dry-run")
+    parser.add_argument("--tour-driver", choices=("webview", "ax"), default="webview",
+                        help="recorder-only WebKit controls (default), or System Events AX rehearsal")
     parser.add_argument("--still", action="store_true", help="capture the GIF opening hero frame")
     parser.add_argument("--keep-sandbox", action="store_true", help="keep fixtures and validation logs after stopping all demo processes")
     parser.add_argument("--diagnose-webview", action="store_true", help="compile a recorder-only console/DOM probe; verify WebKit storage without AX or capture")
-    parser.add_argument("--no-guard", action="store_true", help="A/B only: disable the desktop OS guard; daemon and fake-agent guards remain active")
     parser.add_argument("--skip-build", action="store_true", help="compatibility flag; this script never builds the app")
     parser.add_argument("--bin-dir", type=Path, default=REPO / "target/release", help="directory containing matching repomond, repomon-desktop and repomon binaries")
     args = parser.parse_args()
+    webview_tour = args.tour_driver == "webview" and (not args.dry_run or args.tour)
+    probe_enabled = args.diagnose_webview or webview_tour
     if sys.platform != "darwin":
         parser.error("window recording and the tour require macOS")
     if args.still and args.dry_run:
@@ -295,7 +316,7 @@ def main():
     for name in ("repomond", "repomon-desktop", "repomon"):
         if not (args.bin_dir / name).is_file():
             parser.error(f"Missing {name}; pass --bin-dir with existing matching binaries. No builds are run.")
-    for tool in ("tmux", "git", "python3") + (("xcrun",) if args.diagnose_webview else ()) + (() if args.dry_run else ("ffmpeg", "ffprobe", "swift")):
+    for tool in ("tmux", "git", "python3") + (("xcrun",) if probe_enabled else ()) + (() if args.dry_run else ("ffmpeg", "ffprobe", "swift")):
         if not shutil.which(tool):
             parser.error(f"Missing tool: {tool}")
     before = production_pids()
@@ -342,31 +363,45 @@ except PermissionError:
 else:
     raise SystemExit("Desktop guard allowed a second repomond execution")
 """
-        if args.no_guard:
-            app_guard = []
-            log("A/B mode: desktop OS guard disabled; disposable environment and daemon guard retained")
-        else:
-            run(app_guard + [sys.executable, "-c", spawn_probe, root / "bin/repomond"], env=env, cwd=root)
-            log("PASS desktop guard denies spawning repomond")
+        run(app_guard + [sys.executable, "-c", spawn_probe, root / "bin/repomond"], env=env, cwd=root)
+        log("PASS desktop guard denies spawning repomond")
+        # Probe an owned sentinel, never the operator's real socket, including the /tmp alias.
+        sentinel = Path("/private/tmp") / ("repomon-guard-check." + root.name.split(".", 1)[1] + ".sock")
+        with socket.socket(socket.AF_UNIX) as listener:
+            try:
+                listener.bind(str(sentinel))
+                listener.listen()
+                deny_probe = "import errno,socket,sys; s=socket.socket(socket.AF_UNIX); assert s.connect_ex(sys.argv[1]) == errno.EPERM"
+                for endpoint in (sentinel, Path("/tmp") / sentinel.name):
+                    run(app_guard + [sys.executable, "-c", deny_probe, endpoint], env=env, cwd=root)
+            finally:
+                sentinel.unlink(missing_ok=True)
+        log("PASS production-pattern socket guard, including /tmp alias (owned sentinel only)")
         desktop_probe = DesktopProbe(root, daemon.pid)
-        app_env = {**env, "REPOMON_SOCKET": str(desktop_probe.endpoint)}
+        app_env = {**env, "REPOMON_SOCKET": str(desktop_probe.endpoint),
+                   "REPOMON_MCP_SOCKET": str(desktop_probe.endpoint)}
         baseline_pids = daemon_pids()
         write(root / "out/launch.json", json.dumps({
             "app_endpoint": app_env["REPOMON_SOCKET"], "daemon_endpoint": str(root / "demo.sock"),
             "config": str(root / "config/repomon/config.toml"),
-            "desktop_guard": not args.no_guard, "diagnose_webview": args.diagnose_webview,
+            "desktop_guard": True, "diagnose_webview": args.diagnose_webview,
+            "tour_driver": args.tour_driver,
+            "executable": str(desktop_binary(root)),
             "cocoa_home": env["CFFIXED_USER_HOME"],
-            "binary_sha256": {name: hashlib.sha256((root / "bin" / name).read_bytes()).hexdigest()
+            "binary_sha256": {name: hashlib.sha256((desktop_binary(root) if name == "repomon-desktop" else root / "bin" / name).read_bytes()).hexdigest()
                               for name in ("repomon-desktop", "repomond")},
         }, indent=2))
-        command = webview_probe.launch_command(root, HELPERS) if args.diagnose_webview else [root / "bin/repomon-desktop"]
+        command = webview_probe.launch_command(root, HELPERS, desktop_binary(root), tour=webview_tour) if probe_enabled else [desktop_binary(root)]
+        # sandbox-exec can pass its pre-sandbox system logging socket through exec. Close
+        # inherited descriptors before loading the app, leaving only its redirected stdio.
+        command = [sys.executable, "-c", "import os,sys; os.closerange(3,65536); os.execv(sys.argv[1],sys.argv[1:])", *command]
         app_log = (root / "out/app.log").open("w")
         app = sp.Popen([str(a) for a in app_guard + command], env=app_env, cwd=root, stdout=app_log, stderr=sp.STDOUT)
         children.append(app)
         desktop_probe.expect_app(app.pid)
         verify_desktop(root, app, desktop_probe, baseline_pids)
         log(f"PASS isolated app launched (PID {app.pid})")
-        if args.diagnose_webview:
+        if probe_enabled:
             result = webview_probe.verify(root, app)
             log(f"PASS WebKit localStorage and IndexedDB; Cocoa Library: {result['library']}")
             log(f"PASS WebKit DOM: 8 rendered lane buttons; chips {result['chips']}; see {root}/out/webview-check.json")
@@ -374,16 +409,20 @@ else:
             log("Dry run complete. No screen capture or permission probe was performed.")
             completed = True
             return
-        tour = ["osascript", HELPERS / "tour.applescript", str(app.pid)]
+        tour = None if webview_tour else ["osascript", HELPERS / "tour.applescript", str(app.pid)]
         run_tour(root, tour, "opening", children)
+        socket_audit.verify(root, app.pid, os.getpid())
         if args.dry_run:
             run_tour(root, tour, "tour", children)
+            socket_audit.verify(root, app.pid, os.getpid())
             log("PASS tour rehearsal completed without screen capture")
             completed = True
             return
-        window_id = sp.check_output(["swift", str(HELPERS / "window.swift"), str(app.pid)], text=True).strip()
-        assert window_id.isdecimal(), "No unique demo window ID; refusing capture"
-        capture(root, window_id, tour, args.still, children)
+        window = json.loads(sp.check_output(["swift", str(HELPERS / "window.swift"), str(app.pid), "--json", "--park-cursor"], text=True))
+        assert window['pid'] == app.pid and window['id'] > 0, "No demo window ID; refusing capture"
+        write(root / "out/capture-window.json", json.dumps(window, indent=2))
+        capture(root, window, tour, args.still, children)
+        socket_audit.verify(root, app.pid, os.getpid())
         completed = True
     finally:
         if args.diagnose_webview and app:
@@ -418,36 +457,62 @@ else:
             shutil.rmtree(root)
 
 
-def capture(root, window_id, tour, still, children):
-    raw = root / "out" / ("window.png" if still else "window.mov")
+def capture(root, window, tour, still, children):
+    raw = root / "out" / ("window.png" if still else "frames")
     destination = REPO / "docs" / ("preview.png" if still else "gui-demo.gif")
     # Window-ID-only input. Normalize Retina scale, then take the top-left content rectangle.
     # There is deliberately no whole-display fallback on a permission or window failure.
-    content = "scale=1440:-1:flags=lanczos,setsar=1"
+    window_id = str(window['id'])
+    height = round(1440 * window['height'] / window['width'])
+    content = f"scale=1440:-1:flags=lanczos,crop=1440:{height}:0:0,setsar=1"
     if still:
-        run(["screencapture", "-x", "-o", "-l", window_id, raw])
+        run(["swift", HELPERS / "record.swift", str(window['pid']), window_id, raw])
         run(["ffmpeg", "-y", "-v", "error", "-i", raw, "-vf", content, "-frames:v", "1", root / "out/content.png"])
         shutil.copy2(root / "out/content.png", destination)
     else:
-        recorder = sp.Popen(["screencapture", "-v", "-V", "94", "-x", "-o", "-l", window_id, str(raw)])
+        # macOS composites its purple sharing badge into the window's native traffic
+        # lights even with child windows excluded. Preserve those static 76x34 pixels
+        # from this same window before recording. No application content is replaced.
+        clean = root / "out/opening-chrome.png"
+        run(["screencapture", "-x", "-o", "-a", "-l", window_id, root / "out/opening.png"])
+        run(["ffmpeg", "-y", "-v", "error", "-i", root / "out/opening.png", "-vf",
+             f"crop=iw*76/1440:ih*34/{height}:0:0", "-frames:v", "1", clean])
+        stop = root / "out/recording-stop"
+        ready = root / "out/recording-ready"
+        recorder = sp.Popen(["swift", str(HELPERS / "record.swift"), str(window['pid']), window_id,
+                             str(raw), str(stop), str(ready)])
         children.append(recorder)
-        time.sleep(2)
-        if recorder.poll() is not None:
-            raise RuntimeError("Window capture failed. Run from a terminal with Screen Recording permission.")
+        def recording_ready():
+            if recorder.poll() is not None:
+                raise AssertionError("Direct window capture failed before starting")
+            return ready.exists()
+        eventually(recording_ready, "direct window recording ready (cursor and child windows excluded)", 30)
         run_tour(root, tour, "tour", children)
-        recorder.wait(timeout=20)
+        socket_audit.verify(root, window["pid"], os.getpid())
+        if recorder.poll() is not None:
+            raise RuntimeError("Window recording ended before the tour completed")
+        stop.write_text("finish")
+        recorder.wait(timeout=30)
         if recorder.returncode:
             raise RuntimeError("Window recording failed")
         candidate = root / "out/showcase.gif"
-        for fps, colors in ((12, 256), (10, 256), (10, 128), (10, 96)):
-            graph = f"{content},fps={fps},scale=1200:750:flags=lanczos,split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle"
-            run(["ffmpeg", "-y", "-v", "error", "-i", raw, "-filter_complex", graph, "-loop", "0", candidate])
+        palette = root / "out/palette.png"
+        inputs = ["-f", "concat", "-safe", "0", "-i", raw / "frames.ffconcat", "-i", clean]
+        for fps, colors in ((12, 256), (10, 256), (8, 256), (8, 192)):
+            # Restore static native controls before the only resize. Two palette passes
+            # avoid buffering a whole Retina recording in memory. Flatten alpha so GIF
+            # can encode unchanged pixels as deltas, rather than clearing every frame.
+            base = f"[0:v][1:v]overlay=0:0:eof_action=repeat,fps={fps},scale=1200:-1:flags=lanczos,setsar=1,format=rgb24"
+            run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex",
+                 f"{base},palettegen=max_colors={colors}:stats_mode=full", "-frames:v", "1", palette])
+            run(["ffmpeg", "-y", "-v", "error", *inputs, "-i", palette, "-filter_complex",
+                 f"{base}[v];[v][2:v]paletteuse=dither=none:diff_mode=rectangle", "-loop", "0", candidate])
             log(f"GIF candidate: {fps} fps, {colors} colors, {candidate.stat().st_size / 1_000_000:.2f} MB")
             if candidate.stat().st_size < 15_000_000:
                 shutil.copy2(candidate, destination)
                 break
         else:
-            raise RuntimeError(f"GIF exceeds 15 MB; recording retained at {raw} for tuning.")
+            raise RuntimeError(f"GIF exceeds 15 MB; lossless frames retained at {raw} for tuning.")
     log(f"Wrote {destination} ({destination.stat().st_size / 1_000_000:.2f} MB)")
 
 

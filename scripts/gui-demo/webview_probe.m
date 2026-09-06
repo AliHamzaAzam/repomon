@@ -36,13 +36,38 @@ static void record(NSDictionary *event) {
     [config.userContentController addScriptMessageHandler:[DemoProbe new] name:@"demoProbe"];
     [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     record(@{@"event": @"webview-init", @"home": NSHomeDirectory(), @"library": NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES)});
-    return [self demo_initWithFrame:frame configuration:config];
+    WKWebView *view = [self demo_initWithFrame:frame configuration:config];
+    NSString *commandPath = NSProcessInfo.processInfo.environment[@"REPOMON_WEBVIEW_TOUR_COMMAND"];
+    if (commandPath) {
+        __block NSString *lastCommand = nil;
+        __weak WKWebView *weakView = view;
+        [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *timer) {
+            WKWebView *webview = weakView;
+            if (!webview) { [timer invalidate]; return; }
+            NSString *phase = [NSString stringWithContentsOfFile:commandPath encoding:NSUTF8StringEncoding error:nil];
+            if (!phase || [phase isEqualToString:lastCommand]) return;
+            if (![phase isEqualToString:@"opening"] && ![phase isEqualToString:@"tour"]) return;
+            lastCommand = phase;
+            if ([phase isEqualToString:@"opening"]) {
+                NSWindow *window = webview.window;
+                NSRect visible = window.screen.visibleFrame;
+                [window setFrame:NSMakeRect(visible.origin.x, NSMaxY(visible) - 900, 1440, 900) display:YES];
+                [NSApp activateIgnoringOtherApps:YES];
+                [window makeKeyAndOrderFront:nil];
+            }
+            NSString *js = [NSString stringWithFormat:@"window.repomonDemoTour.run('%@'); undefined", phase];
+            [webview evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
+                if (error) record(@{@"event": @"tour-error", @"phase": phase, @"message": error.localizedDescription});
+            }];
+        }];
+    }
+    return view;
 }
 @end
 __attribute__((constructor)) static void install(void) {
     @autoreleasepool {
         if (!NSProcessInfo.processInfo.environment[@"REPOMON_WEBVIEW_LOG"] ||
-            ![NSProcessInfo.processInfo.processName isEqualToString:@"repomon-desktop"]) return;
+            ![NSProcessInfo.processInfo.processName hasPrefix:@"repomon-demo-"]) return;
         Method original = class_getInstanceMethod(WKWebView.class, @selector(initWithFrame:configuration:));
         Method replacement = class_getInstanceMethod(WKWebView.class, @selector(demo_initWithFrame:configuration:));
         method_exchangeImplementations(original, replacement);

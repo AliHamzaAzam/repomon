@@ -58,6 +58,29 @@ export function MobileMenu() {
         write(path / "CHANGELOG.md", "# Release notes\n\n- Improve keyboard navigation and platform checks.\n")
         git(path, "add", "--", "CHANGELOG.md")
         git(path, "commit", "-qm", "docs: prepare the next release")
+    # Finish worktree contents before the daemon's first scan. Its clean-state cache
+    # lasts 180 seconds, and a newly registered filesystem watcher can miss earlier edits.
+    for name, branch in (("orbit-api", "feat/rate-limit-headers"),
+                         ("meadow-web", "fix/nav-focus-trap"),
+                         ("forge-cli", "fix/windows-console")):
+        path = root / "worktrees" / branch.replace("/", "-")
+        git(root / "repos" / name, "worktree", "add", "-q", "-b", branch, str(path))
+    hero = root / "worktrees/fix-nav-focus-trap"
+    write(hero / "src/hooks/useMediaQuery.ts", 'export const isCompact = () => matchMedia("(max-width: 640px)").matches;\n')
+    git(hero, "add", "--", "src/hooks/useMediaQuery.ts")
+    git(hero, "commit", "-qm", "feat: detect compact navigation layouts")
+    menu = hero / "src/components/MobileMenu.tsx"
+    menu.write_text(menu.read_text().replace('  const [open, setOpen] = useState(false);',
+        '  const [open, setOpen] = useState(false);\n  // Restore focus to the trigger after closing the menu.'))
+    write(hero / "src/components/useFocusTrap.ts", 'export function useFocusTrap(root: HTMLElement) {\n  root.querySelector<HTMLElement>("a, button")?.focus();\n}\n')
+    permission = root / "worktrees/feat-rate-limit-headers"
+    write(permission / "src/routes/headers.ts", 'export const REMAINING_HEADER = "X-RateLimit-Remaining";\n')
+    git(permission, "add", "--", "src/routes/headers.ts")
+    git(permission, "commit", "-qm", "feat: publish remaining request quota header")
+    encoding = root / "worktrees/fix-windows-console"
+    write(encoding / "src/main.rs", 'fn main() {\n    println!("forge: UTF-8 console checks passed");\n}\n')
+    git(encoding, "add", "--", "src/main.rs")
+    git(encoding, "commit", "-qm", "fix: normalize console output across platforms")
     for slug, title in [("accessible-release", "Ship the accessible navigation release"),
                         ("windows-confidence", "Verify the Windows console experience")]:
         write(root / "repomind" / "plans" / "active" / f"{slug}.md",

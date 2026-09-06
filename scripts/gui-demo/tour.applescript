@@ -63,11 +63,37 @@ on windowNodes()
     set acc to {}
     tell application "System Events"
         tell (first process whose unix id is demoPID)
-            set rootWindow to front window
+            if unix id is not demoPID then error "AX process reference resolved to a different PID"
+            set demoWindows to windows
         end tell
     end tell
-    return my collectNodes(rootWindow, acc, 0)
+    -- WKWebView popups can expose a tiny native dialog as front window. The real
+    -- page and its portaled controls remain in the main window's AX tree.
+    repeat with rootWindow in demoWindows
+        set acc to my collectNodes(rootWindow, acc, 0)
+    end repeat
+    return acc
 end windowNodes
+
+on mainWindow()
+    set largestWindow to missing value
+    set largestArea to 0
+    tell application "System Events"
+        tell (first process whose unix id is demoPID)
+            if unix id is not demoPID then error "AX main-window lookup resolved to a different PID"
+            repeat with candidate in windows
+                set dimensions to size of candidate
+                set candidateArea to (item 1 of dimensions) * (item 2 of dimensions)
+                if candidateArea > largestArea then
+                    set largestArea to candidateArea
+                    set largestWindow to contents of candidate
+                end if
+            end repeat
+        end tell
+    end tell
+    if largestWindow is missing value then error "No demo main window"
+    return largestWindow
+end mainWindow
 
 on flatText(rawText)
     set savedDelimiters to AppleScript's text item delimiters
@@ -136,7 +162,7 @@ on findButton(nodes, labelText, exactMatch, wantedRole)
     repeat with node in nodes
         set fields to my nodeFields(node)
         set nodeRole to item 1 of fields
-        if (nodeRole is "AXButton" or nodeRole is "AXRadioButton") and (wantedRole is "" or nodeRole is wantedRole) then
+        if (nodeRole is "AXButton" or nodeRole is "AXRadioButton" or nodeRole is "AXCheckBox" or nodeRole is "AXPopUpButton") and (wantedRole is "" or nodeRole is wantedRole) then
             if my fieldsMatch(fields, labelText, exactMatch) then return {contents of node, "button fields"}
         end if
     end repeat
@@ -149,7 +175,7 @@ on findButton(nodes, labelText, exactMatch, wantedRole)
                     set ancestor to my parentNode(ancestor)
                     set parentFields to my nodeFields(ancestor)
                     set parentRole to item 1 of parentFields
-                    if (parentRole is "AXButton" or parentRole is "AXRadioButton") and (wantedRole is "" or parentRole is wantedRole) then
+                    if (parentRole is "AXButton" or parentRole is "AXRadioButton" or parentRole is "AXCheckBox" or parentRole is "AXPopUpButton") and (wantedRole is "" or parentRole is wantedRole) then
                         return {ancestor, "static text child: " & my describeNode(node)}
                     end if
                     if parentRole is "AXWindow" or parentRole is "AXApplication" then exit repeat
@@ -176,19 +202,20 @@ on waitForFleet()
     repeat
         try
             set nodes to my windowNodes()
+            -- Check the expected fleet first. An absent Skip setup search traverses
+            -- the whole tree twice and previously consumed 34 seconds on a ready fleet.
+            repeat with node in nodes
+                set fields to my nodeFields(node)
+                if item 1 of fields is "AXStaticText" and my fieldsMatch(fields, "orbit-api", false) then
+                    log "[gui-demo] Fleet ready after " & ((current date) - readinessStart) & " s; onboarding skipped=" & skipSeen
+                    return
+                end if
+            end repeat
             set skipButton to my findButton(nodes, "Skip setup", true, "")
             if skipButton is not missing value then
                 set skipSeen to true
                 log "[gui-demo] Onboarding detected; pressing Skip setup in the isolated app"
                 my pressFound(skipButton, "Skip setup")
-            else
-                repeat with node in nodes
-                    set fields to my nodeFields(node)
-                    if item 1 of fields is "AXStaticText" and my fieldsMatch(fields, "orbit-api", false) then
-                        log "[gui-demo] Fleet ready after " & ((current date) - readinessStart) & " s; onboarding skipped=" & skipSeen
-                        return
-                    end if
-                end repeat
             end if
         on error readinessError
             set lastError to readinessError
@@ -205,6 +232,7 @@ on activateDemo()
             set demoProcesses to (application processes whose unix id is demoPID)
             if (count of demoProcesses) > 0 then
                 tell item 1 of demoProcesses
+                    if unix id is not demoPID then error "AX activation resolved to a different PID"
                     set frontmost to true
                     if exists front window then return
                 end tell
@@ -243,6 +271,26 @@ end escapeKey
 on buttonMatching(labelText, exactMatch, optional)
     return my buttonWithRole(labelText, exactMatch, optional, "")
 end buttonMatching
+
+on pickerButton(labelText)
+    set lookupStart to current date
+    repeat
+        repeat with node in my windowNodes()
+            set fields to my nodeFields(node)
+            if my fieldsMatch(fields, "Choose multitasking panes", true) then
+                set pickerNodes to my collectNodes(node, {}, 0)
+                set found to my findButton(pickerNodes, labelText, false, "")
+                if found is not missing value then
+                    my pressFound(found, labelText)
+                    return
+                end if
+            end if
+        end repeat
+        if ((current date) - lookupStart) >= lookupSeconds then exit repeat
+        delay 0.5
+    end repeat
+    my lookupFailure("Required pane-picker control missing: " & labelText)
+end pickerButton
 
 on buttonWithRole(labelText, exactMatch, optional, wantedRole)
     my activateDemo()
@@ -318,22 +366,25 @@ end openFoundFile
 
 on holdUntil(secondsFromStart, beat)
     set tourPhase to beat
-    log "[gui-demo] Tour: " & beat
+    log "[gui-demo] Tour at " & ((get current date) - tourStart) & " s: " & beat
     set waitSeconds to secondsFromStart - ((get current date) - tourStart)
-    if waitSeconds < -2 then error "Tour fell behind its recording schedule at " & beat
+    -- AX calls vary with tree size. Preserve a readable dwell on every verified view;
+    -- the recorder follows tour completion instead of cutting off at a fixed deadline.
+    if waitSeconds < 3 then set waitSeconds to 3
     if waitSeconds > 0 then delay waitSeconds
 end holdUntil
 
 on opening()
     my activateDemo()
+    set demoWindow to my mainWindow()
     tell application "System Events"
         tell (first process whose unix id is demoPID)
             -- Top-left corner: macOS clamps the window under the menu bar and above the Dock, so
             -- a 1440x900 request on a 1512x982 laptop display may come back shorter. Accept the
             -- largest size that fits; the recorder crops to the window's real bounds.
-            set position of front window to {0, 0}
-            set size of front window to {1440, 900}
-            set actualSize to size of front window
+            set position of demoWindow to {0, 0}
+            set size of demoWindow to {1440, 900}
+            set actualSize to size of demoWindow
             if (item 1 of actualSize) < 1280 or (item 2 of actualSize) < 760 then error "Display cannot accommodate a demo window of at least 1280x760 (got " & (item 1 of actualSize) & "x" & (item 2 of actualSize) & "); hide the Dock or use a larger display"
             log "demo window size " & (item 1 of actualSize) & "x" & (item 2 of actualSize)
         end tell
@@ -361,7 +412,7 @@ on run argv
     my buttonMatching("Configure multitasking panes", true, false)
     -- Default selection has six panes. Remove two through the picker, then verify four.
     repeat 2 times
-        my buttonMatching("Hide ", false, false)
+        my pickerButton("Hide ")
     end repeat
     my escapeKey()
     my requireText("4 panes")
