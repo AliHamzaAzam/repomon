@@ -1,9 +1,4 @@
-//! Daemon boot diagnostics: the answers behind a connection pill that says "Retrying".
-//!
-//! The app spawns `repomond` detached and windowless, so when the daemon cannot start there is no
-//! console to read and no dialog to dismiss. These commands give the frontend the three things a
-//! stuck user actually needs: does the bundled binary run at all, where is its log, and what would
-//! I paste into an issue.
+//! Probes detached daemon startup and exposes logs and diagnostics without requiring a console.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,12 +10,11 @@ use tauri::{AppHandle, State};
 
 use crate::state::AppState;
 
-/// How long `repomond --version` is given before it is treated as a failure. A binary that cannot
-/// print its own version in this long is not going to serve a fleet.
+/// Bounds the daemon version probe so a hung binary cannot stall diagnostics.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The onboarding System check's "Daemon binary launches" row, and the same probe behind the
-/// Settings card.
+/// Reports whether the resolved daemon binary launches, with its version, log path, and failure
+/// detail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DaemonBootCheck {
     /// The binary ran and printed a version.
@@ -37,9 +31,7 @@ pub struct DaemonBootCheck {
     pub log_path: String,
 }
 
-/// Run `repomond --version` from wherever the app resolves the daemon, and report exactly what
-/// happened. This is the check that would have told the operator, in one line, that their
-/// `repomond.exe` was dying in the loader instead of failing to bind a pipe.
+/// Runs the resolved daemon’s version command and reports startup success or failure.
 #[tauri::command]
 pub async fn daemon_boot_check() -> DaemonBootCheck {
     tauri::async_runtime::spawn_blocking(probe_daemon_binary)
@@ -135,8 +127,7 @@ fn probe_daemon_binary() -> DaemonBootCheck {
     }
 }
 
-/// `child.wait_with_output()` with a ceiling. A daemon binary that hangs on start (a blocked
-/// loader, a filesystem filter driver mid-scan) would otherwise wedge the onboarding row forever.
+/// Waits for child output with a deadline so a blocked loader cannot wedge onboarding.
 pub(crate) fn wait_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
@@ -164,8 +155,7 @@ pub(crate) fn wait_with_timeout(
     }
 }
 
-/// Open the daemon log in whatever the OS uses for a text file. The log directory is created if
-/// the daemon has never run, so this never fails with "no such file" on a fresh install.
+/// Opens the daemon log with the OS text-file handler, creating its directory for a fresh install.
 #[tauri::command]
 pub fn open_daemon_log(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -183,9 +173,8 @@ pub fn open_daemon_log(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// The block behind "Copy diagnostics": everything an issue report needs and nothing a user has to
-/// go and look up. Built in Rust because half of it (the resolved daemon path, the log tail, the
-/// real endpoint name) is not visible to the webview at all.
+/// Builds diagnostics from native-only state, including the resolved daemon path, log tail, and IPC
+/// endpoint.
 pub fn diagnostics_report(
     app_version: &str,
     endpoint: &str,

@@ -17,10 +17,8 @@ use crate::state::AppState;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 const FLUSH_BYTES: usize = 32 * 1024;
 const MAX_PENDING: usize = 1024 * 1024;
-/// Minimum spacing between resync capture attempts. While a pane streams heavily the daemon
-/// keeps answering `stable: false`; retrying on every 16ms flush tick hammered a 500-line
-/// scrollback capture (held under the host's dispatcher lock) ~60x/s. One attempt per 100ms
-/// still repaints within a frame or two of the pane going quiet.
+/// Space resync captures to avoid repeatedly locking the host for scrollback while the pane is
+/// still repainting.
 const RESYNC_RETRY: Duration = Duration::from_millis(100);
 const CHANNEL_BYTES: u8 = 0;
 const CHANNEL_GRID: u8 = 1;
@@ -73,7 +71,7 @@ impl StreamClosed {
 }
 
 /// One routed item on a window's terminal channel: ordered bytes/grid, target closure, or notice
-/// that the upstream daemon subscription lagged (every receiver must resync — chunks were dropped).
+/// that the upstream daemon subscription lagged (every receiver must resync - chunks were dropped).
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteFrame {
     Chunk(ByteChunk),
@@ -83,7 +81,7 @@ pub enum RouteFrame {
 }
 
 /// Match and decode one `event.agent.bytes` notification into `(window, chunk)`. Base64 is
-/// decoded exactly once, in the demux — panes receive ready bytes instead of each scanning
+/// decoded exactly once, in the demux - panes receive ready bytes instead of each scanning
 /// and decoding every event on the connection.
 fn event_chunk(event: &Notification) -> Option<(String, ByteChunk)> {
     if event.method != "event.agent.bytes" {
@@ -138,10 +136,8 @@ fn event_stream_closed(event: &Notification) -> Option<(String, StreamClosed)> {
     Some((window.to_string(), StreamClosed { generation }))
 }
 
-/// Start the one demux task that owns the app's daemon event subscription: byte chunks are
-/// decoded once and routed to exactly their window's channel; every other event is
-/// re-broadcast on `ui_events` for `daemon_subscribe`. Before this, every mounted pane held
-/// its own subscription — each byte chunk was cloned per pane and filtered N-1 times.
+/// Starts one subscription demultiplexer, decoding byte chunks once for their window channels and
+/// forwarding other events to UI subscribers.
 pub(crate) async fn ensure_demux(state: &State<'_, AppState>) -> Result<(), RpcFailure> {
     let client = state
         .client
@@ -293,11 +289,8 @@ struct Resync {
     cursor: StreamCursor,
 }
 
-/// Total time `capture_resync` will spend waiting for a *stable* capture before falling back to
-/// the best-effort one it already has. A freshly spawned TUI (e.g. codex booting its own screen)
-/// can legitimately stay unstable well past the old ~200ms budget; failing the whole watch over
-/// that is worse than briefly painting a torn frame, since the live byte stream self-heals it
-/// within a frame or two.
+/// Bound stable-capture recovery, retaining a best-effort frame while a newly booting agent is
+/// still repainting.
 const RESYNC_DEADLINE: Duration = Duration::from_millis(2500);
 /// Backoff between resync poll attempts: starts fast for the common already-stable case, backs
 /// off so a genuinely slow-to-settle pane isn't hammered with capture calls for 2.5s straight.
@@ -358,15 +351,8 @@ fn resync_from_capture(
     })
 }
 
-/// Poll `capture` for a stable value until `deadline` elapses, backing off from
-/// `poll_start` up to `poll_max` between attempts. Generic and channel-free so the retry/
-/// deadline/fallback orchestration is unit-testable with a mocked capture function, independent
-/// of any live daemon connection.
-///
-/// Each attempt is individually bounded by whatever time remains in the deadline: a single
-/// hanging `capture()` call (the underlying RPC client's own timeout is far longer than this
-/// function's deadline) cannot by itself blow through `deadline` the way an un-timed `.await`
-/// would.
+/// Poll with backoff for a stable capture, bounding every attempt by the remaining deadline and
+/// retaining the best available fallback.
 async fn poll_capture<F, Fut>(
     mut capture: F,
     deadline: Duration,
@@ -439,10 +425,8 @@ pub async fn term_watch(
     window: String,
     on_bytes: Channel<InvokeResponseBody>,
 ) -> Result<TermWatchAck, RpcFailure> {
-    // A rapid unmount/remount (tab switch, or a re-render that reuses a window id) can arrive
-    // before the previous pane's fire-and-forget `term_unwatch` has finished. Rather than reject
-    // the new pane, tear the stale watch down first and let this one take over. Done before the
-    // daemon `on:true` join below so the old task's `on:false` can't deregister the new watch.
+    // Complete stale-watch teardown before joining again so delayed cleanup cannot deregister the
+    // replacement watch.
     let stale = state.terminal_watches.lock().unwrap().remove(&window);
     if let Some(cancel) = stale {
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -458,7 +442,7 @@ pub async fn term_watch(
         .ok_or_else(RpcFailure::not_connected)?
         .clone();
     // Register this window's byte route (after the stale-watch teardown above, whose ack
-    // guarantees the old watch's cleanup — including its route removal — already ran).
+    // guarantees the old watch's cleanup - including its route removal - already ran).
     let mut route_rx = {
         let mut routes = state.terminal_routes.lock().unwrap();
         routes
@@ -753,10 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_capture_bounds_a_single_hanging_attempt_to_the_deadline() {
-        // Regression: the original loop awaited each capture call with no per-attempt timeout,
-        // so one hung call (the daemon RPC client's own timeout is far longer than this
-        // function's deadline) could block the whole resync well past `deadline`. A capture that
-        // never resolves must still yield within the deadline.
+        // A hung capture must still return within the resync deadline.
         let start = tokio::time::Instant::now();
         let value = poll_capture(
             std::future::pending::<anyhow::Result<Value>>,

@@ -20,7 +20,7 @@ pub struct AppState {
     /// matched, decoded, and routed exactly once instead of being cloned into every mounted
     /// pane's own subscription and filtered N-1 times.
     pub terminal_routes: Arc<Mutex<HashMap<String, broadcast::Sender<Arc<RouteFrame>>>>>,
-    /// Non-bytes daemon events, re-broadcast by the demux for `daemon_subscribe` — so UI
+    /// Non-bytes daemon events, re-broadcast by the demux for `daemon_subscribe` - so UI
     /// event listeners never receive (and drop) the byte firehose.
     pub ui_events: broadcast::Sender<Notification>,
     /// Spawns the demux task exactly once per app run (both `daemon_subscribe` and

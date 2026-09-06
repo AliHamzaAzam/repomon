@@ -8,12 +8,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# Keep the library name distinct from the binary to avoid Windows linker collisions
+# (rust-lang/cargo#8519).
 name = "repomon_desktop"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -35,10 +32,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tauri-plugin-opener = "=2.5.0"
 
-# The GUI's "install the command line" action puts its directory on the *user* PATH, which lives
-# in HKCU\Environment, and tells running processes about it with WM_SETTINGCHANGE. Both crates are
-# already in the workspace lock at these versions (winreg via portable-pty, windows-sys via
-# repomon-core), so this adds an edge rather than a new dependency.
+# User PATH installation needs HKCU environment writes and WM_SETTINGCHANGE notifications.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10"
 windows-sys = { version = "0.59", features = [

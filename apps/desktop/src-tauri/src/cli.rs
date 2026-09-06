@@ -1,15 +1,6 @@
-//! Installing the `repomon` command line from inside the app.
-//!
-//! The bundle already carries every executable the CLI needs: the app, the daemon, and (on
-//! Windows) the per-agent host all ship side by side, and this module publishes the two or three
-//! a terminal cares about into a directory the user's shell can see. macOS and Linux get symlinks
-//! into `~/.local/bin`, so an app update is picked up without reinstalling. Linux AppImage tools
-//! are copied out of the temporary mount and need reinstalling after updates. Windows gets copies in
-//! `%LOCALAPPDATA%\repomon\bin` (a symlink there needs developer mode or an elevated prompt) plus
-//! that directory on the *user* PATH. The machine PATH is never touched.
-//!
-//! Every decision below that can be made without touching the filesystem is a pure function, so
-//! the Windows layout is testable on a Mac.
+//! Installs the bundled executables in the user’s command path. Unix installs use symlinks except
+//! for AppImage bundles; Windows and AppImage installs copy executables and require reinstalling
+//! after an upgrade. Windows updates only the user PATH.
 
 use std::path::{Path, PathBuf};
 
@@ -19,11 +10,7 @@ use serde::Serialize;
 /// install` writes a launchd plist or systemd unit that names `repomond` by path.
 pub const UNIX_TOOLS: [&str; 2] = ["repomon", "repomond"];
 
-/// The Windows set. The agent host joins them because the daemon spawns it by looking next to
-/// itself, so a `repomond.exe` installed alone could start agents nowhere.
-///
-/// Off Windows nothing but this module's own tests reads it. Keeping it compiled everywhere is
-/// the point: the Windows layout is decided here and checked on every platform's CI.
+/// Includes the Windows agent host beside the daemon so installed commands can launch agents.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const WINDOWS_TOOLS: [&str; 3] = ["repomon.exe", "repomond.exe", "repomon-agent-host.exe"];
 
@@ -163,12 +150,8 @@ pub fn install_dir() -> Result<PathBuf, String> {
     }
 }
 
-/// The PATH a terminal on this machine would actually have.
-///
-/// On macOS an app launched from the Dock inherits `/usr/bin:/bin:/usr/sbin:/sbin`, so answering
-/// "is `~/.local/bin` on your PATH" from this process's own environment would tell almost every
-/// user "no" whether or not it is true. Ask the login shell instead, the way the daemon's own
-/// PATH repair does, and fall back to this process's PATH when there is no shell to ask.
+/// Bound the login-shell PATH probe so a shell startup script cannot stall installation status
+/// indefinitely.
 const SHELL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(not(windows))]
@@ -440,11 +423,8 @@ fn retire_copy(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// unix links, Windows copies.
-///
-/// A symlink keeps the CLI in step with the app across updates, which is why unix uses one. On
-/// Windows creating a symlink needs developer mode or an elevated prompt, so the app copies
-/// instead and a new app version republishes the copies on the next Install.
+/// Copy where symlinks are unavailable or the bundle path is temporary; links otherwise follow app
+/// upgrades automatically.
 fn link_or_copy(from: &Path, to: &Path, copy: bool) -> Result<(), String> {
     if copy {
         std::fs::copy(from, to)
@@ -625,11 +605,8 @@ mod windows_path {
         }
     }
 
-    /// Tell every top level window the environment changed, so Explorer (and therefore every
-    /// terminal started from it afterwards) picks up the new PATH without a sign-out. Windows that
-    /// are already open keep the environment they started with either way, which is what
-    /// `WINDOWS_PATH_HINT` says. Best effort: a hung window must not fail the install, hence the
-    /// timeout and the ignored result.
+    /// Notify Explorer of the changed user PATH without waiting indefinitely for hung windows;
+    /// existing terminals retain their inherited environment.
     fn broadcast_environment_change() {
         use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{

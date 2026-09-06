@@ -1,8 +1,5 @@
-//! Grants the Tauri asset protocol read access to a lane worktree root so the frontend can
-//! stream large binary files (PDFs today, and later other non-text assets) straight off disk via
-//! `convertFileSrc` instead of round-tripping them through `file.read_raw`'s base64/8 MiB-capped
-//! RPC. The daemon has no filesystem-serving RPC of its own for this - it is a webview-native
-//! protocol scope grant, so it lives here rather than in `ipc.rs`.
+//! Grants worktree access to Tauri’s asset protocol so large binary viewers can stream files
+//! without the capped base64 RPC.
 
 use std::path::Path;
 
@@ -18,11 +15,8 @@ fn validate_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Allow-lists `path` (and everything under it, recursively) for the asset protocol, so an
-/// `asset://localhost/<path>` (or `convertFileSrc`-built) URL under it can be loaded by the
-/// webview. The frontend calls this once per lane worktree root, the first time a streamed asset
-/// is opened in that lane, and keeps its own per-root set so the call isn't repeated - this
-/// command itself is idempotent either way.
+/// Idempotently grants recursive asset-protocol access to a worktree root for streamed file
+/// previews.
 #[tauri::command]
 pub fn allow_worktree_assets(app: AppHandle, path: String) -> Result<(), String> {
     let candidate = Path::new(&path);

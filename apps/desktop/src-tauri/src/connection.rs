@@ -197,10 +197,8 @@ pub async fn supervise(app: AppHandle, config: Config, socket_override: Option<P
                 )
                 .await;
 
-                // Ensure a daemon is bound again. The OnceCell keeps the original shared client;
-                // its next status call transparently reconnects to the restored endpoint. A
-                // relaunch that fails outright is the more informative of the two failures, so it
-                // replaces the plain socket error in the pill.
+                // The shared client reconnects on its next call; prefer a relaunch failure over the
+                // less specific socket error.
                 if let Err(launch_error) =
                     repomon_core::launch::ensure_daemon(&config, socket_override.clone()).await
                 {

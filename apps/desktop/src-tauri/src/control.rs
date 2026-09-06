@@ -18,30 +18,15 @@ pub struct DaemonServiceInfo {
     pub status: String,
 }
 
-/// Send `daemon.shutdown` with a hard ceiling. `DaemonClient::call`'s 15s timeout only bounds
-/// the *response* wait — the send side (queuing the request onto the writer task's channel) has
-/// no timeout of its own, so a writer stalled against a socket that's mid-death can block this
-/// indefinitely. The frontend's Stop/Start buttons share one `daemonBusy` flag that only clears
-/// when this command's promise settles, so an unbounded hang here doesn't just fail one click —
-/// it permanently disables both buttons, with no way to recover from the GUI. The shutdown
-/// itself is fire-and-forget already (`let _ = ...`), so timing it out and moving on to the
-/// unreachability poll costs nothing.
+/// Bound both request queuing and response waiting so a stalled writer cannot leave daemon controls
+/// busy indefinitely.
 async fn send_shutdown(client: &DaemonClient) {
     let _ =
         tokio::time::timeout(Duration::from_secs(3), client.call("daemon.shutdown", None)).await;
 }
 
-/// Poll `socket` until nothing answers a connect, or `timeout` elapses. A shut-down daemon's
-/// listener can take longer than a fixed sleep to actually close (SQLite/watcher teardown,
-/// system load) — spawning a replacement before that happens used to race the still-dying
-/// process's socket bind, which either failed the respawn outright or (before the transport-level
-/// fix) let the new daemon silently steal the socket file out from under a still-running orphan.
-/// Polling for a real disconnect makes restart wait exactly as long as the old process needs,
-/// no more. Probes with a bare transport connect, not a full `DaemonClient` — a `DaemonClient`
-/// spawns reader/writer/keepalive tasks per attempt, and hammering a daemon that is *actively
-/// mid-shutdown* with dozens of those (one every 50ms) is exactly the kind of extra connection
-/// churn that can widen the shutdown-notify race in `repomon-daemon`'s accept loop instead of
-/// helping it along.
+/// Wait for the listener to close before replacement, using bare transport probes to avoid spawning
+/// client background tasks during teardown.
 async fn wait_until_unreachable(socket: &Path, timeout: Duration) {
     let endpoint = Endpoint::from_path(socket);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -114,9 +99,7 @@ pub async fn daemon_start(app: AppHandle, state: State<'_, AppState>) -> Result<
         service::start().map_err(|e| e.to_string())?;
     } else {
         let socket = PathBuf::from(&endpoint);
-        // Watch the child for its first seconds rather than firing and forgetting: a daemon that
-        // dies in the loader (no Visual C++ runtime) used to leave this button reporting success
-        // while the pill retried forever.
+        // Observe early child exits so a loader failure is reported as a failed start.
         if let Err(error) =
             repomon_core::launch::spawn_and_watch_boot(&socket, BOOT_WATCH_WINDOW).await
         {
@@ -147,9 +130,7 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
     let endpoint = state.endpoint().to_string();
     let service_managed = is_service_managed();
 
-    // 1. Gracefully shut down the current daemon and wait for the listener to actually go away
-    // (see `wait_until_unreachable`) — spawning the replacement before the old one has released
-    // the socket used to race its bind.
+    // Wait for the listener to release its endpoint before launching a replacement.
     let socket = PathBuf::from(&endpoint);
     if let Ok(client) = DaemonClient::connect(&socket).await {
         send_shutdown(&client).await;
@@ -159,7 +140,6 @@ pub async fn daemon_restart(app: AppHandle, state: State<'_, AppState>) -> Resul
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
     }
 
-    // 2. Restart service or re-spawn process
     if service_managed {
         let _ = service::stop();
         wait_until_unreachable(&socket, Duration::from_secs(3)).await;
