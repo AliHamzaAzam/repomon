@@ -39,7 +39,9 @@ step rather than at the start. Settings > General > Replay Onboarding reopens it
 
 ## The app icon
 
-The approved geometry is `docs/brand/repo-logo-final.svg`, including the user's manual path
+The brand sources are kept outside version control (`docs/brand/` is gitignored and lives on the
+maintainer's machine); the repository ships only the rendered icons under `src-tauri/icons` and
+`src-tauri/macos/Assets.car`. The approved geometry is `docs/brand/repo-logo-final.svg`, including the user's manual path
 adjustments. Preserve that file's paths, stroke widths, openings, and central square. The macOS
 Icon Composer bundle at `docs/brand/final/macos/Repomon.icon` expands the source strokes into closed
 filled outlines and separates the mesh and square into two SVG layers. This avoids the macOS 26
