@@ -230,6 +230,8 @@ describe("Settings auto-save persistence", () => {
     // Click Nord Arctic theme
     const nordButton = screen.getByRole("button", { name: /Nord Arctic/i });
     fireEvent.click(nordButton);
+    expect(nordButton).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Warm Paper/i })).toHaveAttribute("aria-pressed", "false");
 
     // Select an accent color swatch
     const emeraldButton = screen.getByRole("button", { name: /Emerald/i });

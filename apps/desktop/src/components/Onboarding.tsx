@@ -2,7 +2,7 @@ import { For, Match, Show, Switch as SwitchBlock, createSignal, onCleanup, onMou
 
 import type { AgentDoctorInfo, SystemDoctorResult } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
-import { BINDINGS, formatChord } from "../keymap";
+import { BINDINGS, formatChord, isWindows } from "../keymap";
 import type { ActionsStore } from "../stores/actions";
 import {
   FIRST_STEP,
@@ -401,7 +401,9 @@ function SystemStep() {
     <div data-step-body="system">
       <StepHead
         title="Check your tools"
-        lede="Repomon needs git, and tmux to hold the terminal sessions (it ships its own tmux on macOS and Linux). Agent CLIs are found on your PATH. Install anything missing, then check again."
+        lede={isWindows()
+          ? "Repomon needs git and its bundled ConPTY agent host to hold terminal sessions. Agent CLIs are found on your PATH. Install anything missing, then check again."
+          : "Repomon needs git, and tmux to hold the terminal sessions (it ships its own tmux on macOS and Linux). Agent CLIs are found on your PATH. Install anything missing, then check again."}
       />
       <SystemHealthView showTitle={false} showRefresh />
     </div>
@@ -699,12 +701,12 @@ function DoneStep(props: {
       </dl>
 
       {/* The CLI is optional, so the wizard offers it here rather than making it a step. Everything
-          it needs is already in the bundle; Install is a local copy, not a download. */}
+          it needs is already in the bundle; installing it does not require a download. */}
       <h3 class="section-label">Work from the terminal too</h3>
       <div class="mt-2 rounded-xl border border-line bg-surface/50 p-3">
         <p class="mb-2.5 text-[11px] leading-relaxed text-muted">
           The same fleet drives from a terminal with <span class="font-mono text-foreground">repomon</span>.
-          It is bundled with this app, so installing it is a local copy. You can do this later from
+          It is bundled with this app and needs no download. You can do this later from
           Settings &gt; System.
         </p>
         <CommandLineToolsCard compact />

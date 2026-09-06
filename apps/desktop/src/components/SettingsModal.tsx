@@ -600,7 +600,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                 type="button"
                 role="tab"
                 aria-selected={tab() === item.id}
-                class={`focus-ring rounded-md px-2.5 py-1 text-center text-xs font-medium transition-colors ${
+                class={`focus-ring shrink-0 whitespace-nowrap rounded-md px-2.5 py-1 text-center text-xs font-medium transition-colors ${
                   tab() === item.id ? "bg-surface text-foreground shadow-xs font-semibold" : "text-muted hover:text-foreground"
                 }`}
                 onClick={() => {
@@ -1320,6 +1320,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                                 : "border-line bg-surface hover:border-line hover:bg-raised/40"
                             }`}
                             onClick={() => selectTheme(preset.id)}
+                            aria-pressed={isSelected()}
                           >
                             {/* Miniature Color Swatch Preview */}
                             <div

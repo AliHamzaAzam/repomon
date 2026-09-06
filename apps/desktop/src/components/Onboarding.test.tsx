@@ -165,6 +165,17 @@ describe("setup wizard shell", () => {
 });
 
 describe("setup wizard sequence", () => {
+  it("describes the bundled ConPTY runtime in the Windows System step", () => {
+    const windows = vi.spyOn(keymap, "isWindows").mockReturnValue(true);
+    try {
+      mountWizard({ step: "system" });
+      expect(screen.getByText(/Repomon needs git and its bundled ConPTY agent host/)).toBeInTheDocument();
+      expect(screen.queryByText(/Repomon needs git, and tmux/)).not.toBeInTheDocument();
+    } finally {
+      windows.mockRestore();
+    }
+  });
+
   it("walks welcome to done and finishes", async () => {
     const { onComplete } = mountWizard();
     const seen: string[] = [];

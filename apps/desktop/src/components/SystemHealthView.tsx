@@ -135,12 +135,13 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
   /// One sentence for the wizard's header row: what the last probe found, or that it is running.
   const summary = () => {
     const doc = doctorResult();
-    if (!doc) return doctorLoading() ? "Checking git, tmux and your agent CLIs" : doctorError() ? "The check did not run" : "";
+    if (!doc) return doctorLoading() ? "Checking runtime dependencies and your agent CLIs" : doctorError() ? "The check did not run" : "";
     const found = doc.agents.filter((agent) => agent.detected).length;
     const core = doc.tmux.not_applicable ? (doc.agent_host?.available ?? false) : doc.tmux.available;
     const ready = core && doc.git.available;
     const agents = `${found} of ${doc.agents.length} agent CLIs found`;
-    return ready ? `git and tmux ready, ${agents}` : `Something is missing below, ${agents}`;
+    const runtime = doc.tmux.not_applicable ? "Agent host (ConPTY) and git" : "git and tmux";
+    return ready ? `${runtime} ready, ${agents}` : `Something is missing below, ${agents}`;
   };
 
   /// The re-check control. Declared once and placed twice: inside the title row for Settings,

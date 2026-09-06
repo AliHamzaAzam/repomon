@@ -137,6 +137,14 @@ describe("SystemHealthView", () => {
 });
 
 describe("SystemHealthView in the setup wizard", () => {
+  it("names the ConPTY runtime in the Windows verdict instead of tmux", async () => {
+    daemonResult.current = windowsDoctor();
+    render(() => <SystemHealthView showTitle={false} showRefresh />);
+    const verdict = await screen.findByRole("status");
+    expect(verdict).toHaveTextContent("Agent host (ConPTY) and git ready, 0 of 0 agent CLIs found");
+    expect(verdict).not.toHaveTextContent("tmux");
+  });
+
   it("shares the re-check row with a one-line verdict instead of floating the button alone", async () => {
     daemonResult.current = macDoctor({
       agents: [
