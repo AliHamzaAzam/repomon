@@ -613,12 +613,6 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                 continue;
             }
         };
-        if stale {
-            ctx.store
-                .delete_usage_events_for_source(path.clone())
-                .await?;
-            reingested += 1;
-        }
         let events: Vec<UsageEvent> = scan
             .events
             .into_iter()
@@ -651,13 +645,25 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                 }
             })
             .collect();
-        report.events += ctx.store.record_usage_events(events).await?;
-        if !sessions.is_empty() {
-            ctx.store.upsert_usage_sessions(sessions).await?;
-        }
-        ctx.store
-            .set_usage_cursor(path, scan.next_offset, print, None, INGEST_VERSION)
+        report.events += ctx
+            .store
+            .commit_usage_source(
+                repomon_core::usage_ledger::UsageCursor {
+                    source_path: path,
+                    offset: scan.next_offset,
+                    mtime: print,
+                    scanned_at: chrono::Utc::now(),
+                    error: None,
+                    ingest_version: INGEST_VERSION,
+                },
+                stale,
+                events,
+                sessions,
+            )
             .await?;
+        if stale {
+            reingested += 1;
+        }
     }
     report.reingested = reingested;
     report.recount_attempts = recount_attempts;
