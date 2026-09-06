@@ -851,7 +851,7 @@ fn handle_remote_config(cmd: RemoteCmd) -> Result<()> {
         RemoteCmd::Disable => {
             cfg.remote.enabled = false;
             cfg.save_to(&path)?;
-            println!("remote bridge disabled (token kept) — repomon daemon restart to apply");
+            println!("remote bridge disabled (token kept): repomon daemon restart to apply");
         }
         RemoteCmd::Pair { name: _ } => {
             // Only the un-named Pair reaches here (the `--name` case is daemon-backed above).
@@ -859,7 +859,7 @@ fn handle_remote_config(cmd: RemoteCmd) -> Result<()> {
                 (&cfg.remote.bind, &cfg.remote.token, cfg.remote.enabled)
             else {
                 return Err(anyhow!(
-                    "remote access is not enabled — run `repomon remote enable` first"
+                    "remote access is not enabled: run `repomon remote enable` first"
                 ));
             };
             let url = format!("repomon://{bind}#{token}");
@@ -909,7 +909,7 @@ fn render_pair_qr(url: &str) -> Result<()> {
         .build();
     println!("{art}");
     println!("scan with the repomon iOS app · {url}");
-    println!("(anyone with this QR can drive your agents — share it with no one)");
+    println!("(anyone with this QR can drive your agents: share it with no one)");
     Ok(())
 }
 
@@ -1018,7 +1018,7 @@ async fn handle_orchestrate(
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown (adopted session)".to_string());
         eprintln!(
-            "repomind is already running (autonomy: {actual}) — attaching. Stop it first (orchestrator.stop / TUI) to relaunch with different settings.\n"
+            "repomind is already running (autonomy: {actual}): attaching. Stop it first (orchestrator.stop / TUI) to relaunch with different settings.\n"
         );
     } else {
         eprintln!("repomind: orchestrating the fleet (autonomy: {autonomy}). Talk to it below.\n");
@@ -1057,7 +1057,7 @@ async fn handle_orchestrate(
         .unwrap_or(false);
     if !available || target.is_empty() {
         return Err(anyhow!(
-            "the orchestrator session isn't available — is tmux installed and on PATH?"
+            "the orchestrator session isn't available: is tmux installed and on PATH?"
         ));
     }
 
@@ -1179,7 +1179,7 @@ async fn handle_schedule_add(
         )
         .await?;
     println!(
-        "scheduled #{} — {} (next run {})",
+        "scheduled #{}: {} (next run {})",
         res["id"],
         res["spec"].as_str().unwrap_or("?"),
         res["next_run"].as_str().unwrap_or("?")
@@ -1710,7 +1710,7 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
             // Mirror MCP `send_to_agent`: resolve the primary window (reusing target_window's
             // external-session refusal) and issue the same `agent.send_input` request.
             let text = read_task(text)?.ok_or_else(|| {
-                anyhow!("no text to send — pass --text <s>, --text -, or pipe it on stdin")
+                anyhow!("no text to send: pass --text <s>, --text -, or pipe it on stdin")
             })?;
             let target: Lane = lane_get(&client, lane).await?;
             let window =

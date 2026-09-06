@@ -56,15 +56,12 @@ export function buildPrintableShortcutsHtml(bindings: Binding[] = BINDINGS, plat
 <meta charset="utf-8" />
 <title>Repomon keyboard shortcuts</title>
 <style>
-  /* This document is a standalone printout opened outside the app's own webview, with no access
-     to its CSS custom properties or theme tokens - it always renders as plain black-on-white, so
-     fixed hex values here are correct rather than a violation of the app's zero-hex-literal rule
-     (which governs the live, theme-aware Solid/Tailwind UI, not an exported print artifact). */
-  body { font-family: -apple-system, "Segoe UI", sans-serif; color: #1a1a1a; background: #fff; margin: 2rem; }
+  /* Standalone printouts use fixed neutral colors because app theme tokens are unavailable. */
+  body { font-family: -apple-system, "Segoe UI", sans-serif; color: rgb(26 26 26); background: rgb(255 255 255); margin: 2rem; }
   h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
-  p.sub { color: #555; margin-top: 0; margin-bottom: 1.5rem; font-size: 0.85rem; }
+  p.sub { color: rgb(85 85 85); margin-top: 0; margin-bottom: 1.5rem; font-size: 0.85rem; }
   section { break-inside: avoid; margin-bottom: 1.25rem; }
-  h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; color: #555; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; }
+  h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; color: rgb(85 85 85); border-bottom: 1px solid rgb(204 204 204); padding-bottom: 0.25rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   td, th { text-align: left; padding: 0.25rem 0.5rem 0.25rem 0; }
   td.chord { font-family: "SF Mono", "Cascadia Code", monospace; white-space: nowrap; width: 1%; }

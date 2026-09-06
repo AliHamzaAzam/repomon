@@ -890,7 +890,7 @@ impl App {
                 let pos = hits.iter().position(|&i| i == next).unwrap_or(0);
                 (
                     Some(lanes[next].id),
-                    format!("needs you {}/{} — {}", pos + 1, hits.len(), label(next)),
+                    format!("needs you {}/{}: {}", pos + 1, hits.len(), label(next)),
                 )
             }
         };
@@ -1044,7 +1044,7 @@ impl App {
     async fn peek_answer(&mut self, choice: usize) {
         let Some(p) = &self.peek else { return };
         let Some(dialog) = &p.dialog else {
-            self.status = "no dialog to answer — tab for next, esc to close".into();
+            self.status = "no dialog to answer: tab for next, esc to close".into();
             return;
         };
         if choice >= dialog.options.len() {
@@ -1082,7 +1082,7 @@ impl App {
             Err(e) if e.to_string().contains("-32010") => {
                 let queue = self.triage_queue();
                 self.show_peek(lane_id, &queue).await;
-                self.status = "dialog changed — re-read the pane".into();
+                self.status = "dialog changed: re-read the pane".into();
             }
             Err(e) => self.status = format!("answer failed: {e}"),
         }
@@ -2415,7 +2415,7 @@ impl App {
             (sess.session_id.clone(), sess.custom_label.clone())
         };
         let Some(sid) = sid else {
-            self.status = "can't rename — this session has no transcript id yet".into();
+            self.status = "can't rename: this session has no transcript id yet".into();
             return;
         };
         self.rename_target = Some(sid);
@@ -2578,7 +2578,7 @@ impl App {
             .await
         {
             Ok(_) => {
-                self.status = format!("removed {name} — files on disk untouched");
+                self.status = format!("removed {name}: files on disk untouched");
                 self.refresh().await;
                 let here = self.browse_path.clone();
                 self.load_browse(Some(here)).await;
@@ -2610,7 +2610,7 @@ impl App {
             Some(e) if e.added => self.status = format!("{} is already registered", e.name),
             Some(e) if !e.is_repo => {
                 self.status = format!(
-                    "{} is not a git repo — ↵ to enter, d to discover inside",
+                    "{} is not a git repo: ↵ to enter, d to discover inside",
                     e.name
                 )
             }
@@ -2671,7 +2671,7 @@ impl App {
             return;
         }
         self.status = format!(
-            "found {} repo(s) under {root} — press d again to add all, any other key to cancel",
+            "found {} repo(s) under {root}: press d again to add all, any other key to cancel",
             found.len()
         );
         self.discover_pending = Some((root, found));
@@ -3235,7 +3235,7 @@ impl App {
                 self.ag_orig = Some(a.name.clone());
             }
             Some(_) => {
-                self.status = "built-in agents are read-only — press n to add a custom one".into()
+                self.status = "built-in agents are read-only: press n to add a custom one".into()
             }
             None => {}
         }
@@ -3415,7 +3415,7 @@ impl App {
                 .format("%Y-%m-%d %H:%M");
             let to = s.to.with_timezone(&chrono::Local).format("%H:%M");
             md.push_str(&format!(
-                "- **{from} – {to}** ({} min, {:?}) — {} · {} commits\n",
+                "- **{from} – {to}** ({} min, {:?}): {} · {} commits\n",
                 s.duration_minutes(),
                 s.kind,
                 s.repo_names.join(", "),
@@ -4064,7 +4064,7 @@ impl App {
     async fn submit_new_lane(&mut self) {
         let repo = self.repos.get(self.nl_repo_idx).cloned();
         match repo {
-            None => self.status = "no repos registered — add one with `repomon add <path>`".into(),
+            None => self.status = "no repos registered: add one with `repomon add <path>`".into(),
             Some(_) if self.nl_branch.is_empty() => self.status = "enter a branch name".into(),
             Some(repo) => {
                 let params = json!({
@@ -4258,7 +4258,7 @@ impl App {
         }
         match self.client.call("agent.adopt", Some(params)).await {
             Ok(_) => {
-                self.status = "adopted — resuming in repomon (close the original terminal)".into();
+                self.status = "adopted: resuming in repomon (close the original terminal)".into();
                 self.view = View::Focus;
                 self.focus_insert = false;
                 self.refresh().await;
@@ -4452,7 +4452,7 @@ impl App {
             self.should_quit = true;
         } else {
             self.status =
-                "cd-on-exit needs the `repomon` shell function (see README) — not active".into();
+                "cd-on-exit needs the `repomon` shell function (see README): not active".into();
         }
     }
 
@@ -4494,10 +4494,10 @@ impl App {
         if self.mouse_on {
             enable_mouse();
             self.status =
-                "mouse captured — wheel scrolls/navigates · drag-select off (y to release)".into();
+                "mouse captured: wheel scrolls/navigates · drag-select off (y to release)".into();
         } else {
             disable_mouse();
-            self.status = "mouse released — drag to select & copy · y for wheel-scroll".into();
+            self.status = "mouse released: drag to select & copy · y for wheel-scroll".into();
         }
     }
 
@@ -4663,7 +4663,7 @@ impl App {
                 .and_then(|l| l.agent_sessions.get(s))
                 .is_some_and(|sess| sess.tmux_window.is_none());
             if windowless {
-                self.status = "external session — not managed by repomon".into();
+                self.status = "external session: not managed by repomon".into();
                 return;
             }
         }
@@ -4918,7 +4918,7 @@ impl App {
             Action::ToggleUrgent => {
                 self.urgent_only = !self.urgent_only;
                 self.status = if self.urgent_only {
-                    "showing only lanes that need you — ! or esc to clear".into()
+                    "showing only lanes that need you: ! or esc to clear".into()
                 } else {
                     "showing all lanes".into()
                 };
@@ -5472,7 +5472,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     // The daemon fired desktop popups while we were parked (our heartbeat went stale); re-seed
     // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
     app.notif_reseed = true;
-    app.status = "back from the agent (it's still running) — ↵ to reopen".into();
+    app.status = "back from the agent (it's still running): ↵ to reopen".into();
     // Snap straight back to FleetView: paint now, in the freshly re-init'd alternate screen, so the
     // user doesn't sit looking at tmux's "[detached]" line + a stale/garbled screen while the next
     // loop iteration's sync RPCs (which run before its own draw) complete.

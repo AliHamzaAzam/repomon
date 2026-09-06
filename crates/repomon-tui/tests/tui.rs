@@ -793,7 +793,7 @@ async fn renders_fleet_with_a_registered_repo() {
     // footer uses, so they can never drift) plus the global view-switching keys.
     app.help_open = true;
     let help = render_to_string(&app, 100, 44).unwrap();
-    assert!(help.contains("KEYS — FLEET"), "help title missing:\n{help}");
+    assert!(help.contains("KEYS: FLEET"), "help title missing:\n{help}");
     assert!(help.contains("spawn"), "fleet hint rows missing:\n{help}");
     assert!(help.contains("peek"), "peek hint missing:\n{help}");
     assert!(
@@ -802,7 +802,7 @@ async fn renders_fleet_with_a_registered_repo() {
     );
     app.help_open = false;
     let plain = render_to_string(&app, 100, 44).unwrap();
-    assert!(!plain.contains("KEYS — FLEET"), "help must close:\n{plain}");
+    assert!(!plain.contains("KEYS: FLEET"), "help must close:\n{plain}");
 
     server.abort();
     let _ = std::fs::remove_file(&sock);

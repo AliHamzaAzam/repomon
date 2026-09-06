@@ -14,14 +14,7 @@ import type { MessageStore } from "../stores/messages";
 import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
 
-/**
- * F2: the right rail generalizes from "the Repomind panel" into a tabbed host any number of
- * panels can register into. `RightPanelTabDef` is that registration contract — id, label, icon,
- * and a zero-arg `component` factory (closures over whatever the panel needs, e.g. Repomind's
- * fullscreen toggle) — so a new panel (Git status/diff for C1, the inline file editor for D4) is
- * added by appending one entry to `buildDefaultPanels`, never by touching this file's layout or
- * tab-switching logic.
- */
+/** A panel registration supplies its tab label, icon, and component factory. */
 export interface RightPanelTabDef {
   id: string;
   label: string;
@@ -30,20 +23,11 @@ export interface RightPanelTabDef {
 }
 
 export interface RightPanelHostProps {
-  /** Forwarded to Repomind's own "Expand" control — unchanged from pre-F2 behavior. */
+  /** Opens Repomind in full screen. */
   onToggleFullscreen: () => void;
-  /**
-   * Test-only escape hatch: supply a synthetic registry to exercise tab routing / switching
-   * without depending on RepomindPanel's daemon calls. Production never passes this — the host
-   * always builds its real registry from `buildDefaultPanels`.
-   */
+  /** Optional registry for tests that exercise routing without daemon-backed panels. */
   panels?: RightPanelTabDef[];
-  /**
-   * C1: threaded down to GitExplorerPanel's registry entry the same way FleetSidebar and
-   * TerminalWorkspace receive the fleet store — the panel only reads `selectedLane()` off it, but
-   * that memo lives on the store. Optional purely so the pre-C1 test suite (which renders this
-   * host with a synthetic `panels` list and never touches the real registry) keeps compiling.
-   */
+  /** Shared fleet state for the default panels; optional with an injected registry. */
   fleet?: FleetStore;
   /** Threaded to SupervisionPanel for deep-linking into settings tabs. */
   actions?: ActionsStore;

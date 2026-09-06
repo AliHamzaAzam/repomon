@@ -59,7 +59,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Value>
     let len = u32::from_le_bytes(len);
     ensure!(
         len <= MAX_FRAME,
-        "frame length {len} exceeds 16 MiB — corrupt connection"
+        "frame length {len} exceeds 16 MiB: corrupt connection"
     );
     let mut payload = vec![0u8; len as usize];
     r.read_exact(&mut payload)
@@ -427,7 +427,7 @@ mod windows_impl {
         }
         drop(guard);
         match outcome {
-            Outcome::Detached => println!("[repomon] detached — agent keeps running"),
+            Outcome::Detached => println!("[repomon] detached: agent keeps running"),
             Outcome::Closed => println!("[repomon] window {window:?} closed (agent exited)"),
         }
         Ok(())
@@ -494,7 +494,7 @@ mod windows_impl {
                 }
                 Err(e) => {
                     return Err(anyhow::Error::new(e).context(format!(
-                        "can't connect to {pipe} — is the agent's host process running?"
+                        "can't connect to {pipe}: is the agent's host process running?"
                     )));
                 }
             }

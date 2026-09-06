@@ -7061,39 +7061,18 @@ fn confirmed_stamps(
         .collect()
 }
 
-/// Whether the no-evidence, headcount-only direct bind (see the call site in `overlay_agents`)
-/// may fire for a lane this tick.
-///
-/// The original condition was just "exactly 1 candidate and exactly 1 window `pair_transcripts_to_windows`
-/// left unclaimed THIS TICK" (`cands_len == 1 && probe_len == 1`). That is not the same claim as
-/// "this sid is not bound anywhere else": `probe`/`cands` are computed from whatever window
-/// snapshot this tick saw, which can legitimately (a transient tmux probe hiccup reusing a
-/// stale `last_good` snapshot, a notify race) omit a window that in the REAL, live tmux server
-/// still carries this exact sid's stamp. Binding on headcount alone in that situation stamps a
-/// SECOND window with the same `@repomon_session` — sticky identity is supposed to be 1:1, so a
-/// live incident produced three windows all stamped with one resumed session's id.
-///
-/// Requiring the lane to hold exactly one window in total closes that gap: with only one window
-/// in the whole lane there is nothing else the sid could already be (or later become) bound to,
-/// so the direct bind can never create a duplicate. Every multi-window lane must earn its stamp
-/// through `confirmed_stamps`'s pane-evidence match instead.
+/// Permit binding without pane evidence only when this is the lane's sole window.
+/// A partial window snapshot can omit an existing stamp, so one unclaimed candidate and
+/// one free window do not establish uniqueness. Multi-window lanes require `confirmed_stamps`.
+/// See `direct_bind_allowed_requires_the_lanes_only_window` for the duplicate-stamp regression.
 fn direct_bind_allowed(cands_len: usize, probe_len: usize, lane_window_count: usize) -> bool {
     cands_len == 1 && probe_len == 1 && lane_window_count == 1
 }
 
-/// Pair a lane's kept transcripts (newest-first) with its live managed windows by STICKY
-/// IDENTITY first, position last.
-///
-/// Pass 1: a window whose `@repomon_session` names a kept transcript keeps it. This is what
-/// makes the pairing immune to two agents swapping activity rank — which used to re-bind
-/// their windows every poll, moving names, panes, and usage accounts between rows — and to
-/// daemon restarts (the binding lives in tmux, not daemon memory).
-///
-/// Pass 2 (first contact only): the newest still-unassigned transcripts become binding
-/// candidates for the still-free windows. They remain external for this response and those
-/// windows remain placeholders until [`confirmed_stamps`] proves a 1:1 pane match; the next
-/// overlay's pass 1 then exposes the durable pairing. This deliberately avoids even a temporary
-/// stale-transcript/new-window display mismatch during spawn.
+/// Pair kept transcripts with live windows by durable session stamp, preserving identity across
+/// activity-rank changes and daemon restarts. Unassigned transcripts remain external and free
+/// windows remain placeholders until `confirmed_stamps` proves a unique pane match. The next
+/// overlay exposes that confirmed pairing, avoiding stale-transcript/new-window mismatches.
 fn pair_transcripts_to_windows(
     summaries: &[agent::TranscriptSummary],
     windows: &[agent::WindowMeta],

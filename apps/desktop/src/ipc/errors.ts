@@ -64,14 +64,14 @@ export function translateError(
     const cmd = notFoundMatch[1];
     if (cmd === "tmux") {
       return {
-        friendly: "tmux isn't installed or couldn't be found — Repomon needs tmux to run agent sessions",
+        friendly: "tmux isn't installed or couldn't be found. Repomon needs tmux to run agent sessions",
         raw,
         isMissingBinary: true,
       };
     }
     if (cmd === "git") {
       return {
-        friendly: "git isn't installed or couldn't be found — Repomon needs git to manage repositories and worktrees",
+        friendly: "git isn't installed or couldn't be found. Repomon needs git to manage repositories and worktrees",
         raw,
         isMissingBinary: true,
       };
@@ -87,7 +87,7 @@ export function translateError(
 
   if (binary === "tmux" || lowerRaw.includes("tmux")) {
     return {
-      friendly: "tmux isn't installed or couldn't be found — Repomon needs tmux to run agent sessions",
+      friendly: "tmux isn't installed or couldn't be found. Repomon needs tmux to run agent sessions",
       raw,
       isMissingBinary: true,
     };
@@ -95,7 +95,7 @@ export function translateError(
 
   if (binary === "git" || lowerRaw.includes("git")) {
     return {
-      friendly: "git isn't installed or couldn't be found — Repomon needs git to manage repositories and worktrees",
+      friendly: "git isn't installed or couldn't be found. Repomon needs git to manage repositories and worktrees",
       raw,
       isMissingBinary: true,
     };

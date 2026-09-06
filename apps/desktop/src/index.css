@@ -2,8 +2,8 @@
 @import "@xterm/xterm/css/xterm.css";
 
 :root {
-  /* Repomon brand palette, derived from the shipped mark (docs/brand/final): graphite ink
-     #253B47, orange command square #EF7846, and the warm-white tile #F6F5F0 the Windows icon sits
+  /* Repomon brand palette, derived from the shipped mark (docs/brand/final): graphite ink,
+     orange command square, and the warm-white tile the Windows icon sits
      on. The light ground is that tile exactly; the ink is the graphite exactly. The accent is the
      same orange hue tuned per theme so it clears WCAG AA as text (the swatch value itself is only
      2.8:1 on white), which is also why `--brand-swatch` exists separately: it is the untuned brand

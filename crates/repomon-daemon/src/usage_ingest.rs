@@ -682,8 +682,7 @@ const REINGEST_BATCH: usize = 25;
 
 /// How many stale session digests [`redigest_stale_headlines`] rewrites in one call. Bounded so a
 /// headline-extractor version bump, which leaves every existing session stale at once, catches up
-/// over several ingest ticks instead of one long pause; each source is a plain file re-read, so
-/// the cost per session is small.
+/// over several ingest ticks. The batch limits file count, not the duration of each reread.
 const HEADLINE_REDIGEST_BATCH: usize = 25;
 
 /// Recompute the headline for sessions whose stored digest predates

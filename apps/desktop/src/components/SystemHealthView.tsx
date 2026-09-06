@@ -268,7 +268,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                 </div>
 
                 <div class="divide-y divide-line/60 rounded-lg bg-background/50">
-                  {/* Agent host (ConPTY) Row — Windows only, replaces tmux */}
+                  {/* Agent host (ConPTY) row, Windows only, replaces tmux */}
                   <Show when={tmuxInfo().not_applicable}>
                     <div class="p-3 space-y-1.5">
                       <div class="flex items-start justify-between gap-3">
@@ -330,7 +330,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       {/* Bundled Reassurance Note */}
                       <Show when={agentHostInfo()?.available && agentHostInfo()?.source === "bundled"}>
                         <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
-                          <span>Using the ConPTY agent host bundled with this app — no separate install needed.</span>
+                          <span>Using the ConPTY agent host bundled with this app. No separate install needed.</span>
                         </div>
                       </Show>
 
@@ -346,7 +346,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                     </div>
                   </Show>
 
-                  {/* tmux Row — everywhere except Windows */}
+                  {/* tmux row, everywhere except Windows */}
                   <Show when={!tmuxInfo().not_applicable}>
                   <div class="p-3 space-y-1.5">
                     <div class="flex items-start justify-between gap-3">
@@ -405,7 +405,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                     {/* Bundled Reassurance Note */}
                     <Show when={tmuxInfo().available && tmuxInfo().source === "bundled"}>
                       <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
-                        <span>Using Repomon's built-in standalone tmux — no separate Homebrew or system installation needed.</span>
+                        <span>Using Repomon's built-in standalone tmux. No separate Homebrew or system installation needed.</span>
                       </div>
                     </Show>
 

@@ -93,8 +93,8 @@ pub struct Lanes {
     /// `INSERT ... ON CONFLICT DO NOTHING` commits a WAL frame, so together they were the daemon's
     /// disk-write churn. See [`WtSig`].
     wt_cache: WtCache,
-    /// Last-pruned worktree keep-set per repo, so `prune_worktrees` (a DELETE that commits even when
-    /// it removes nothing) only runs when the repo's worktree set actually changed.
+    /// Last-pruned keep-set per repo, so the store only checks for removed worktrees when
+    /// the repo's worktree set changes.
     prune_cache: Arc<Mutex<HashMap<RepoId, Vec<String>>>>,
 }
 

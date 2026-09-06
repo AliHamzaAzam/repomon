@@ -6,7 +6,7 @@ describe("translateError", () => {
     const raw = "failed to spawn child: No such file or directory (os error 2)";
     const res = translateError(raw, { binary: "tmux" });
     expect(res.friendly).toBe(
-      "tmux isn't installed or couldn't be found — Repomon needs tmux to run agent sessions",
+      "tmux isn't installed or couldn't be found. Repomon needs tmux to run agent sessions",
     );
     expect(res.raw).toBe(raw);
     expect(res.isMissingBinary).toBe(true);
@@ -16,7 +16,7 @@ describe("translateError", () => {
     const raw = "DaemonRpcError: tmux: No such file or directory (os error 2)";
     const res = translateError(raw);
     expect(res.friendly).toBe(
-      "tmux isn't installed or couldn't be found — Repomon needs tmux to run agent sessions",
+      "tmux isn't installed or couldn't be found. Repomon needs tmux to run agent sessions",
     );
     expect(res.raw).toBe(raw);
     expect(res.isMissingBinary).toBe(true);
@@ -26,7 +26,7 @@ describe("translateError", () => {
     const raw = "failed to run git worktree add: No such file or directory (os error 2)";
     const res = translateError(raw, { binary: "git" });
     expect(res.friendly).toBe(
-      "git isn't installed or couldn't be found — Repomon needs git to manage repositories and worktrees",
+      "git isn't installed or couldn't be found. Repomon needs git to manage repositories and worktrees",
     );
     expect(res.raw).toBe(raw);
     expect(res.isMissingBinary).toBe(true);
@@ -36,7 +36,7 @@ describe("translateError", () => {
     const raw = "git: command not found";
     const res = translateError(raw);
     expect(res.friendly).toBe(
-      "git isn't installed or couldn't be found — Repomon needs git to manage repositories and worktrees",
+      "git isn't installed or couldn't be found. Repomon needs git to manage repositories and worktrees",
     );
     expect(res.isMissingBinary).toBe(true);
   });

@@ -207,7 +207,7 @@ fn render_help(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(Span::styled(
-                    format!(" KEYS — {} ", view_title(app.view)),
+                    format!(" KEYS: {} ", view_title(app.view)),
                     app.theme.header_style(),
                 ))
                 .title_bottom(Span::styled(
@@ -272,7 +272,7 @@ fn render_prompt_popup(f: &mut Frame, app: &App) {
         }
         None => {
             lines.push(Line::from(Span::styled(
-                "  no dialog on screen — the agent may have moved on".to_string(),
+                "  no dialog on screen: the agent may have moved on".to_string(),
                 app.theme.dim(),
             )));
         }
@@ -292,7 +292,7 @@ fn render_prompt_popup(f: &mut Frame, app: &App) {
         height: h,
     };
     let title = format!(
-        " {} · {class_word} — {}/{} ",
+        " {} · {class_word}: {}/{} ",
         peek.repo, peek.queue_pos, peek.queue_len
     );
     f.render_widget(Clear, rect);
@@ -370,7 +370,7 @@ fn render_agents(f: &mut Frame, app: &App) {
     let mut lines = Vec::new();
     if app.agents.is_empty() {
         lines.push(Line::raw(
-            "  (no agents — press n to add a custom launch command)".to_string(),
+            "  (no agents: press n to add a custom launch command)".to_string(),
         ));
     }
     for (i, a) in app.agents.iter().enumerate().skip(start).take(h) {
@@ -964,7 +964,7 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
     ];
     if app.nl_agents.is_empty() {
         lines.push(Line::raw(
-            "  no agents detected — press A to manage launch commands".to_string(),
+            "  no agents detected: press A to manage launch commands".to_string(),
         ));
     }
     for (i, a) in app.nl_agents.iter().enumerate() {
@@ -1190,10 +1190,7 @@ fn orch_status_word(app: &App) -> &'static str {
     }
 }
 
-/// The brain glyph plus a single space, used as the pinned row / summary marker. The emoji is
-/// double-width, so it leads each line on its own (lane rows below sit on separate grid lines and
-/// are unaffected); any terminal width disagreement only touches this line's own trailing text.
-const BRAIN: &str = "🧠 ";
+const REPOMIND_MARK: &str = "R ";
 
 /// The pinned "repomind" fleet row's label when repomind is asking the human something: a
 /// permission/decision dialog reads as a question, an end-of-turn reads as waiting.
@@ -1214,22 +1211,22 @@ fn orch_row_line(app: &App, selected: bool) -> Line<'static> {
     };
     if selected {
         Line::from(Span::styled(
-            format!("{BRAIN}{label}"),
+            format!("{REPOMIND_MARK}{label}"),
             app.theme.selected(),
         ))
     } else if app.orch_attention.is_some() {
         Line::from(Span::styled(
-            format!("{BRAIN}{label}"),
+            format!("{REPOMIND_MARK}{label}"),
             app.theme.needs_you(),
         ))
     } else {
-        let brain_style = if app.orch_running {
+        let mark_style = if app.orch_running {
             app.theme.accented()
         } else {
             app.theme.muted()
         };
         Line::from(vec![
-            Span::styled(BRAIN.to_string(), brain_style),
+            Span::styled(REPOMIND_MARK.to_string(), mark_style),
             Span::raw("repomind "),
             Span::styled(format!("· {}", orch_status_word(app)), app.theme.muted()),
         ])
@@ -1370,7 +1367,7 @@ fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize,
         app.theme.needs_you()
     };
     let mut lines = vec![Line::from(Span::styled(
-        format!("{BRAIN}REPOMIND · {}", orch_status_word(app)),
+        format!("{REPOMIND_MARK}REPOMIND · {}", orch_status_word(app)),
         app.theme.header_style(),
     ))];
     // repomind is asking the human something: the attention word plus a one-line "why", right
@@ -1532,7 +1529,7 @@ fn render_split(f: &mut Frame, app: &App) {
         ))
     } else if app.focus_insert {
         Line::from(Span::styled(
-            " ● INSERT — keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
+            " ● INSERT: keys go to the agent (esc · ⇧⇥ · ^C all sent) · ^O to command ",
             app.theme.selected(),
         ))
     } else {
@@ -1646,19 +1643,19 @@ fn render_focus(f: &mut Frame, app: &App) {
     let mode = if app.scroll > 0 {
         Line::from(Span::styled(
             format!(
-                " ↑ SCROLL +{} lines — PgUp/PgDn or wheel · ↵/esc back to live ",
+                " ↑ SCROLL +{} lines: PgUp/PgDn or wheel · ↵/esc back to live ",
                 app.scroll
             ),
             app.theme.selected(),
         ))
     } else if app.focus_insert {
         Line::from(Span::styled(
-            " ● INSERT — keys → agent (esc · ⇧⇥ · ^C) · PgUp/PgDn scrolls · ^O to command ",
+            " ● INSERT: keys → agent (esc · ⇧⇥ · ^C) · PgUp/PgDn scrolls · ^O to command ",
             app.theme.selected(),
         ))
     } else {
         Line::from(Span::styled(
-            " ○ COMMAND — ↵/→ open real terminal (native scroll/copy/paste) · i quick-type · PgUp scroll ",
+            " ○ COMMAND: ↵/→ open real terminal (native scroll/copy/paste) · i quick-type · PgUp scroll ",
             app.theme.muted(),
         ))
     };
@@ -1685,7 +1682,7 @@ fn render_grid(f: &mut Frame, app: &App) {
     let tiles = app.grid_tiles();
     let n = tiles.len();
     let header = format!(
-        "REPOMON · GRID — {n} live pane{}",
+        "REPOMON · GRID: {n} live pane{}",
         if n == 1 { "" } else { "s" }
     );
     f.render_widget(
@@ -1701,7 +1698,7 @@ fn render_grid(f: &mut Frame, app: &App) {
             Paragraph::new(vec![
                 Line::raw(""),
                 Line::raw(
-                    "  Nothing to babysit yet — the grid tiles your most active agents and open shells"
+                    "  Nothing to babysit yet: the grid tiles your most active agents and open shells"
                         .to_string(),
                 ),
                 Line::raw(
@@ -2152,7 +2149,7 @@ fn output_tail(app: &App, lane_id: Option<LaneId>, height: usize) -> Vec<Line<'s
             p.lines[start..].to_vec()
         }
         _ => vec![Line::from(Span::styled(
-            "(no live output — press e to start claude here)".to_string(),
+            "(no live output: press e to start claude here)".to_string(),
             app.theme.dim(),
         ))],
     }
@@ -2212,7 +2209,7 @@ fn focus_output(
     if lines.is_empty() {
         app.focus_geom.set((out_y0, 0, 0));
         return vec![Line::from(Span::styled(
-            "(no live output — press e to start claude here)".to_string(),
+            "(no live output: press e to start claude here)".to_string(),
             app.theme.dim(),
         ))];
     }
@@ -2283,7 +2280,7 @@ fn render_new_lane(f: &mut Frame, app: &App) {
         .repos
         .get(app.nl_repo_idx)
         .map(|r| r.name.clone())
-        .unwrap_or_else(|| "(no repos — add one first)".into());
+        .unwrap_or_else(|| "(no repos: add one first)".into());
     let safe_branch = app.nl_branch.replace('/', "-");
     let preview_path = if app.nl_branch.is_empty() {
         "(enter a branch name)".to_string()
@@ -2379,7 +2376,7 @@ fn fleet_lines(
 
     if visible.is_empty() {
         lines.push(Line::raw(
-            "  no lanes yet — press a to browse for repos to add (or `repomon add <path>`),"
+            "  no lanes yet: press a to browse for repos to add (or `repomon add <path>`),"
                 .to_string(),
         ));
         lines.push(Line::raw("  then n to create a lane.".to_string()));
@@ -2549,7 +2546,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     };
     let s = &lane.state;
     let branch = lane_branch(lane);
-    let upstream = s.upstream.clone().unwrap_or_else(|| "—".into());
+    let upstream = s.upstream.clone().unwrap_or_else(|| "-".into());
     let mut lines = vec![
         Line::from(Span::styled(
             format!("{} · {}", lane.repo.name, lane_name(lane)),
@@ -2663,7 +2660,7 @@ fn footer(keys: &str, app: &App, width: u16) -> Paragraph<'static> {
     if let Some((msg, since)) = &app.notif_banner {
         if since.elapsed() < crate::app::NOTIF_BANNER_TTL {
             return Paragraph::new(Line::from(Span::styled(
-                format!("🔔 {msg}"),
+                format!("Notice: {msg}"),
                 app.theme.needs_you().add_modifier(Modifier::BOLD),
             )));
         }

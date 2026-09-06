@@ -464,8 +464,8 @@ function byPriority(a: Lane, b: Lane): number {
 export function createFleetStore(source: FleetSource = daemonFleetSource) {
   // repos/lanes are Solid stores updated with keyed `reconcile`, so a poll only touches the fields
   // that actually changed and leaves every unchanged row's identity intact. That keeps the sidebar
-  // DOM stable across the 2s heartbeat — otherwise every row would be rebuilt each poll, which
-  // resets CSS :hover and makes hover states flicker.
+  // DOM stable across the 1.2s heartbeat; rebuilding every row each poll would
+  // reset CSS :hover and make hover states flicker.
   const [repoStore, setRepoStore] = createStore<Repo[]>([]);
   const [laneStore, setLaneStore] = createStore<Lane[]>([]);
   const repos = () => repoStore;
