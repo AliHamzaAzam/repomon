@@ -115,7 +115,6 @@ same daemon, usable over SSH or alongside the app.
 | [Daemon protocol](docs/protocol.md) | The JSON-RPC API for writing your own client |
 | [Messaging](docs/messaging.md) | Repomail addresses, delivery, and the MCP tools |
 | [Supervision](docs/agent-supervision.md) | Policies, dialog handling, stall nudges, audit |
-| [Windows validation](docs/windows-validation.md) | The manual release checklist for Windows |
 | [Host protocol](crates/repomon-host/PROTOCOL.md) | The Windows agent-host control contract |
 
 ## How it compares
@@ -144,9 +143,9 @@ runtime, and exposes a JSON-RPC API over a Unix socket (macOS, Linux) or a named
 ## Development
 
 ```sh
-cargo test --workspace                       # Rust
+cargo test --workspace                           # Rust
 cd apps/desktop && bun install && bun run test   # desktop frontend
-cd apps/desktop && bun tauri dev             # run the app against your local daemon
+cd apps/desktop && bun tauri dev                 # run the app against your local daemon
 ```
 
 Local preview bundles use `apps/desktop/src-tauri/tauri.preview.conf.json`. See
