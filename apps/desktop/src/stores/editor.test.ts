@@ -432,3 +432,31 @@ describe("editor store", () => {
   });
 });
 
+
+
+describe("restored file metadata", () => {
+  it.each(["pdf", "image", "binary", "text", undefined])("restores %s tabs with the same read state as open and reload", async (kind) => {
+    localStorage.setItem(EDITOR_STORAGE_KEY, JSON.stringify({ lanes: { "7": {
+      openPaths: ["fixture"], activePath: "fixture", expandedDirs: [], cursors: {}, scrollTops: {},
+    } } }));
+    daemonCallMock.mockImplementation(async (method: string) => method === "file.read"
+      ? { content: kind === "text" ? "hello" : "", kind, size: 321, mtime_ms: 1000, large: false }
+      : { entries: [], truncated: false });
+    const h = createRoot((dispose) => {
+      const [id] = createSignal<number | null>(7);
+      return { store: createEditorStore(fleetStub(id, [lane(7)])), dispose };
+    });
+    try {
+      await vi.waitFor(() => expect(h.store.activeFile()?.loading).toBe(false));
+      const restored = h.store.activeFile();
+      expect(restored).toMatchObject({ kind: kind ?? "text", size: 321, mtimeMs: 1000, large: false });
+      await h.store.openFile("fixture");
+      expect(h.store.activeFile()).toEqual(restored);
+      await h.store.reloadFile("fixture");
+      expect(h.store.activeFile()).toEqual(restored);
+      h.store.closeFile("fixture");
+      await h.store.openFile("fixture");
+      expect(h.store.activeFile()).toEqual(restored);
+    } finally { h.dispose(); }
+  });
+});

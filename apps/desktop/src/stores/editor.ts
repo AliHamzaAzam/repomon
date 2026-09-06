@@ -6,10 +6,22 @@ import {
   onMount,
 } from "solid-js";
 
-import type { FileEntry, Lane } from "../bindings";
+import type { FileEntry, FileReadResult, Lane } from "../bindings";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { DaemonRpcError, daemonCall, subscribeDaemon } from "../ipc/rpc";
 import type { FleetStore } from "./fleet";
+
+function readFileState(result: FileReadResult) {
+  return {
+    content: result.content,
+    savedContent: result.content,
+    mtimeMs: result.mtime_ms,
+    size: result.size,
+    kind: result.kind || "text",
+    large: result.large,
+    loading: false,
+  };
+}
 
 export interface OpenFile {
   path: string;
@@ -423,13 +435,7 @@ export function createEditorStore(fleet: FleetStore) {
       const result = await daemonCall("file.read", { lane_id: laneId, path });
       updateOpenFile(path, (f) => ({
         ...f,
-        content: result.content,
-        savedContent: result.content,
-        mtimeMs: result.mtime_ms,
-        size: result.size,
-        kind: result.kind || "text",
-        large: result.large,
-        loading: false,
+        ...readFileState(result),
       }));
     } catch (cause) {
       updateOpenFile(path, (f) => ({ ...f, loading: false, loadError: translateError(cause) }));
@@ -541,13 +547,7 @@ export function createEditorStore(fleet: FleetStore) {
       const result = await daemonCall("file.read", { lane_id: laneId, path });
       updateOpenFile(path, (f) => ({
         ...f,
-        content: result.content,
-        savedContent: result.content,
-        mtimeMs: result.mtime_ms,
-        size: result.size,
-        kind: result.kind || "text",
-        large: result.large,
-        loading: false,
+        ...readFileState(result),
         conflict: null,
         loadError: null,
       }));
@@ -715,11 +715,7 @@ export function createEditorStore(fleet: FleetStore) {
           const result = await daemonCall("file.read", { lane_id: newLaneId, path: restoredActive });
           updateOpenFile(restoredActive, (f) => ({
             ...f,
-            content: result.content,
-            savedContent: result.content,
-            mtimeMs: result.mtime_ms,
-            large: result.large,
-            loading: false,
+            ...readFileState(result),
           }));
         } catch (cause) {
           updateOpenFile(restoredActive, (f) => ({ ...f, loading: false, loadError: translateError(cause) }));
