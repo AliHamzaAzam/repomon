@@ -1,16 +1,11 @@
-//! The server-side terminal screen: a vt100 emulator with tmux-parity scrollback.
-//!
-//! This is the source of truth for `capture`/`cursor`/`size`/`alternate_on` and for the
-//! `subscribe_bytes` first-frame replay — ConPTY rendering quirks never leak past it.
-//! Pure logic, tested on every OS with canned byte streams.
+//! Maintains the authoritative vt100 screen and scrollback for capture, cursor, size, and initial
+//! byte-stream replay.
 
 /// Scrollback depth, parity with tmux `configure()`'s `history-limit 50000`.
 pub const HISTORY_LIMIT: usize = 50_000;
 
-/// A vt100 screen sized `cols × rows` with [`HISTORY_LIMIT`] lines of scrollback.
-///
-/// All geometry at this boundary is `(cols, rows)` / `(col, row)` — protocol order — even
-/// though vt100 itself speaks `(rows, cols)`.
+/// Stores the terminal screen with protocol-order geometry (columns before rows), adapting vt100’s
+/// opposite order internally.
 pub struct Screen {
     parser: vt100::Parser,
 }
@@ -58,20 +53,20 @@ impl Screen {
         out.join("\n")
     }
 
-    /// `(col, row, visible)`, 0-based — parity with `#{cursor_x}/#{cursor_y}/#{cursor_flag}`.
+    /// `(col, row, visible)`, 0-based - parity with `#{cursor_x}/#{cursor_y}/#{cursor_flag}`.
     pub fn cursor(&self) -> (u16, u16, bool) {
         let screen = self.parser.screen();
         let (row, col) = screen.cursor_position();
         (col, row, !screen.hide_cursor())
     }
 
-    /// `(cols, rows)` — parity with `#{pane_width}/#{pane_height}`.
+    /// `(cols, rows)` - parity with `#{pane_width}/#{pane_height}`.
     pub fn size(&self) -> (u16, u16) {
         let (rows, cols) = self.parser.screen().size();
         (cols, rows)
     }
 
-    /// Whether the child is on the alternate screen — parity with `#{alternate_on}`.
+    /// Whether the child is on the alternate screen - parity with `#{alternate_on}`.
     pub fn alternate_on(&self) -> bool {
         self.parser.screen().alternate_screen()
     }

@@ -1,8 +1,4 @@
-//! ConPTY child management via `portable-pty` (Windows only).
-//!
-//! `CommandBuilder` gets the structured `program + args + cwd + env` straight from the CLI —
-//! no shell strings, no `cmd /c` quoting — and it resolves npm `.cmd` shims (`claude`) the
-//! way `CreateProcess` alone would not.
+//! Launches structured ConPTY children through portable-pty, including npm command shims.
 
 use std::path::Path;
 
@@ -20,13 +16,8 @@ pub struct SpawnedChild {
     pub child_pid: u32,
 }
 
-/// An owned, inheritable-safe duplicate of the ConPTY child's process handle.
-///
-/// We terminate the child ourselves rather than via `portable_pty`'s `ChildKiller`, whose
-/// Windows `WinChildKiller::kill` has inverted success/error semantics in 0.9: `TerminateProcess`
-/// returns nonzero on success, but the killer returns `Err(last_os_error())` on that success (a
-/// stale `ERROR_IO_INCOMPLETE`/996) and `Ok(())` on the actual failure. Owning a handle and
-/// calling `TerminateProcess` directly gives us correct semantics.
+/// Own a non-inheritable child handle to call TerminateProcess directly; portable-pty 0.9 inverts
+/// its Windows kill success/error result.
 struct ChildHandle(windows_sys::Win32::Foundation::HANDLE);
 
 // The handle is an OS process handle we own for the controller's lifetime; sending it across
@@ -72,8 +63,8 @@ impl PtyIo for PtyController {
         use windows_sys::Win32::Foundation::STILL_ACTIVE;
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, TerminateProcess};
         // `TerminateProcess` returns nonzero on success. A zero return with the child already
-        // gone (`GetExitCodeProcess` != STILL_ACTIVE) is a benign race — the window is dying
-        // either way — so we treat it as success.
+        // gone (`GetExitCodeProcess` != STILL_ACTIVE) is a benign race - the window is dying
+        // either way - so we treat it as success.
         let ok = unsafe { TerminateProcess(self.child.0, 1) };
         if ok != 0 {
             return Ok(());

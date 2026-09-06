@@ -1,6 +1,4 @@
-//! `repomon-agent-host` binary entry point. See `PROTOCOL.md` for the contract this
-//! process implements. The binary compiles everywhere so the workspace builds on all
-//! OSes, but the runtime is Windows-only (Unix uses tmux).
+//! Runs the Windows-only agent host while retaining a compilable entry point on Unix.
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {

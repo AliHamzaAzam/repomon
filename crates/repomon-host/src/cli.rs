@@ -1,4 +1,4 @@
-//! The host's command line — the spawn contract in PROTOCOL.md §1. Parsed with clap on
+//! The host's command line - the spawn contract in PROTOCOL.md §1. Parsed with clap on
 //! every OS so the contract is tested everywhere, even though only Windows runs it.
 
 use std::path::PathBuf;

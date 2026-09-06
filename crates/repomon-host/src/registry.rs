@@ -1,8 +1,5 @@
-//! Host registry files and pipe naming (PROTOCOL.md §2, §8).
-//!
-//! The registry directory is the Windows equivalent of tmux's window list: one JSON file per
-//! live window under `<data_dir>\hosts\<session>\`, written atomically on startup and removed
-//! on exit. The daemon's re-adoption scan (Track I) walks it.
+//! Maintains atomic per-window registry files under the session’s host directory for daemon
+//! discovery and adoption.
 
 use std::path::{Path, PathBuf};
 
@@ -152,7 +149,6 @@ mod tests {
         let back: RegistryEntry = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back, e);
 
-        // No temp litter next to the file.
         let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|d| d.unwrap().file_name())
@@ -161,7 +157,7 @@ mod tests {
 
         remove(&path).unwrap();
         assert!(!path.exists());
-        remove(&path).unwrap(); // idempotent — a second remove is not an error
+        remove(&path).unwrap();
     }
 
     #[test]

@@ -1,10 +1,5 @@
-//! Windows-only end-to-end tests: spawn the real `repomon-agent-host` binary with a real
-//! ConPTY child, drive the named-pipe protocol exactly as PROTOCOL.md specifies, and check
-//! tmux-parity lifecycle semantics (registry appears/disappears, host dies with its child).
-//!
-//! These compile on every OS (the whole file is cfg(windows)-gated) but only execute on the
-//! Windows CI leg (landing with Track A). Written before the runtime existed — they are the
-//! RED half of TDD for the cfg(windows) modules.
+//! Exercises the real Windows host and ConPTY child over named pipes, checking registry and process
+//! lifecycle contracts.
 
 #![cfg(windows)]
 
@@ -164,7 +159,6 @@ fn host_serves_the_full_protocol_end_to_end() {
         host.registry_path().exists()
     });
 
-    // Registry entry matches PROTOCOL.md §8.
     let entry: registry::RegistryEntry =
         serde_json::from_slice(&std::fs::read(host.registry_path()).unwrap()).unwrap();
     assert_eq!(entry.v, 1);
@@ -175,7 +169,6 @@ fn host_serves_the_full_protocol_end_to_end() {
 
     let mut c = host.connect();
 
-    // hello: owner-token handshake + meta.
     let hello = c.ok(serde_json::json!({"op": "hello"}));
     assert_eq!(hello["proto"], 1);
     assert_eq!(hello["window"], "w1");
@@ -184,7 +177,6 @@ fn host_serves_the_full_protocol_end_to_end() {
     assert_eq!(hello["agent_pid"], entry.agent_pid);
     assert!(hello["last_activity"].as_i64().unwrap() >= hello["started_at"].as_i64().unwrap());
 
-    // Default size is tmux parity 220×50.
     let size = c.ok(serde_json::json!({"op": "size"}));
     assert_eq!(
         (size["cols"].as_u64(), size["rows"].as_u64()),
@@ -203,10 +195,8 @@ fn host_serves_the_full_protocol_end_to_end() {
     let cursor = c.ok(serde_json::json!({"op": "cursor"}));
     assert_eq!(cursor["visible"], true);
 
-    // alternate_on is false for a plain shell.
     assert_eq!(c.ok(serde_json::json!({"op": "alternate_on"}))["on"], false);
 
-    // resize: last client wins.
     c.ok(serde_json::json!({"op": "resize", "cols": 100, "rows": 30}));
     let size = c.ok(serde_json::json!({"op": "size"}));
     assert_eq!(
@@ -235,7 +225,6 @@ fn host_serves_the_full_protocol_end_to_end() {
         emu.screen().contents()
     );
 
-    // Live bytes follow the replay.
     c.ok(serde_json::json!({"op": "send_text", "text": "echo stream-follows"}));
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut streamed = Vec::new();
@@ -255,7 +244,6 @@ fn host_serves_the_full_protocol_end_to_end() {
         "live PTY bytes arrive on the subscription"
     );
 
-    // kill: window disappears like tmux kill-window.
     c.ok(serde_json::json!({"op": "kill"}));
     host.wait_for("registry entry removed", Duration::from_secs(10), || {
         !host.registry_path().exists()

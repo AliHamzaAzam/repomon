@@ -103,7 +103,7 @@ fn run(args: HostArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Drain ConPTY output: feed the vt100 screen (bumping `last_activity`) and fan the raw
-/// chunk out to byte subscribers. EOF means the child is gone — the waiter thread owns the
+/// chunk out to byte subscribers. EOF means the child is gone - the waiter thread owns the
 /// shutdown.
 fn spawn_reader_thread(mut reader: Box<dyn std::io::Read + Send>, ctx: Arc<ServerCtx>) {
     std::thread::spawn(move || {
@@ -127,7 +127,7 @@ fn spawn_reader_thread(mut reader: Box<dyn std::io::Read + Send>, ctx: Arc<Serve
 }
 
 /// Wait for the agent child; on exit, linger briefly (lets an in-flight `kill` response
-/// flush), remove the registry entry, and exit — the window disappears, tmux-style.
+/// flush), remove the registry entry, and exit - the window disappears, tmux-style.
 fn spawn_waiter_thread(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     registry_path: std::path::PathBuf,

@@ -1,7 +1,5 @@
-//! Length-prefixed JSON framing (PROTOCOL.md §4): `[u32 LE length][length bytes of JSON]`.
-//!
-//! Pure logic, tested on every OS. The decoder is incremental: feed it arbitrary byte
-//! chunks (pipe reads split frames wherever they like) and pull complete frames out.
+//! Encodes and incrementally decodes protocol frames as a little-endian u32 length followed by JSON
+//! bytes, tolerating arbitrary pipe-read boundaries.
 
 /// Maximum JSON payload size (PROTOCOL.md §4): a peer seeing a larger length treats the
 /// connection as corrupt.
@@ -53,7 +51,7 @@ impl FrameDecoder {
     }
 }
 
-/// A peer announced a frame larger than [`MAX_FRAME`] — the connection is corrupt.
+/// A peer announced a frame larger than [`MAX_FRAME`] - the connection is corrupt.
 #[derive(Debug, PartialEq, Eq)]
 pub struct FrameTooLarge(pub usize);
 
@@ -95,7 +93,7 @@ mod tests {
     fn decoder_handles_split_reads() {
         let frame = encode_frame(b"{\"id\":2}");
         let mut dec = FrameDecoder::new();
-        // One byte at a time: no frame until the last byte arrives.
+
         for (i, b) in frame.iter().enumerate() {
             dec.extend(&[*b]);
             if i < frame.len() - 1 {

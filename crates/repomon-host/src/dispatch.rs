@@ -1,7 +1,4 @@
-//! Request dispatch: protocol op → screen/PTY action → response payload.
-//!
-//! OS-neutral on purpose: the PTY side is behind [`PtyIo`], so every op's semantics are
-//! tested on all OSes with a fake; the Windows server plugs in the real ConPTY.
+//! Maps protocol requests to screen and PTY operations through an OS-neutral I/O interface.
 
 use serde::Serialize;
 
@@ -71,12 +68,8 @@ impl Dispatcher {
         self.answer_dsr(bytes);
     }
 
-    /// Answer DSR cursor-position reports (`ESC [ 6 n`) in the output stream.
-    ///
-    /// ConPTY emits one at startup as part of its `PSUEDOCONSOLE_INHERIT_CURSOR` handshake (and
-    /// interactive apps query the cursor mid-run) and withholds further output until the
-    /// terminal replies with a CPR (`ESC [ row ; col R`, 1-based) on the PTY input. This host IS
-    /// the terminal, so without this reply ConPTY stalls and no application output ever appears.
+    /// Reply to cursor-position queries on PTY input; ConPTY can withhold startup output until it
+    /// receives the one-based CPR response.
     fn answer_dsr(&mut self, bytes: &[u8]) {
         const DSR_CPR: &[u8] = b"\x1b[6n";
         let mut scan = std::mem::take(&mut self.dsr_tail);
@@ -102,7 +95,7 @@ impl Dispatcher {
     }
 
     /// Handle one request frame; returns the response payload (JSON, unframed) and the
-    /// connection effect. Never panics on bad input — errors become `err` responses.
+    /// connection effect. Never panics on bad input - errors become `err` responses.
     pub fn handle(&mut self, payload: &[u8], _now: i64) -> (Vec<u8>, Effect) {
         let req = match protocol::parse_request(payload) {
             Ok(req) => req,
@@ -497,7 +490,6 @@ mod tests {
             "fresh screen cursor at 0,0 replies 1;1 (1-based CPR)"
         );
 
-        // A query after some output reports the live cursor position.
         calls.lock().unwrap().clear();
         d.process_output(b"abc\x1b[6n", 42);
         assert_eq!(

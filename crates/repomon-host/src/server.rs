@@ -21,9 +21,8 @@ pub struct ServerCtx {
     pub registry_path: std::path::PathBuf,
 }
 
-/// Create one pipe-server instance. The first instance claims the name exclusively
-/// (`FILE_FLAG_FIRST_PIPE_INSTANCE`) so a squatter can't pre-bind it; every instance
-/// carries the per-user DACL.
+/// Creates a pipe with a per-user DACL, claiming the first instance exclusively to reject a
+/// pre-bound name.
 pub fn create_instance(
     pipe: &str,
     security: &PipeSecurity,
@@ -37,9 +36,8 @@ pub fn create_instance(
     }
 }
 
-/// Accept loop: hand each connected client to its own task, keeping a spare instance
-/// pending at all times. `first_instance` is the pre-created instance whose existence let
-/// the caller write the registry entry only once the pipe was connectable.
+/// Accepts clients while keeping a spare pipe instance connectable, beginning with the instance
+/// already registered by the caller.
 pub async fn serve(
     pipe: String,
     security: PipeSecurity,
@@ -100,9 +98,8 @@ async fn handle_conn(mut conn: NamedPipeServer, ctx: Arc<ServerCtx>) {
     }
 }
 
-/// Stream mode: full-replay first frame, then live PTY chunks until disconnect. The
-/// receiver is subscribed under the dispatcher lock, so no byte can fall between the
-/// replay snapshot and the live tail (the PTY reader holds the same lock to feed bytes).
+/// Streams replay then live bytes, subscribing under the dispatcher lock so no output falls between
+/// the snapshot and tail.
 async fn stream_bytes(mut conn: NamedPipeServer, ctx: Arc<ServerCtx>) {
     let (replay, mut rx) = {
         let dispatcher = ctx.dispatcher.lock().expect("dispatcher lock");

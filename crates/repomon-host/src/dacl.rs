@@ -48,9 +48,8 @@ impl PipeSecurity {
         Ok(Self { descriptor })
     }
 
-    /// `SECURITY_ATTRIBUTES` pointing at the descriptor, for
-    /// `ServerOptions::create_with_security_attributes_raw`. The returned value borrows
-    /// `self`; keep `self` alive for the call.
+    /// Returns security attributes borrowing this descriptor, which must remain alive throughout
+    /// pipe creation.
     pub fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,

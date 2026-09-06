@@ -1,9 +1,5 @@
-//! tmux key-name → VT input-byte translation (PROTOCOL.md §7.9).
-//!
-//! The daemon and TUI already speak tmux's key vocabulary (`Enter`, `Escape`, `C-c`,
-//! `M-BSpace`, `C-Up`, …); on Unix tmux turns those names into terminal input sequences.
-//! This module is that key table for the Windows host: conventional VT/xterm sequences,
-//! matching what tmux itself writes to a pane.
+//! Translates the shared tmux key vocabulary into conventional VT input sequences for the Windows
+//! host.
 
 /// Translate a tmux key name into the bytes to write to the child's input. `None` for
 /// names outside the vocabulary (the caller answers `err`).
@@ -175,7 +171,7 @@ mod tests {
         assert_eq!(bytes("a"), b"a");
         assert_eq!(bytes("Z"), b"Z");
         assert_eq!(bytes("/"), b"/");
-        // Multi-byte UTF-8 chars pass through too.
+
         assert_eq!(bytes("é"), "é".as_bytes());
     }
 
@@ -184,7 +180,7 @@ mod tests {
         assert_eq!(bytes("C-c"), vec![0x03]);
         assert_eq!(bytes("C-a"), vec![0x01]);
         assert_eq!(bytes("C-z"), vec![0x1a]);
-        // tmux accepts either case for the letter.
+
         assert_eq!(bytes("C-C"), vec![0x03]);
         assert_eq!(bytes("C-Space"), vec![0x00]);
         assert_eq!(bytes("C-["), vec![0x1b]);

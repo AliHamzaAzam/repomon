@@ -56,7 +56,7 @@ pub enum Op {
     Kill,
 }
 
-/// `hello`'s ok body — field order is part of nothing (JSON), but kept matching PROTOCOL.md
+/// `hello`'s ok body - field order is part of nothing (JSON), but kept matching PROTOCOL.md
 /// §7.1 for readable goldens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloInfo {
@@ -100,7 +100,7 @@ pub struct AlternateOk {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmptyOk {}
 
-/// `{"id": N, "ok": {...}}` — generic so typed bodies serialize with their declared field
+/// `{"id": N, "ok": {...}}` - generic so typed bodies serialize with their declared field
 /// order (a `serde_json::Value` would re-sort keys alphabetically).
 #[derive(Debug, Clone, Serialize)]
 pub struct OkResponse<T> {
