@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-lib
 import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
+import type { PaneSpan } from "../stores/workspace";
 import type { PaneTarget } from "./terminalTargets";
 import PanePicker from "./PanePicker";
 
@@ -31,7 +32,7 @@ describe("PanePicker", () => {
 
   it("exposes width and tall state while preserving both dimensions on changes", () => {
     const { unmount } = render(() => {
-      const [spans, setSpans] = createSignal({ one: { columns: 1 as 1 | 2, rows: 1 as 1 | 2 } });
+      const [spans, setSpans] = createSignal<Record<string, PaneSpan>>({ one: { columns: 1, rows: 1 } });
       return <PanePicker multitasking available={panes} selected={panes} spans={spans()}
         onChange={vi.fn()} onSpanChange={(_, span) => setSpans({ one: span })} />;
     });
