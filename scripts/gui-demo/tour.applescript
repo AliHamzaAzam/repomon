@@ -71,11 +71,11 @@ on dumpAccessibility(reasonText)
     set dumpLines to {"phase=" & tourPhase & "; pid=" & demoPID & "; reason=" & reasonText}
     try
         set nodes to my windowNodes()
+        set end of dumpLines to "total nodes=" & (count of nodes)
+        -- Every role, so a row exposed as a group, list item, cell or link is visible in the dump.
         repeat with node in nodes
-            set fields to my nodeFields(node)
-            if item 1 of fields is in {"AXButton", "AXRadioButton", "AXStaticText"} then
-                set end of dumpLines to my describeNode(node)
-            end if
+            if (count of dumpLines) > 600 then exit repeat
+            set end of dumpLines to my describeNode(node)
         end repeat
     on error dumpError
         set end of dumpLines to "AX traversal failed: " & dumpError
