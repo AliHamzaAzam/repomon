@@ -2068,7 +2068,13 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<crate::usage_ledger::UsageSessionRow>> {
         self.call(move |c| {
-            let mut stmt = c.prepare(
+            // A direct predicate lets SQLite use the existing (lane_id, at) index.
+            let lane_filter = if lane_id.is_some() {
+                "AND e.lane_id = ?3"
+            } else {
+                ""
+            };
+            let mut stmt = c.prepare(&format!(
                 "SELECT e.agent_kind, e.session_id,
                         SUM(e.input_tokens), SUM(e.output_tokens), SUM(e.cache_read_tokens),
                         SUM(e.cache_write_tokens), SUM(e.thinking_tokens),
@@ -2087,11 +2093,11 @@ impl Store {
                  LEFT JOIN usage_sessions s
                    ON s.agent_kind = e.agent_kind AND s.session_id = e.session_id
                  WHERE e.at >= ?1 AND e.at < ?2 AND e.session_id IS NOT NULL
-                   AND (?3 IS NULL OR e.lane_id = ?3)
+                   {lane_filter}
                  GROUP BY e.agent_kind, e.session_id
                  ORDER BY MAX(e.at) DESC
                  LIMIT ?4",
-            )?;
+            ))?;
             let rows = stmt.query_map(
                 params![to_iso(&from), to_iso(&to), lane_id, limit as i64],
                 |row| {
@@ -5260,6 +5266,124 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, "sess-9");
+    }
+
+    #[tokio::test]
+    async fn session_lane_filter_preserves_aggregates_metadata_and_range_limits() {
+        let s = store().await;
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let to = from + chrono::Duration::days(1);
+        let mut events = Vec::new();
+        for (offset, hours, lane, session, kind) in [
+            (0, 0, Some(3), Some("shared"), "claude-code"),
+            (1, 1, Some(3), Some("shared"), "claude-code"),
+            (2, 2, Some(9), Some("shared"), "claude-code"),
+            (3, 3, None, Some("external"), "claude-code"),
+            (4, 4, Some(3), None, "claude-code"),
+            (5, 24, Some(3), Some("shared"), "claude-code"),
+            (6, -1, Some(3), Some("older"), "claude-code"),
+            (7, 5, Some(3), Some("shared"), "codex"),
+        ] {
+            let mut e = usage_event(offset, "model-a", "2026-09-01T00:00:00Z");
+            e.at = from + chrono::Duration::hours(hours);
+            e.lane_id = lane;
+            e.session_id = session.map(str::to_string);
+            e.agent_kind = kind.into();
+            e.estimated = offset == 0;
+            e.subagent = offset == 0;
+            e.external = lane.is_none();
+            if offset == 2 {
+                e.model = "model-b".into();
+                e.input_tokens = 1_000;
+            }
+            events.push(e);
+        }
+        s.record_usage_events(events).await.unwrap();
+        s.call(|c| {
+            c.execute("INSERT INTO usage_sessions(agent_kind, session_id, headline, headline_raw, turns, tool_calls, retries)
+                VALUES ('claude-code', 'shared', 'Task', 'Raw task', 4, 2, 1)", [])?;
+            Ok(())
+        }).await.unwrap();
+
+        let filtered = s
+            .usage_sessions_between(from, to, Some(3), 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            filtered.len(),
+            2,
+            "agent kind separates matching session ids"
+        );
+        assert_eq!(filtered[0].agent_kind, "codex", "newest activity first");
+        assert!(filtered[0].headline.is_none(), "a digest is optional");
+        let row = &filtered[1];
+        assert_eq!(row.session_id, "shared");
+        assert_eq!(row.lane_id, Some(3));
+        assert_eq!(row.started_at, Some(from), "the lower bound is inclusive");
+        assert_eq!(row.ended_at, Some(from + chrono::Duration::hours(1)));
+        assert_eq!(
+            row.totals.events, 2,
+            "other lanes, null sessions, and the upper bound are excluded"
+        );
+        assert_eq!(row.totals.input_tokens, 20);
+        assert_eq!(row.totals.output_tokens, 40);
+        assert_eq!(row.totals.cache_read_tokens, 60);
+        assert_eq!(row.totals.cache_write_tokens, 80);
+        assert_eq!(row.totals.thinking_tokens, 10);
+        assert_eq!(row.totals.total_tokens, 200);
+        assert_eq!(row.totals.estimated_tokens, 100);
+        assert_eq!(row.totals.subagent_tokens, 100);
+        assert!(row.estimated);
+        assert!(!row.external);
+        assert_eq!(
+            row.model, "model-b",
+            "dominant model still considers the whole session"
+        );
+        assert_eq!(row.headline.as_deref(), Some("Task"));
+        assert_eq!(row.headline_raw.as_deref(), Some("Raw task"));
+        assert_eq!((row.turns, row.tool_calls, row.retries), (4, 2, 1));
+
+        let all = s.usage_sessions_between(from, to, None, 50).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], filtered[0]);
+        assert_eq!(all[1].session_id, "external");
+        assert_eq!(all[1].lane_id, None);
+        assert!(all[1].external);
+        assert_eq!(all[2].totals.events, 3);
+        assert_eq!(
+            s.usage_sessions_between(from, to, Some(3), 1)
+                .await
+                .unwrap(),
+            filtered[..1]
+        );
+        assert_eq!(
+            s.usage_sessions_between(from, to, None, 1).await.unwrap(),
+            all[..1]
+        );
+        for lane in [None, Some(0), Some(3), Some(999)] {
+            assert!(
+                s.usage_sessions_between(from, to, lane, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                s.usage_sessions_between(to, to, lane, 50)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        for lane in [0, 999] {
+            assert!(
+                s.usage_sessions_between(from, to, Some(lane), 50)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]
