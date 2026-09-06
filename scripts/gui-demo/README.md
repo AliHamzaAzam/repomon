@@ -1,8 +1,8 @@
 # GUI showcase recorder
 
-Run from this checkout on macOS using existing, matching release binaries. The recorder never
-builds or bundles the app. A fresh worktree normally has no `target/release`, so supply the
-binary directory explicitly:
+The macOS recorder creates a disposable synthetic fleet and captures a Repomon showcase using existing, matching release binaries. It never builds or bundles the app. Fresh worktrees usually lack `target/release`; supply the binary directory explicitly.
+
+## Recording modes
 
 ```sh
 scripts/record-gui-demo.sh --dry-run --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
@@ -20,16 +20,13 @@ retains fixtures and `out/*.json` evidence after stopping the demo app, daemon a
 
 ## Verify the desktop connection
 
-Run `--dry-run --keep-sandbox` before using the tour. **Time: about 1 minute; the desktop handshake has a 30-second deadline.**
+Run `--dry-run --keep-sandbox` before using the tour.
 
 1. Run the first command above with the existing binary directory.
 2. Look for `PASS desktop fetched all 5 repos and 8 lanes` and `PASS no second repomond`.
 3. Read the retained sandbox's `out/desktop-connection.json` for the app PID, daemon PID, endpoint paths, returned fleet counts and selected viewport.
 
-**You know it worked when:** the kernel-identified desktop client receives the exact seeded repo/lane IDs and sends a nonempty viewport, while the complete repomond PID set stays unchanged.
-
-<details>
-<summary>Details: endpoint evidence and launch guard</summary>
+The check requires the kernel-identified desktop client to receive the exact seeded repo/lane IDs and send a nonempty viewport, while the complete repomond PID set stays unchanged.
 
 The desktop's `REPOMON_SOCKET` and sandbox config `socket_path` point to `app.sock`. A recorder-owned observer forwards original framed bytes to `demo.sock`, where the seeded daemon is already running. Darwin's LOCAL_PEERPID identifies both peers; a different client or daemon fails verification. Fixture and mock-agent RPCs continue to use `demo.sock` directly and cannot satisfy the desktop check.
 
@@ -41,11 +38,9 @@ The existing desktop binary does not write a native successful-connection log. V
 
 An investigation with the operator's identical binary hashes found the app connected to the seeded daemon and receiving all five repos/eight lanes, so a wrong endpoint was not reproduced. If these checks pass but the AX dump still lacks rows, retain both the RPC log and AX dump to investigate the renderer or accessibility tree separately.
 
-</details>
-
 ## Diagnose a missing fleet without Accessibility
 
-Run the guarded WebKit probe first. **Time: about 1 minute per run.** It uses the supplied app binary and compiles a small diagnostic library with Xcode command-line tools; it does not rebuild or bundle Repomon.
+Run the guarded WebKit probe first. It uses the supplied app binary and compiles a small diagnostic library with Xcode command-line tools; it does not rebuild or bundle Repomon.
 
 1. Run the storage and DOM check.
 
@@ -62,10 +57,7 @@ Run the guarded WebKit probe first. **Time: about 1 minute per run.** It uses th
    scripts/record-gui-demo.sh --dry-run --tour --diagnose-webview --no-guard --keep-sandbox --bin-dir /Users/azaleas/Developer/Claude/repomon/target/release
    ```
 
-**You know it worked when:** the console probe reports both storage checks and all eight lane buttons. A successful DOM check establishes layout and text; the tour separately tests native accessibility. Compare both runs' `webview-check.json`, `desktop-connection.json`, `tour.log` and any `ax-dump.txt`.
-
-<details>
-<summary>Details: probe isolation and the storage hypothesis</summary>
+The console probe reports both storage checks and all eight lane buttons. A successful DOM check establishes layout and text; the tour separately tests native accessibility. Compare both runs' `webview-check.json`, `desktop-connection.json`, `tour.log` and any `ax-dump.txt`.
 
 `CFFIXED_USER_HOME` already redirects Cocoa's home to the disposable `cocoa` directory. The recorder prepares its Library/WebKit, Library/Containers, Library/Caches, Library/Preferences and Library/Application Support directories. The normal guard allows these paths because they are outside the denied personal home. The probe checks the app's actual `NSHomeDirectory` and Library results, resolving macOS's `/tmp` alias before comparing paths. No global home or preferences are changed.
 
@@ -77,11 +69,9 @@ The system log query only selects sandbox/kernel messages mentioning this demo a
 
 The operator's failing sandbox already contained saved theme and launch-count preferences under its private WebKit directory. In a guarded reproduction with the same supplied app, the console probe also found the full fleet and populated chips without a storage exception. This refutes storage starvation in that reproduction. It does not establish why the operator's native AX dump omitted those rows; the guarded/unguarded rehearsal supplies the next comparison.
 
-</details>
-
 ## Rehearse after a lookup failure
 
-Run the rehearsal from the operator's terminal before capturing again. **Time: about 2-3 minutes, including the 90-second tour.**
+Run the rehearsal from the operator's terminal before capturing again.
 
 1. Run the updated recorder with retained diagnostics.
 
@@ -92,10 +82,7 @@ Run the rehearsal from the operator's terminal before capturing again. **Time: a
 2. Check the printed sandbox path. `out/tour.log` records how long fleet readiness took, whether onboarding was skipped, and which AX fields or static-text child matched each button.
 3. If a lookup fails, read `out/ax-dump.txt`. It lists every front-window AXButton, AXRadioButton and AXStaticText with role, description, name and value. The first 40 lines also appear in the terminal and `out/tour.log`.
 
-**You know it worked when:** the log reports `Fleet ready after ... s`, a match for `nav-focus-trap`, and `PASS tour rehearsal completed without screen capture`.
-
-<details>
-<summary>Details: readiness and lane matching</summary>
+The rehearsal log reports `Fleet ready after ... s`, a match for `nav-focus-trap`, and `PASS tour rehearsal completed without screen capture`.
 
 Both GIF and still use the same opening routine. Before selecting a lane, it polls for an AXStaticText containing `orbit-api` for up to 30 seconds. If `Skip setup` appears during that wait, it presses that control in the isolated app and continues waiting for the fleet.
 
@@ -104,8 +91,6 @@ Onboarding completion and the resume step are browser-local preferences, not dae
 Button and content lookups retry for 12 seconds. Button matching checks description, name and value independently. If WebKit exposes lane text only in a static child, the recorder follows AXParent to its enclosing button. It does not select an unrelated row merely because aria-current is set.
 
 At the source revision used for this fix, LaneRow renders the title in a text span and the branch in a truncated span inside the button. The button has aria-current but no explicit aria-label. Source markup cannot prove how an existing WebKit binary exposes its AX name, so the runtime match log and failure dump supply that evidence. No product markup change or rebuild is required.
-
-</details>
 
 The GIF writes `docs/gui-demo.gif` at 1200x750; `--still` writes `docs/preview.png` at 1440x900.
 Both use the same opening routine and crop the top-left 1440x900 content rectangle after
