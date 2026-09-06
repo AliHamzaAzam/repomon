@@ -102,7 +102,7 @@ impl AgentServer {
     }
 
     /// Read-only: this agent's own supervision status. The daemon resolves `identity_token` to
-    /// this agent's lane and filters the fleet-wide snapshot down to just that row server-side —
+    /// this agent's lane and filters the fleet-wide snapshot down to just that row server-side -
     /// the worker never sees another lane's supervision state.
     async fn supervision_status(&self, _args: Value) -> Result<Value, String> {
         let token = self.require_identity()?;
@@ -262,10 +262,7 @@ mod tests {
         assert!(!names.contains(&"merge_lane"));
     }
 
-    /// No approval/nudge/set power is reachable from the worker catalog: no tool name is
-    /// backed by `supervision.set` or `supervision.nudge`, and `AgentServer::call`'s match has
-    /// no arm for either of those tool names (or any spelling of them) — an attempt falls
-    /// through to the `unknown tool` arm, same as any other name it doesn't recognize.
+    /// Worker tools must expose no supervision policy mutation or nudge authority.
     #[test]
     fn supervision_tools_are_read_only() {
         let names: Vec<&str> = agent_tool_catalog().iter().map(|tool| tool.name).collect();

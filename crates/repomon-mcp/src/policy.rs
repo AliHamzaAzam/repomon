@@ -1,5 +1,5 @@
 //! Server-enforced guardrails. These caps are enforced here, in the MCP layer, not merely
-//! requested in the persona prompt — so a confused or runaway orchestrator physically cannot
+//! requested in the persona prompt - so a confused or runaway orchestrator physically cannot
 //! exceed them. Configured from the environment by the `repomon orchestrate` launcher.
 
 use std::collections::HashMap;
@@ -44,8 +44,8 @@ impl Autonomy {
     pub fn allows_mutation(self) -> bool {
         !matches!(self, Autonomy::ReadOnly)
     }
-    /// Whether the orchestrator may make structural changes to a repo's lanes itself — create,
-    /// merge, or delete one — vs. asking the human first.
+    /// Whether the orchestrator may make structural changes to a repo's lanes itself - create,
+    /// merge, or delete one - vs. asking the human first.
     pub fn allows_structural(self) -> bool {
         matches!(self, Autonomy::Autonomous)
     }
@@ -55,10 +55,8 @@ impl Autonomy {
 /// refuses it as expired.
 const CONFIRM_TTL: Duration = Duration::from_secs(600);
 
-/// A minted two-phase confirmation awaiting the human-approved second call. Single-use and bound
-/// to the exact `(lane_id, flags)` it was minted for, so it can't confirm a different lane or a
-/// different variant of the same action (e.g. a plain delete vs. one that also deletes the
-/// branch).
+/// Bind a single-use human confirmation to the exact lane and action flags so approval cannot
+/// authorize another target or variant.
 struct PendingConfirm {
     lane_id: i64,
     flags: String,
@@ -69,7 +67,7 @@ struct PendingConfirm {
 pub struct Policy {
     pub autonomy: Autonomy,
     /// Set for headless standing/triage runs (`REPOMON_MCP_UNATTENDED=1`): merge_lane and
-    /// delete_lane are refused outright regardless of autonomy — an unattended orchestrator
+    /// delete_lane are refused outright regardless of autonomy - an unattended orchestrator
     /// reports and recommends, never lands or destroys work.
     pub unattended: bool,
     pub max_concurrent_agents: usize,
@@ -126,10 +124,8 @@ impl Policy {
         Ok(*a)
     }
 
-    /// Refuse a destructive action on the controller lane. The controller lane is repomind's own
-    /// home repo - the fleet's memory and the lane repomind itself runs in - so deleting or
-    /// merging it is never allowed, whatever the autonomy level and before any confirmation token
-    /// is minted. `verb` names the action in the message ("deleting", "merging").
+    /// Rejects destructive controller-lane operations at every autonomy level before confirmation
+    /// because that lane holds fleet memory.
     pub fn refuse_controller_lane(&self, role: Option<&str>, verb: &str) -> Result<(), String> {
         if role == Some(CONTROLLER_ROLE) {
             return Err(format!(
@@ -141,7 +137,7 @@ impl Policy {
         Ok(())
     }
 
-    /// Suppress an identical `send_to_agent` to the same lane within a short window — the
+    /// Suppress an identical `send_to_agent` to the same lane within a short window - the
     /// cheapest defense against an infinite re-prompt / handoff loop.
     pub fn check_send_dedupe(&self, lane: i64, text: &str) -> Result<(), String> {
         let mut m = self
@@ -159,19 +155,14 @@ impl Policy {
         Ok(())
     }
 
-    /// Mint a single-use confirmation token for a destructive tool's two-phase confirm flow,
-    /// bound to `(lane_id, flags)`. `flags` is a caller-chosen discriminator string (e.g.
-    /// "delete_branch=true") distinguishing variants of the same action so a token minted for
-    /// one variant can't confirm another.
+    /// Mints a single-use confirmation bound to the exact lane and action flags.
     pub fn mint_confirm(&self, lane_id: i64, flags: &str) -> String {
         let token = random_token();
         let mut m = self
             .pending_confirms
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Opportunistic cleanup: sweep any expired tokens while we hold the lock, same as
-        // take_confirm does — otherwise a caller that only ever runs phase 1 (mints an impact
-        // summary but never confirms) can grow pending_confirms unbounded over a long session.
+        // Prune expired confirmations even when callers only mint tokens, bounding pending state.
         m.retain(|_, p| p.minted.elapsed() < self.confirm_ttl);
         m.insert(
             token.clone(),
@@ -184,11 +175,8 @@ impl Policy {
         token
     }
 
-    /// Redeem a confirmation token minted by [`Self::mint_confirm`]. Single-use: removed from the
-    /// pending set only on success, so a mismatched or expired attempt doesn't burn a token the
-    /// caller could otherwise still retry correctly. Must match the exact `lane_id` and `flags`
-    /// it was minted for, and must be redeemed within `confirm_ttl`. Error messages are written
-    /// to tell the calling LLM exactly what to do next.
+    /// Redeems an unexpired matching confirmation once, retaining it after mismatched attempts so a
+    /// correct retry remains possible.
     pub fn take_confirm(&self, token: &str, lane_id: i64, flags: &str) -> Result<(), String> {
         let mut m = self
             .pending_confirms
@@ -224,12 +212,8 @@ impl Policy {
     }
 }
 
-/// An 8-hex-char token for `mint_confirm`/`take_confirm`. This is not cryptographically secure —
-/// the threat model is a well-behaved-but-confused orchestrator LLM that must not be able to
-/// fabricate a token to skip straight to a destructive call, not an adversary brute-forcing the
-/// token space — so std's per-process hasher entropy plus a monotonic counter (guaranteeing every
-/// call sees a distinct input) is sufficient. No `rand` dependency is in this crate's tree, so we
-/// deliberately don't add one for this.
+/// This token prevents accidental confirmation bypass, not adversarial guessing; per-process
+/// entropy and a counter provide distinct inputs.
 fn random_token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -287,11 +271,7 @@ mod tests {
         assert!(policy(Autonomy::ReadOnly, 100).record_mutation().is_err());
     }
 
-    /// create_lane, merge_lane, and delete_lane all gate on `allows_structural()` — the single
-    /// source of truth their handlers share in server.rs. Handler-level tests for that gate
-    /// aren't feasible without a running daemon, so this exercises the shared predicate directly
-    /// for every autonomy level, standing in for all three call sites (including delete_lane's,
-    /// which was added as defense-in-depth on top of its two-phase confirm).
+    /// All structural operations must share the same autonomy gate.
     #[test]
     fn structural_gate_covers_create_merge_and_delete_lane() {
         assert!(!Autonomy::ReadOnly.allows_structural());
@@ -328,16 +308,16 @@ mod tests {
         let p = policy(Autonomy::Autonomous, 2);
         assert!(p.record_mutation().is_ok());
         assert!(p.record_mutation().is_ok());
-        assert!(p.record_mutation().is_err()); // third exceeds the cap of 2
+        assert!(p.record_mutation().is_err());
     }
 
     #[test]
     fn duplicate_sends_are_suppressed() {
         let p = policy(Autonomy::Autonomous, 100);
         assert!(p.check_send_dedupe(1, "go").is_ok());
-        assert!(p.check_send_dedupe(1, "go").is_err()); // identical, same lane, within window
-        assert!(p.check_send_dedupe(1, "different").is_ok()); // different text is fine
-        assert!(p.check_send_dedupe(2, "go").is_ok()); // different lane is fine
+        assert!(p.check_send_dedupe(1, "go").is_err());
+        assert!(p.check_send_dedupe(1, "different").is_ok());
+        assert!(p.check_send_dedupe(2, "go").is_ok());
     }
 
     fn policy_with_ttl(ttl: Duration) -> Policy {
@@ -372,7 +352,7 @@ mod tests {
         assert!(p.take_confirm(&token, 8, "delete_branch=true").is_err());
         // Wrong flags: a token minted for delete_branch=true must not confirm delete_branch=false.
         assert!(p.take_confirm(&token, 7, "delete_branch=false").is_err());
-        // A mismatched attempt must not burn the token — the correct binding still works after.
+        // A mismatched attempt must not burn the token - the correct binding still works after.
         assert!(p.take_confirm(&token, 7, "delete_branch=true").is_ok());
     }
 
@@ -387,13 +367,13 @@ mod tests {
     #[test]
     fn confirm_tokens_do_not_cross_lanes() {
         // A token minted for one lane must never confirm a same-shaped action on another lane,
-        // even with identical flags — this is the cross-lane-reuse bypass the caller must not have.
+        // even with identical flags - this is the cross-lane-reuse bypass the caller must not have.
         let p = policy(Autonomy::Autonomous, 100);
         let token_a = p.mint_confirm(1, "delete_branch=false");
         let token_b = p.mint_confirm(2, "delete_branch=false");
         assert!(p.take_confirm(&token_a, 2, "delete_branch=false").is_err());
         assert!(p.take_confirm(&token_b, 1, "delete_branch=false").is_err());
-        // Each token still works for its own lane.
+
         assert!(p.take_confirm(&token_a, 1, "delete_branch=false").is_ok());
         assert!(p.take_confirm(&token_b, 2, "delete_branch=false").is_ok());
     }
@@ -419,9 +399,7 @@ mod tests {
 
     #[test]
     fn mint_confirm_sweeps_expired_entries() {
-        // A caller that only ever runs delete_lane's phase 1 (mints an impact summary, never
-        // confirms — e.g. a confused orchestrator looping) must not grow pending_confirms
-        // unbounded. mint_confirm sweeps expired entries opportunistically, same as take_confirm.
+        // Mint-only callers must not accumulate expired confirmations indefinitely.
         let p = policy_with_ttl(Duration::from_millis(20));
         let _stale = p.mint_confirm(1, "delete_branch=false");
         std::thread::sleep(Duration::from_millis(60));

@@ -1,10 +1,5 @@
-//! The repomind MCP server: orchestrator-ergonomic tools over the repomon daemon.
-//!
-//! These tools are a *translation layer*, not new business logic — each maps to one or two
-//! existing daemon RPCs. They are deliberately token-economical (compact digests, capped
-//! transcripts, the raw pane only on request and even then capped) so the orchestrator can stay
-//! oriented without drowning its context in worker output. Guardrails (autonomy, caps, dedupe)
-//! are enforced here in [`crate::policy`], not merely asked for in the persona.
+//! Maps compact orchestrator tools to daemon RPCs, enforcing autonomy, capacity, and deduplication
+//! policy in code.
 
 use chrono::Utc;
 use repomon_core::agent::approval;
@@ -51,7 +46,7 @@ impl Server {
 }
 
 /// Mutating tools whose calls (and failures) land in the orchestration journal. Reads are
-/// deliberately not journaled — the journal answers "what did repomind DO", not "what did it
+/// deliberately not journaled - the journal answers "what did repomind DO", not "what did it
 /// look at".
 fn journaled_tool(name: &str) -> bool {
     matches!(
@@ -130,7 +125,7 @@ impl Server {
         }
         let mut out = json!({ "generation": generation, "counts": counts, "lanes": lanes });
         // Cold-start recap, once per process: what happened since the previous session's start,
-        // so the first orient both orients and recaps. Best-effort — a journal hiccup must not
+        // so the first orient both orients and recaps. Best-effort - a journal hiccup must not
         // fail the status call.
         if !self
             .recap_shown
@@ -146,7 +141,7 @@ impl Server {
                 .await
             {
                 let entries = res["entries"].as_array().cloned().unwrap_or_default();
-                // Exclude session_start markers (incl. this session's own) — they're anchors,
+                // Exclude session_start markers (incl. this session's own) - they're anchors,
                 // not activity.
                 let acted: Vec<&Value> = entries
                     .iter()
@@ -255,10 +250,8 @@ impl Server {
             .map(|(t, text)| json!({ "role": t.role, "text": text, "at": t.at }))
             .collect();
 
-        // Pane enrichment is best-effort: a gone/crashed window is exactly the crash-debugging
-        // case a caller reaches for include_pane in, so a resolution or capture failure here
-        // must not discard the transcript/git-state that *are* available. Failures degrade to
-        // pane: null + a one-line pane_error instead of failing the whole call.
+        // Capture failure must not discard available transcript and git context when inspecting a
+        // crashed window.
         let (pane, pane_error) = if a.include_pane.unwrap_or(false) {
             shape_pane(self.capture_pane(a.lane_id, primary).await)
         } else {
@@ -287,7 +280,7 @@ impl Server {
     }
 
     /// Fetch the live terminal pane for `read_agent`'s `include_pane` option. Read-only, so
-    /// callers should treat failure as "no pane available", not a reason to fail the response —
+    /// callers should treat failure as "no pane available", not a reason to fail the response -
     /// see the call site.
     async fn capture_pane(
         &self,
@@ -323,7 +316,7 @@ impl Server {
         }
 
         // Verb-level duplicate-agent guard: refuse to drop a second agent into a lane that already
-        // has a live managed one (a clobber hazard). `force` is honored here only — never forwarded
+        // has a live managed one (a clobber hazard). `force` is honored here only - never forwarded
         // to the daemon, whose agent.spawn intentionally allows the TUI's multi-spawn.
         if !a.force {
             let lane: Lane = self
@@ -384,7 +377,7 @@ impl Server {
         let submit = a.submit.unwrap_or(true);
         self.policy.check_send_dedupe(a.lane_id, &a.text)?;
         // Target the session the orchestrator reasons about (the primary), not the daemon's default
-        // first window — they differ in a multi-agent lane.
+        // first window - they differ in a multi-agent lane.
         let lane: Lane = self
             .client
             .call_typed("lane.get", Some(json!({ "lane_id": a.lane_id })))
@@ -551,7 +544,7 @@ impl Server {
         let a: StopAgentArgs = parse(args)?;
         self.policy.record_mutation()?;
         // Target the session the orchestrator reasons about (the primary), same as
-        // send_to_agent — killing the daemon's default (first) window in a multi-agent lane
+        // send_to_agent - killing the daemon's default (first) window in a multi-agent lane
         // could end the wrong session.
         let lane: Lane = self
             .client
@@ -609,7 +602,7 @@ impl Server {
     }
 
     /// Two-phase destructive delete: no `confirm` mints an impact summary + token (a normal,
-    /// non-error tool result — the point is to hand the orchestrator something to relay to the
+    /// non-error tool result - the point is to hand the orchestrator something to relay to the
     /// human, not to fail); a matching `confirm` redeems the token and performs the delete.
     async fn delete_lane(&self, args: Value) -> Result<Value, String> {
         let a: DeleteLaneArgs = parse(args)?;
@@ -633,7 +626,7 @@ impl Server {
         }
         // Defense-in-depth on top of the two-phase confirm below: gate on the same
         // structural-autonomy check create_lane/merge_lane use, checked before either phase so
-        // supervised/read-only mode refuses early — before a token is ever minted.
+        // supervised/read-only mode refuses early - before a token is ever minted.
         if !self.policy.autonomy.allows_structural() {
             return Err(
                 "deleting a lane needs the human's go-ahead at this autonomy level. Ask them \
@@ -738,7 +731,7 @@ impl Server {
         Ok(res)
     }
 
-    /// Read-only: no `record_mutation()` — this only inspects the lane, it changes nothing.
+    /// Read-only: no `record_mutation()` - this only inspects the lane, it changes nothing.
     async fn lane_diff(&self, args: Value) -> Result<Value, String> {
         let a: LaneDiffArgs = parse(args)?;
         let res: Value = self
@@ -967,9 +960,8 @@ impl Server {
     async fn approval_allow(&self, args: Value) -> Result<Value, String> {
         let a: ApprovalAllowArgs = parse(args)?;
         self.policy.record_mutation()?;
-        // Same two-phase confirm as delete_lane: allowlisting is a standing permission bypass,
-        // so repomind can never self-confirm — phase 1 mints a token to relay with the impact,
-        // phase 2 redeems it only for the exact (repo, pattern) it was minted for.
+        // Allowlisting bypasses standing permissions, so the controller must relay an impact-bound
+        // token for operator confirmation before redeeming it.
         let flags = format!("approval:{}:{}", a.repo, a.pattern);
         match a.confirm {
             None => {
@@ -1010,7 +1002,7 @@ impl Server {
     }
 
     /// The repo's notes for embedding into a tool result, best-effort: `None` on any failure
-    /// or when the notes are empty, so callers can unconditionally `if let Some` — a notes
+    /// or when the notes are empty, so callers can unconditionally `if let Some` - a notes
     /// hiccup must never fail the spawn/create it piggybacks on.
     async fn fetch_repo_notes(&self, repo_id: i64) -> Option<String> {
         let res: Value = match self
@@ -1101,8 +1093,6 @@ impl Server {
     }
 }
 
-// ---- argument structs ----
-
 #[derive(Deserialize)]
 struct FleetStatusArgs {
     #[serde(default)]
@@ -1190,8 +1180,8 @@ struct DeleteLaneArgs {
     lane_id: i64,
     #[serde(default)]
     delete_branch: Option<bool>,
-    /// The token from a prior no-`confirm` call. Absent (phase 1) returns an impact summary and
-    /// mints a token instead of deleting anything.
+    /// Carries the impact-bound confirmation token, omitted when requesting an impact summary
+    /// without deletion.
     #[serde(default)]
     confirm: Option<String>,
 }
@@ -1255,8 +1245,6 @@ struct WaitForChangeArgs {
     #[serde(default)]
     lanes: Option<Vec<i64>>,
 }
-
-// ---- helpers ----
 
 /// The daemon's `agent.capture` response.
 #[derive(Deserialize)]
@@ -1371,10 +1359,8 @@ fn tally(lanes: &[LaneDigest]) -> Value {
     })
 }
 
-/// Map an `approve_agent` choice to the tmux key to send and a human-readable summary.
-/// Default (absent / "yes") selects the highlighted option (Yes); "no" cancels with Escape; a
-/// number selects that menu option. Public so the `repomon lane approve` CLI verb reuses the exact
-/// same mapping instead of reimplementing it.
+/// Maps an approval choice to confirmation, cancellation, or a numbered-option key with a readable
+/// summary.
 pub fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
     match choice {
         None => Ok(("Enter".into(), "yes (default)".into())),
@@ -1403,11 +1389,8 @@ pub fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
     }
 }
 
-/// Resolve which agent window an action should target on a lane: an explicit override wins,
-/// otherwise the primary (most-attention-worthy) managed session's window. Errors when the resolved
-/// session is external or windowless, so we never blind-send to the daemon's default (first) window
-/// — which in a multi-agent lane may be a different session than the one the orchestrator inspected.
-/// Public so the `repomon lane send|approve` CLI verbs reuse it (and its external-session refusal).
+/// Resolves an explicit or primary managed window, rejecting external or windowless sessions
+/// instead of blind-sending to a different default window.
 pub fn target_window(
     primary: Option<&AgentSession>,
     explicit: Option<String>,
@@ -1487,7 +1470,7 @@ fn drop_oldest_for_budget(lens: &[usize], budget: usize) -> usize {
 }
 
 /// The last `max_lines` lines of (already ANSI-stripped) pane text, further capped to
-/// `max_chars` — keeping the *end* of the text when it must be trimmed, since a pane capture is
+/// `max_chars` - keeping the *end* of the text when it must be trimmed, since a pane capture is
 /// read for its most recent state.
 fn last_lines(s: &str, max_lines: usize, max_chars: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
@@ -1509,8 +1492,6 @@ fn shape_pane(result: Result<String, String>) -> (Option<String>, Option<String>
         Err(e) => (None, Some(e)),
     }
 }
-
-// ---- tool catalog (schemas) ----
 
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({
@@ -1859,10 +1840,7 @@ mod tests {
     use super::*;
     use crate::fleet::AgentDigest;
 
-    /// The persona must teach the repo-notes loop (read at Orient, fold into tasks, write
-    /// lessons back) and must no longer present mnemind as the primary team memory.
-    /// The persona must teach the journal loop: the first fleet_status recaps, and
-    /// fleet_history answers "what happened with X".
+    /// The persona must describe repository notes and journal tools as the fleet memory workflow.
     #[test]
     fn persona_documents_fleet_history() {
         assert!(
@@ -1989,12 +1967,11 @@ mod tests {
 
     #[test]
     fn target_window_picks_primary_and_refuses_unmanaged() {
-        // An explicit override always wins.
         assert_eq!(
             target_window(None, Some("lane-2-3".into())).unwrap(),
             "lane-2-3"
         );
-        // Otherwise default to the primary's window.
+
         let managed = agent_sess(false, Some("lane-7-2"));
         assert_eq!(target_window(Some(&managed), None).unwrap(), "lane-7-2");
         // Refuse an external session (do not auto-act on the user's own claude).
@@ -2059,7 +2036,7 @@ mod tests {
 
     #[test]
     fn transcript_limit_clamps_to_1_and_50() {
-        assert_eq!(clamp_transcript_limit(None), 12); // default
+        assert_eq!(clamp_transcript_limit(None), 12);
         assert_eq!(clamp_transcript_limit(Some(0)), 1);
         assert_eq!(clamp_transcript_limit(Some(999)), 50);
         assert_eq!(clamp_transcript_limit(Some(30)), 30);
@@ -2067,7 +2044,7 @@ mod tests {
 
     #[test]
     fn max_chars_clamps_to_100_and_2000() {
-        assert_eq!(clamp_max_chars(None), 500); // default
+        assert_eq!(clamp_max_chars(None), 500);
         assert_eq!(clamp_max_chars(Some(1)), 100);
         assert_eq!(clamp_max_chars(Some(50_000)), 2000);
         assert_eq!(clamp_max_chars(Some(750)), 750);
@@ -2099,7 +2076,7 @@ mod tests {
     fn last_lines_keeps_only_the_tail() {
         let s = "1\n2\n3\n4\n5";
         assert_eq!(last_lines(s, 3, 100), "3\n4\n5");
-        // Fewer lines than requested: keep them all.
+
         assert_eq!(last_lines(s, 100, 100), s);
     }
 

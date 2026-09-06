@@ -1,12 +1,4 @@
-//! repomind — an MCP server that exposes the repomon fleet to an orchestrator agent.
-//!
-//! The orchestrator is an ordinary `claude` session (launched by `repomon orchestrate`) with
-//! this server attached over stdio. It connects to the running daemon as a client, keeps a
-//! poll-and-diff fleet snapshot, and offers orchestrator-ergonomic tools (`fleet_status`,
-//! `read_agent`, `spawn_agent`, `wait_for_change`, …) that translate to the daemon's existing
-//! RPC. The worker agents are the same durable tmux sessions repomon already manages.
-//!
-//! Entry point: [`serve_stdio`], invoked by the `repomond mcp` subcommand.
+//! Exposes daemon operations as provider-independent MCP tools over stdio.
 
 pub mod agent;
 pub mod fleet;
@@ -101,9 +93,8 @@ pub async fn serve_stdio(opts: Options) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// `REPOMON_MCP_MODE` selects the catalog. `"agent"` is the restricted worker surface;
-    /// `"orchestrator"` is the explicit spelling controllers are launched with; an unset or
-    /// unrecognized value keeps the historical default of the full catalog.
+    /// Selects the restricted worker catalog only for agent mode, otherwise using the full
+    /// orchestrator catalog.
     #[test]
     fn catalog_mode_selects_the_worker_surface_only_for_agent() {
         assert_eq!(

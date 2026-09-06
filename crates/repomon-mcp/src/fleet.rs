@@ -1,13 +1,4 @@
-//! The fleet snapshot: a compact, token-economical projection of the daemon's `lane.list`,
-//! refreshed by an internal poll-and-diff loop and exposed to the orchestrator's tools.
-//!
-//! Why poll instead of subscribe: the single most important transition — `Running → Waiting`
-//! ("needs you") plus the `pending_prompt` "why" — is computed lazily inside the daemon's
-//! `lane.list` overlay and is *not* pushed on the event stream (and `event.notification` only
-//! fires when the remote bridge is enabled). So, exactly like the TUI, we call `lane.list` on a
-//! modest cadence (~1.5s, riding the daemon's 750ms overlay cache) and diff the result. A
-//! `watch` channel carries a generation counter that bumps only on a meaningful change, so
-//! `wait_for_change` can sleep until a real transition instead of busy-polling.
+//! Polls daemon overlays and wakes waiters when the compact fleet snapshot changes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +34,7 @@ pub struct AgentDigest {
     /// `AgentSession.stale`). A watchdog flag alongside `status`, not a status of its own.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stalled: bool,
-    /// The worktree's latest dxkit stop-gate verdict, when it runs one — the orchestrator's
+    /// The worktree's latest dxkit stop-gate verdict, when it runs one - the orchestrator's
     /// strongest done/not-done evidence (see `AgentSession.gate`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<repomon_core::agent::gate::GateVerdict>,
@@ -73,10 +64,8 @@ pub struct LaneDigest {
     /// How many additional agents share this lane beyond the primary (usually 0).
     #[serde(skip_serializing_if = "is_zero")]
     pub extra_agents: usize,
-    /// How many of this lane's sessions are managed (have a tmux window) AND active
-    /// (running/waiting/rate-limited). Drives the concurrent-agent cap, which must count every
-    /// active agent, not one per lane. Distinct from `extra_agents` (a raw extra-session count
-    /// that includes idle/external sessions).
+    /// Counts every active managed session toward the concurrent-agent cap, excluding idle and
+    /// external sessions.
     #[serde(skip_serializing_if = "is_zero")]
     pub active_agents: usize,
 }
@@ -160,13 +149,8 @@ impl Fleet {
     }
 }
 
-/// The lane's live, repomon-managed agent, if any: a session that has a tmux window (managed), an
-/// active status (running/waiting/rate-limited per [`is_active_status`]), and is not external.
-///
-/// Used by the one-shot spawn entry points (CLI `lane spawn`, MCP `spawn_agent`) to refuse silently
-/// dropping a second agent into a worktree that already has one working. Deliberately NOT consulted
-/// daemon-side: the TUI's `do_spawn` / `e` keybind intentionally fan a second managed agent into a
-/// lane through the same `agent.spawn` RPC, and a daemon-level refusal would break that.
+/// Finds an active managed agent for one-shot callers that must avoid duplicate spawns, without
+/// restricting intentional multi-agent daemon requests.
 pub fn live_managed_agent(lane: &Lane) -> Option<&AgentSession> {
     lane.agent_sessions
         .iter()
@@ -250,10 +234,8 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-/// Hash only the fields that represent a *meaningful* transition: lane set, primary agent kind,
-/// status, attention, the stall flag, and the open-dialog summary. Deliberately excludes
-/// churning fields (headline text, idle seconds, dirty counts) so `wait_for_change` wakes on
-/// real edges, not on every streamed token or file save.
+/// Ignore changing prose and counters so waiters wake on actionable state transitions rather than
+/// every token or file save.
 fn fingerprint(lanes: &[LaneDigest]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut ordered: Vec<&LaneDigest> = lanes.iter().collect();
@@ -397,7 +379,6 @@ mod tests {
 
     #[test]
     fn permission_dialog_outranks_a_running_sibling() {
-        // primary_agent should surface the one that needs a human.
         let mut lane = Lane {
             id: 1,
             repo: repomon_core::model::Repo {
@@ -445,7 +426,6 @@ mod tests {
         assert_eq!(digest.attention(), Attention::Permission);
         assert_eq!(digest.extra_agents, 1);
 
-        // With only a running agent, attention is none.
         lane.agent_sessions = vec![sess(AgentStatus::Running, None)];
         assert_eq!(project_lane(&lane, Utc::now()).attention(), Attention::None);
     }
@@ -507,7 +487,6 @@ mod tests {
         // Idle-only -> none (idle is not "live" for the clobber check).
         assert!(live_managed_agent(&lane_with(vec![sess(AgentStatus::Idle, None)])).is_none());
 
-        // Active but windowless -> none (not repomon-managed).
         let windowless = {
             let mut s = sess(AgentStatus::Running, None);
             s.tmux_window = None;
@@ -535,13 +514,13 @@ mod tests {
     fn active_agents_counts_managed_active_sessions_not_lanes() {
         let windowless = {
             let mut s = sess(AgentStatus::Running, None);
-            s.tmux_window = None; // active but unmanaged -> excluded
+            s.tmux_window = None;
             s
         };
         let lane = lane_with(vec![
-            sess(AgentStatus::Running, None),             // managed + active
-            sess(AgentStatus::Waiting, Some("proceed?")), // managed + active
-            sess(AgentStatus::Idle, None),                // managed but idle -> excluded
+            sess(AgentStatus::Running, None),
+            sess(AgentStatus::Waiting, Some("proceed?")),
+            sess(AgentStatus::Idle, None),
             windowless,
         ]);
         // Three-plus agents in ONE lane: the cap must see 2 active, not 1-per-lane.

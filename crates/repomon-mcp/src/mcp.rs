@@ -1,14 +1,5 @@
-//! A minimal, hand-rolled Model Context Protocol (MCP) server over stdio.
-//!
-//! The transport is the MCP stdio convention: newline-delimited JSON-RPC 2.0 messages on
-//! stdin/stdout (one message per line, no embedded newlines), with logs kept to stderr so they
-//! never corrupt the protocol stream. We hand-roll it — exactly as `repomon-core::protocol`
-//! hand-rolls the daemon's framed JSON-RPC — to avoid pulling a heavy SDK with a churning macro
-//! API for what is a small, stable surface: `initialize`, `tools/list`, `tools/call`, `ping`.
-//!
-//! Each `tools/call` runs in its own task and writes its response when it completes, so a long
-//! blocking tool (`wait_for_change`) never stalls `ping` or other calls. Responses are matched
-//! by id on the client side, so out-of-order completion is fine.
+//! Serves newline-delimited JSON-RPC on stdin and stdout, reserving stderr for logs. Concurrent
+//! tool calls respond by ID so long-running calls do not block pings.
 
 use std::sync::Arc;
 
@@ -91,7 +82,7 @@ pub async fn run_stdio<H: ToolHandler>(
             }
         };
         if n == 0 {
-            break; // EOF: the orchestrator's claude process closed the server.
+            break;
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -106,7 +97,7 @@ pub async fn run_stdio<H: ToolHandler>(
         };
         let id = msg.get("id").cloned();
         let Some(method) = msg.get("method").and_then(|m| m.as_str()) else {
-            continue; // a response to a request we never sent — ignore.
+            continue;
         };
 
         match method {
