@@ -852,7 +852,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                       {/* Row kebab menu trigger */}
                       <button
                         type="button"
-                        class="focus-ring mr-1 flex size-5 shrink-0 items-center justify-center rounded text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:bg-raised hover:text-foreground"
+                        class="focus-ring mr-1 flex size-5 shrink-0 items-center justify-center rounded text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-raised hover:text-foreground"
                         title="File actions"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -956,7 +956,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                   </button>
                   <button
                     type="button"
-                    class="focus-ring ml-1 flex size-4 shrink-0 items-center justify-center rounded text-muted/60 opacity-0 hover:bg-line hover:text-foreground group-hover:opacity-100"
+                    class="focus-ring ml-1 flex size-4 shrink-0 items-center justify-center rounded text-muted/60 opacity-0 hover:bg-line hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                     onClick={() => requestClose(file.path)}
                     aria-label={`Close ${basename(file.path)}`}
                   >
@@ -1118,11 +1118,11 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         </div>
 
         {/* Status Line */}
-        <div class="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface/95 px-3 font-mono text-[11px] text-muted select-none">
+        <div class="flex min-h-6 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-line bg-surface/95 px-3 font-mono text-[11px] text-muted select-none">
           <Switch
             fallback={
               <>
-          <div class="flex items-center gap-3">
+          <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             {/* Language override button */}
             <div class="relative">
               <button
@@ -1196,7 +1196,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             </Show>
           </div>
 
-          <div class="flex items-center gap-2">
+          <div class="flex shrink-0 items-center gap-2">
             <button
               type="button"
               class={`focus-ring rounded px-1.5 py-0.5 transition-colors ${

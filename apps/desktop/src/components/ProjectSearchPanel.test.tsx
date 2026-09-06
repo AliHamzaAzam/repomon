@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import ProjectSearchPanel from "./ProjectSearchPanel";
@@ -20,6 +20,24 @@ vi.mock("../ipc/rpc", () => ({
 }));
 
 describe("ProjectSearchPanel request guarding", () => {
+  it("exposes search options and disclosure state to keyboard and assistive technology", () => {
+    const editor = { selectedLane: () => null, activeFile: () => null } as unknown as EditorStore;
+    render(() => <ProjectSearchPanel editor={editor} />);
+    expect(screen.getByRole("textbox", { name: "Search in project" })).toBeInTheDocument();
+    for (const name of ["Match case", "Use regular expression"]) {
+      const toggle = screen.getByRole("button", { name });
+      expect(toggle).toHaveAttribute("aria-pressed", "false");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-pressed", "true");
+    }
+    for (const name of ["Replace in file", "Filter paths"]) {
+      const toggle = screen.getByRole("button", { name });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    }
+  });
+
   it("two searches resolving out of order; the newer query's hits win", async () => {
     searchResolvers = [];
 

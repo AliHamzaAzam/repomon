@@ -724,9 +724,9 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
       onKeyDown={onRootKeyDown}
     >
       {/* Toolbar */}
-      <div class="flex h-9 shrink-0 items-center gap-2 border-b border-line bg-surface/95 px-3">
-        <div class="flex min-w-0 items-center gap-2 font-mono text-[11px] text-muted">
-          <span class="max-w-[220px] truncate font-medium text-foreground">{basename(props.path)}</span>
+      <div class="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface/95 px-3 py-1.5">
+        <div class="flex min-w-0 max-w-full items-center gap-2 font-mono text-[11px] text-muted">
+          <span class="min-w-0 max-w-[220px] truncate font-medium text-foreground" title={props.path}>{basename(props.path)}</span>
           <Show when={props.size !== undefined && props.size > 0}>
             <span class="shrink-0 text-line">|</span>
             <span class="shrink-0">{formatBytes(props.size)}</span>
@@ -734,7 +734,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
         </div>
 
         <Show when={status() === "loaded"}>
-          <div class="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-muted">
+          <div class="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2 font-mono text-[11px] text-muted">
             <div class="flex items-center gap-1">
               <button
                 type="button"
@@ -817,6 +817,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
               <button
                 type="button"
                 aria-label="Fit width"
+                aria-pressed={fitMode() === "width"}
                 title="Fit width"
                 class={`focus-ring flex size-6 items-center justify-center rounded ${
                   fitMode() === "width" ? "bg-signal/15 text-signal" : "text-muted hover:bg-raised hover:text-foreground"
@@ -828,6 +829,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
               <button
                 type="button"
                 aria-label="Fit page"
+                aria-pressed={fitMode() === "page"}
                 title="Fit page"
                 class={`focus-ring flex size-6 items-center justify-center rounded ${
                   fitMode() === "page" ? "bg-signal/15 text-signal" : "text-muted hover:bg-raised hover:text-foreground"
@@ -921,13 +923,14 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
           </div>
 
           <Show when={findOpen()}>
-            <div class="absolute top-2 right-2 z-20 flex items-center gap-1.5 rounded-lg border border-line bg-surface/95 px-2 py-1.5 font-mono text-[11px] shadow-lg backdrop-blur">
+            <div class="absolute top-2 right-2 left-2 z-20 ml-auto flex max-w-sm items-center gap-1.5 rounded-lg border border-line bg-surface/95 px-2 py-1.5 font-mono text-[11px] shadow-lg backdrop-blur">
               <IconSearch size={12} class="shrink-0 text-muted" />
               <input
                 ref={findInputEl}
                 type="text"
                 placeholder="Find in document"
-                class="focus-ring w-40 rounded border border-line bg-background px-1.5 py-0.5 text-foreground"
+                aria-label="Find in document"
+                class="focus-ring min-w-0 flex-1 rounded border border-line bg-background px-1.5 py-0.5 text-foreground"
                 value={findQuery()}
                 onInput={(e) => setFindQuery(e.currentTarget.value)}
                 onKeyDown={(e) => {

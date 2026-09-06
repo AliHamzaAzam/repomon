@@ -139,13 +139,19 @@ describe("ImageViewer", () => {
     const fitButton = screen.getByLabelText("Fit to pane");
     const actualButton = screen.getByLabelText("Actual size");
     expect(fitButton.className).toContain("bg-signal/15");
+    expect(fitButton).toHaveAttribute("aria-pressed", "true");
+    expect(actualButton).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.dblClick(stage);
     await waitFor(() => expect(actualButton.className).toContain("bg-signal/15"));
     expect(screen.getByTitle("Reset zoom to fit")).toHaveTextContent("100%");
+    expect(fitButton).toHaveAttribute("aria-pressed", "false");
+    expect(actualButton).toHaveAttribute("aria-pressed", "true");
 
     fireEvent.dblClick(stage);
     await waitFor(() => expect(fitButton.className).toContain("bg-signal/15"));
+    expect(fitButton).toHaveAttribute("aria-pressed", "true");
+    expect(actualButton).toHaveAttribute("aria-pressed", "false");
   });
 
   it("shows the primary open-externally action on the error state", async () => {

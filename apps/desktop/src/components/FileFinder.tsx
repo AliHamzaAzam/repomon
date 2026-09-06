@@ -4,6 +4,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  createUniqueId,
 } from "solid-js";
 import { Dynamic } from "solid-js/web";
 
@@ -75,6 +76,7 @@ export default function FileFinder(props: FileFinderProps) {
 
   let inputRef: HTMLInputElement | undefined;
   let listRef: HTMLDivElement | undefined;
+  const resultsId = createUniqueId();
 
   const currentLane = () => props.editor.selectedLane();
   const currentLaneId = () => currentLane()?.id ?? null;
@@ -144,6 +146,19 @@ export default function FileFinder(props: FileFinderProps) {
       return;
     }
 
+    if (e.key === "Tab") {
+      const controls = (e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>("input, button:not([tabindex='-1'])");
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if ((e.shiftKey && e.target === first) || (!e.shiftKey && e.target === last)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first)?.focus();
+      }
+      return;
+    }
+    // Search navigation belongs to the combobox, not the adjacent Clear action.
+    if (e.target !== inputRef) return;
+
     const items = matches();
     if (items.length === 0) return;
 
@@ -206,7 +221,13 @@ export default function FileFinder(props: FileFinderProps) {
             <input
               ref={inputRef}
               type="text"
-              class="focus-ring ml-2 flex-1 bg-transparent font-mono text-sm text-foreground placeholder:text-muted/60 focus:outline-none"
+              role="combobox"
+              aria-label="Search files by name"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={resultsId}
+              aria-activedescendant={matches().length ? `${resultsId}-${selectedIndex()}` : undefined}
+              class="focus-ring ml-2 min-w-0 flex-1 bg-transparent font-mono text-sm text-foreground placeholder:text-muted/60 focus:outline-none"
               placeholder="Search files by name..."
               value={query()}
               onInput={(e) => setQuery(e.currentTarget.value)}
@@ -218,8 +239,12 @@ export default function FileFinder(props: FileFinderProps) {
                 <button
                   type="button"
                   class="flex size-5 items-center justify-center rounded text-muted hover:bg-raised hover:text-foreground"
-                  onClick={() => setQuery("")}
+                  onClick={() => {
+                    setQuery("");
+                    inputRef?.focus();
+                  }}
                   title="Clear query"
+                  aria-label="Clear query"
                 >
                   <IconClose size={12} />
                 </button>
@@ -233,7 +258,10 @@ export default function FileFinder(props: FileFinderProps) {
           {/* Results list */}
           <div
             ref={listRef}
-            class="flex-1 overflow-y-auto p-1.5 outline-none"
+            id={resultsId}
+            role="listbox"
+            aria-label="Files"
+            class="min-h-0 flex-1 overflow-y-auto p-1.5 outline-none"
             tabIndex={-1}
           >
             <Show
@@ -259,6 +287,11 @@ export default function FileFinder(props: FileFinderProps) {
                   return (
                     <button
                       type="button"
+                      role="option"
+                      id={`${resultsId}-${idx()}`}
+                      aria-selected={isSelected()}
+                      aria-label={match.path}
+                      tabIndex={-1}
                       class={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
                         isSelected()
                           ? "bg-raised text-foreground ring-1 ring-line"
@@ -268,11 +301,11 @@ export default function FileFinder(props: FileFinderProps) {
                       onMouseEnter={() => setSelectedIndex(idx())}
                       title={match.path}
                     >
-                      <div class="flex min-w-0 items-center gap-2">
+                      <div class="flex min-w-0 flex-1 items-center gap-2">
                         <span class="size-4 shrink-0 text-muted">
                           <Dynamic component={Icon} size={14} />
                         </span>
-                        <span class="font-mono text-xs text-foreground">
+                        <span class="min-w-0 truncate font-mono text-xs text-foreground">
                           <HighlightedText
                             text={basename}
                             offset={basenameOffset}

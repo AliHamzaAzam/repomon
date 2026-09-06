@@ -367,9 +367,9 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
       onKeyDown={onRootKeyDown}
     >
       {/* Toolbar */}
-      <div class="flex h-9 shrink-0 items-center gap-2 border-b border-line bg-surface/95 px-3">
-        <div class="flex min-w-0 items-center gap-2 font-mono text-[11px] text-muted">
-          <span class="max-w-[220px] truncate font-medium text-foreground">{basename(props.path)}</span>
+      <div class="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface/95 px-3 py-1.5">
+        <div class="flex min-w-0 max-w-full items-center gap-2 font-mono text-[11px] text-muted">
+          <span class="min-w-0 max-w-[220px] truncate font-medium text-foreground" title={props.path}>{basename(props.path)}</span>
           <Show when={status() === "loaded" && dimensions()}>
             <span class="shrink-0 text-line">|</span>
             <span class="shrink-0">
@@ -383,7 +383,7 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
         </div>
 
         <Show when={status() === "loaded"}>
-          <div class="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-muted">
+          <div class="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2 font-mono text-[11px] text-muted">
             <div class="flex items-center gap-1">
               <button
                 type="button"
@@ -421,6 +421,7 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
               <button
                 type="button"
                 aria-label="Fit to pane"
+                aria-pressed={zoomMode() === "fit"}
                 title="Fit to pane (Mod+0)"
                 class={`focus-ring flex size-6 items-center justify-center rounded ${
                   zoomMode() === "fit" ? "bg-signal/15 text-signal" : "text-muted hover:bg-raised hover:text-foreground"
@@ -432,6 +433,7 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
               <button
                 type="button"
                 aria-label="Actual size"
+                aria-pressed={zoomMode() === "actual"}
                 title="Actual size, 100% (Mod+1)"
                 class={`focus-ring flex size-6 items-center justify-center rounded ${
                   zoomMode() === "actual" ? "bg-signal/15 text-signal" : "text-muted hover:bg-raised hover:text-foreground"

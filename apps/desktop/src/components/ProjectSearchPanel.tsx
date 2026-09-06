@@ -146,11 +146,12 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
       <div class="flex flex-col gap-1.5 border-b border-line p-2">
         {/* Find row */}
         <div class="flex items-center gap-1">
-          <div class="relative flex flex-1 items-center">
+          <div class="relative flex min-w-0 flex-1 items-center">
             <IconSearch size={13} class="pointer-events-none absolute left-2 text-muted" />
             <input
               ref={searchInputRef}
               type="text"
+              aria-label="Search in project"
               class="focus-ring w-full rounded border border-line bg-background py-1 pr-7 pl-7 font-mono text-xs text-foreground placeholder:text-muted/60"
               placeholder="Search in project..."
               value={query()}
@@ -170,7 +171,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
           </div>
 
           {/* Option toggles */}
-          <div class="flex items-center gap-0.5 rounded border border-line bg-background p-0.5">
+          <div class="flex shrink-0 items-center gap-0.5 rounded border border-line bg-background p-0.5">
             <button
               type="button"
               class={`flex size-5 items-center justify-center rounded font-mono text-[10px] font-semibold transition-colors ${
@@ -180,6 +181,8 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
               }`}
               onClick={() => setCaseSensitive((v) => !v)}
               title="Match Case (Alt+C)"
+              aria-label="Match case"
+              aria-pressed={caseSensitive()}
             >
               Aa
             </button>
@@ -192,6 +195,8 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
               }`}
               onClick={() => setRegex((v) => !v)}
               title="Use Regular Expression (Alt+R)"
+              aria-label="Use regular expression"
+              aria-pressed={regex()}
             >
               .*
             </button>
@@ -204,6 +209,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
             type="button"
             class="flex items-center gap-1 hover:text-foreground"
             onClick={() => setShowReplace((v) => !v)}
+            aria-expanded={showReplace()}
           >
             <Show when={showReplace()} fallback={<IconChevronRight size={9} />}>
               <IconChevronDown size={9} />
@@ -214,6 +220,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
             type="button"
             class="flex items-center gap-1 hover:text-foreground"
             onClick={() => setShowGlob((v) => !v)}
+            aria-expanded={showGlob()}
           >
             <Show when={showGlob()} fallback={<IconChevronRight size={9} />}>
               <IconChevronDown size={9} />
@@ -336,17 +343,19 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
                     type="button"
                     class="focus-ring flex w-full items-center justify-between rounded px-1.5 py-1 text-left font-medium text-foreground hover:bg-raised/60"
                     onClick={() => toggleFileCollapse(group.path)}
+                    aria-expanded={!isCollapsed()}
+                    title={group.path}
                   >
-                    <div class="flex min-w-0 items-center gap-1.5">
-                      <span class="size-3 text-muted/60">
+                    <div class="flex min-w-0 flex-1 items-center gap-1.5">
+                      <span class="size-3 shrink-0 text-muted/60">
                         <Show when={isCollapsed()} fallback={<IconChevronDown size={10} />}>
                           <IconChevronRight size={10} />
                         </Show>
                       </span>
-                      <span class="size-3.5 text-muted">
+                      <span class="size-3.5 shrink-0 text-muted">
                         <Dynamic component={Icon} size={13} />
                       </span>
-                      <span class="font-mono text-xs font-medium text-foreground">
+                      <span class="min-w-0 truncate font-mono text-xs font-medium text-foreground">
                         {basename}
                       </span>
                       <Show when={dirname.length > 0}>
@@ -355,7 +364,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
                         </span>
                       </Show>
                     </div>
-                    <span class="rounded-full bg-raised px-1.5 py-0.2 font-mono text-[10px] text-muted">
+                    <span class="shrink-0 rounded-full bg-raised px-1.5 py-0.2 font-mono text-[10px] text-muted">
                       {group.hits.length}
                     </span>
                   </button>

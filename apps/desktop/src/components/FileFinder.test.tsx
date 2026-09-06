@@ -44,6 +44,43 @@ afterEach(() => {
 });
 
 describe("FileFinder component", () => {
+  it("announces the active match as keyboard navigation moves and filters", async () => {
+    mockRpc({ "file.index": () => ({ paths: ["alpha.ts", "bravo.ts"] }) });
+    render(() => <FileFinder editor={makeMockEditorStore()} isOpen onClose={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Search files by name" });
+    await screen.findByRole("option", { name: "alpha.ts" });
+    expect(input).toHaveAttribute("aria-controls", screen.getByRole("listbox", { name: "Files" }).id);
+    const active = () => screen.getByRole("option", { selected: true });
+    expect(input).toHaveAttribute("aria-activedescendant", active().id);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(active()).toHaveTextContent("bravo.ts");
+    expect(input).toHaveAttribute("aria-activedescendant", active().id);
+    fireEvent.input(input, { target: { value: "no matching file" } });
+    expect(input).not.toHaveAttribute("aria-activedescendant");
+  });
+
+  it("keeps Tab inside the finder and lets Clear activate without opening a match", async () => {
+    mockRpc({ "file.index": () => ({ paths: ["alpha.ts", "beta.ts"] }) });
+    const onOpenPath = vi.fn();
+    render(() => <FileFinder editor={makeMockEditorStore()} isOpen onClose={vi.fn()} onOpenPath={onOpenPath} />);
+    const input = screen.getByRole("combobox");
+    await screen.findByRole("option", { name: "alpha.ts" });
+    fireEvent.input(input, { target: { value: "alpha" } });
+    const clear = screen.getByRole("button", { name: "Clear query" });
+    input.focus();
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(clear).toHaveFocus();
+    fireEvent.keyDown(clear, { key: "Tab" });
+    expect(input).toHaveFocus();
+    clear.focus();
+    fireEvent.keyDown(clear, { key: "Enter" });
+    expect(onOpenPath).not.toHaveBeenCalled();
+    fireEvent.click(clear);
+    expect(input).toHaveValue("");
+    expect(input).toHaveFocus();
+    expect(onOpenPath).not.toHaveBeenCalled();
+  });
+
   it("fetches index and renders files on open", async () => {
     mockRpc({
       "file.index": () => ({

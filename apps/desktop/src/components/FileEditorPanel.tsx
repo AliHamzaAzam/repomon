@@ -446,7 +446,7 @@ export default function FileEditorPanel(props: FileEditorPanelProps) {
                         </button>
                         <button
                           type="button"
-                          class="focus-ring mr-1 flex size-4 shrink-0 items-center justify-center rounded text-muted/60 opacity-0 hover:bg-line/60 hover:text-foreground group-hover:opacity-100"
+                          class="focus-ring mr-1 flex size-4 shrink-0 items-center justify-center rounded text-muted/60 opacity-0 hover:bg-line/60 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                           onClick={() => requestClose(file.path)}
                           aria-label={`Close ${basename(file.path)}`}
                         >

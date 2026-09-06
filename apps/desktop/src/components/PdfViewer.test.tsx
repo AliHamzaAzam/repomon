@@ -179,6 +179,21 @@ afterEach(() => {
 });
 
 describe("PdfViewer", () => {
+  it("exposes fit modes as mutually exclusive pressed controls", async () => {
+    render(() => <PdfViewer worktreeRoot="/repo/lane" path="docs/report.pdf" />);
+    await screen.findByTestId("pdf-page-1");
+    const width = screen.getByRole("button", { name: "Fit width" });
+    const page = screen.getByRole("button", { name: "Fit page" });
+    expect(width).toHaveAttribute("aria-pressed", "true");
+    expect(page).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(page);
+    expect(page).toHaveAttribute("aria-pressed", "true");
+    expect(width).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(page).toHaveAttribute("aria-pressed", "false");
+    expect(width).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("renders three page slots and only the visible canvases", async () => {
     render(() => <PdfViewer worktreeRoot="/repo/lane" path="docs/report.pdf" size={2048} />);
 
