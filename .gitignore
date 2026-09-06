@@ -19,3 +19,8 @@ apps/desktop/src-tauri/gen/
 
 # Secrets that must never land in the repo (APNs signing keys live beside the config)
 *.p8
+
+# Coordinator process artifacts: briefs, audit reports, QA evidence stay local
+/qa/
+/.briefs/
+docs/design-audit-*.md
