@@ -390,16 +390,15 @@ pub async fn migrate_records(ctx: &Ctx) -> repomon_core::Result<Vec<String>> {
     let rows = ctx.store.list_playbooks().await?;
 
     let for_fs = home.clone();
-    let (notes_written, books_written) = tokio::task::spawn_blocking(
-        move || -> repomon_core::Result<_> {
+    let (notes_written, books_written) =
+        tokio::task::spawn_blocking(move || -> repomon_core::Result<_> {
             Ok((
                 notes::migrate(&for_fs, &legacy, &repos)?,
                 playbooks::migrate(&for_fs, &rows)?,
             ))
-        },
-    )
-    .await
-    .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
+        })
+        .await
+        .map_err(|e| repomon_core::Error::Other(e.to_string()))??;
 
     let mut all = Vec::new();
     for (kind, written) in [("notes", notes_written), ("playbooks", books_written)] {
@@ -515,7 +514,10 @@ mod tests {
     fn unique_tmux_session(tag: &str) -> String {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        format!("repomon-primary-window-it-{tag}-{}-{seq}", std::process::id())
+        format!(
+            "repomon-primary-window-it-{tag}-{}-{seq}",
+            std::process::id()
+        )
     }
 
     fn kill_tmux_session(session: &str) {
@@ -607,8 +609,14 @@ mod tests {
         let home = dir.path().join("repomind");
         let ctx = test_ctx(&home).await;
 
-        let a = { let ctx = ctx.clone(); tokio::spawn(async move { ensure_home(&ctx).await }) };
-        let b = { let ctx = ctx.clone(); tokio::spawn(async move { ensure_home(&ctx).await }) };
+        let a = {
+            let ctx = ctx.clone();
+            tokio::spawn(async move { ensure_home(&ctx).await })
+        };
+        let b = {
+            let ctx = ctx.clone();
+            tokio::spawn(async move { ensure_home(&ctx).await })
+        };
         let (a, b) = (a.await.unwrap(), b.await.unwrap());
         let a = a.expect("first ensure_home");
         let b = b.expect("second ensure_home");
@@ -680,30 +688,60 @@ mod tests {
     async fn migrate_records_writes_playbook_rows_as_files() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("repomind");
-        let store = Store::open_in_memory().unwrap();
-        store
-            .save_playbook("blessed".into(), "live\n".into())
-            .await
+        let db = dir.path().join("legacy.db");
+        let store = Store::open(&db).unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO playbooks(name, content, status, created_at, updated_at, approved_at)
+             VALUES ('blessed', 'live' || char(10), 'approved', ?1, ?1, ?1),
+                    ('pending', 'wip' || char(10), 'draft', ?1, ?1, NULL)",
+                [&now],
+            )
             .unwrap();
-        store.approve_playbook("blessed".into()).await.unwrap();
-        store
-            .save_playbook("pending".into(), "wip\n".into())
-            .await
-            .unwrap();
+        drop(connection);
 
         let mut config = Config::default();
         config.repomind.home = home.to_string_lossy().into_owned();
-        let ctx = Ctx::new(store, config, None);
+        let ctx = Ctx::new_with_paths(
+            store,
+            config,
+            Some(db),
+            dir.path().join("config.toml"),
+            dir.path().join("legacy-notes"),
+        );
         ensure_home(&ctx).await.unwrap();
 
         let written = migrate_records(&ctx).await.unwrap();
 
-        assert!(written.contains(&"playbooks/blessed.md".to_string()), "{written:?}");
-        assert!(written.contains(&"playbooks/drafts/pending.md".to_string()), "{written:?}");
+        assert!(
+            written.contains(&"playbooks/blessed.md".to_string()),
+            "{written:?}"
+        );
+        assert!(
+            written.contains(&"playbooks/drafts/pending.md".to_string()),
+            "{written:?}"
+        );
         assert_eq!(playbooks::search(&home, "live", 10).unwrap().len(), 1);
         assert!(
             playbooks::search(&home, "wip", 10).unwrap().is_empty(),
             "a migrated draft stays inert"
+        );
+        assert_eq!(
+            ctx.store.list_playbooks().await.unwrap().len(),
+            2,
+            "legacy rows survive migration"
+        );
+        std::fs::write(
+            home.join("playbooks/blessed.md"),
+            "edited after migration\n",
+        )
+        .unwrap();
+        assert!(migrate_records(&ctx).await.unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(home.join("playbooks/blessed.md")).unwrap(),
+            "edited after migration\n"
         );
     }
 
@@ -777,7 +815,11 @@ mod tests {
         ctx.backend.kill_named(&w2).expect("kill window two");
 
         let resolved = primary_window(&ctx, lane_id).await.unwrap();
-        assert_eq!(resolved, Some(w1.clone()), "must resolve to the live window");
+        assert_eq!(
+            resolved,
+            Some(w1.clone()),
+            "must resolve to the live window"
+        );
         assert_eq!(
             ctx.controller_lane_window().await,
             Some(w1),
