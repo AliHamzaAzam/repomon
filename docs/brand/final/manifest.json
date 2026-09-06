@@ -1,0 +1,33 @@
+{
+  "source": "docs/brand/repo-logo-final.svg",
+  "source_sha256": "47bfa2d04bb6abb64d0b6a9456dd33157565eb626b6af538bd8a908602378ea4",
+  "created": "2026-09-05",
+  "geometry": "User-adjusted source SVG unchanged; macOS export uses normalized closed outlines of its strokes for compatibility.",
+  "exports_sha256": {
+    "preview.png": "16b1eddc97808c425a8f9af4882367e1544d4dab4da506dcffe90ae4bf5cb093",
+    "macos/repomon-macos-clear-dark-1024.png": "b78f5aa8e5050f16c014a4f4d071daf098be48ca8545e9e8de171b5add17a185",
+    "macos/repomon-macos-1024.png": "1952d5e5f03729a9990fdb44d5d825441f8aeaf52744ef7814c820cd74dc2f92",
+    "macos/repomon-macos-clear-light-1024.png": "c06effce2d4654312fd31541f613d389f787ae29131d9bc5f0a07ac91bd9a6fb",
+    "macos/repomon-macos-dark-1024.png": "be22f0bfa295f000ab91c99dd363b5a22c788a97daa8422ec91b77e520b68ec2",
+    "macos/repomon-macos-tinted-dark-1024.png": "f4125621087294cbb95a6fed0ae51db2fc92c9cb333e1fd66a25cda3246447da",
+    "macos/repomon-macos-tinted-light-1024.png": "4ddfdf7bf4b021db96be9721b8e8ea9ee2af9dae7bf4dbc73ea872bb42940969",
+    "macos/appearances.png": "8c4246dbe7af17b8455ccbd9745deff17a817ac84193b3fefe63127c23653992",
+    "macos/repomon-macos-legacy-256.png": "9cf8de0c2660dbb668672d04080913d933b0a38d5f5f4d0dcf27be924befe802",
+    "windows/preview.png": "aa2f349393ff9ae29a3656bc21847ad44f06b5cb5ff2b94bd23e4bc4704f08b2",
+    "windows/repomon-256.png": "62e9d7df2ce91afbf35d13b5eda4d9744dcf47ed53c0d1884683a7761dd1d308",
+    "windows/repomon-96.png": "4347fc19be002ee9a15bd78cd420604258e84b54489f1d6383c1a6261767484e",
+    "windows/repomon-40.png": "af8046453049f834c9a6e7243c697556a2e00ffdf26b0e79d3a48f1a4aca258e",
+    "windows/repomon-32.png": "ca70bc3fda01688cbbee30ffe6fd7b1347dc8352c89beb9c9d4dbb9901d69a61",
+    "windows/repomon-24.png": "93af7d544db10cdfbb2ae7a86224740c633bdb0bd2712c18866a7558edd0355d",
+    "windows/repomon-1024.png": "914d73ec8644d75257c097d457df2bc60b5a9f9f84c8a6d718527dcbf0d7fa37",
+    "windows/repomon-20.png": "51b49aade3a92659bd4f7ab44a3e2cc8b6228d505d9232e05e288a5f48b9647e",
+    "windows/repomon.ico": "c3241d0e4a225118860bff06d65cb253f5b616e6a40f3a6c8f26e3199952cc99",
+    "windows/repomon-16.png": "868ace0a8814b5645ae853254db667aff4c53ea28baa833b5ed15a6e624f9a79",
+    "windows/repomon-64.png": "3dbe299e72695360d37635435bfd02229f40fdc172e57531dfc7df900e9539a9",
+    "windows/repomon-512.png": "a926ccaa24ba51695b2e7b3df8d2020aee347b5ece96bf79b8c10be31b4956b1",
+    "windows/repomon-128.png": "37d4d889f4ef192257e61fc49a83a24e74fec355fa0ddd6668c012d128fea45a",
+    "windows/repomon-48.png": "bab893b40fd65072540c0d3b37f1f9e2c538baac527472a3c0a4911a5c51828a",
+    "macos/compiled/Assets.car": "690d45840845487fb69fd7bc689a1c244faedba491955ec13f4ca2c0f60dafb1",
+    "macos/compiled/Repomon.icns": "40b769ef44ccddcb4efdc9d7fcec5205693ebebabe8e69e1c84afbd268d5d7a5"
+  }
+}

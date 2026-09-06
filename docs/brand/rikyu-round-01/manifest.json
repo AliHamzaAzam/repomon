@@ -1,0 +1,7 @@
+[
+  {"id":"relay","index":1,"title":"Relay — connected paths","src":"01-relay.png","output":"01-relay.png","caption":"A bold cobalt mark for parallel work."},
+  {"id":"orbit","index":2,"title":"Orbit — coordinated motion","src":"02-orbit.png","output":"02-orbit.png","caption":"Warm, open and dynamic."},
+  {"id":"sentinel","index":3,"title":"Sentinel — fleet guardian","src":"03-sentinel.png","output":"03-sentinel.png","caption":"An approachable identity with personality."},
+  {"id":"fold","index":4,"title":"Fold — architectural monogram","src":"04-fold.png","output":"04-fold.png","caption":"A compact sculptural violet mark."},
+  {"id":"command","index":5,"title":"Command — one center","src":"05-command.png","output":"05-command.png","caption":"A modular seal in graphite and vermilion."}
+]

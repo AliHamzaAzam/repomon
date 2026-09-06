@@ -1,0 +1,32 @@
+[
+  {
+    "id": "01-switchyard",
+    "title": "Switchyard",
+    "src": "01-switchyard-study.png",
+    "output": "01-switchyard-study.png"
+  },
+  {
+    "id": "02-common",
+    "title": "Common",
+    "src": "02-common-study.png",
+    "output": "02-common-study.png"
+  },
+  {
+    "id": "03-lookout",
+    "title": "Lookout",
+    "src": "03-lookout-study.png",
+    "output": "03-lookout-study.png"
+  },
+  {
+    "id": "04-workspaces",
+    "title": "Workspaces",
+    "src": "04-workspaces-study.png",
+    "output": "04-workspaces-study.png"
+  },
+  {
+    "id": "05-pair",
+    "title": "Pair",
+    "src": "05-pair-study.png",
+    "output": "05-pair-study.png"
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "a1-balanced",
+    "title": "A1 / Balanced",
+    "src": "a1-balanced-study.png",
+    "output": "a1-balanced-study.png"
+  },
+  {
+    "id": "a2-compact",
+    "title": "A2 / Compact",
+    "src": "a2-compact-study.png",
+    "output": "a2-compact-study.png"
+  },
+  {
+    "id": "a3-shared-bus",
+    "title": "A3 / Shared Bus",
+    "src": "a3-shared-bus-study.png",
+    "output": "a3-shared-bus-study.png"
+  },
+  {
+    "id": "a4-round",
+    "title": "A4 / Round",
+    "src": "a4-round-study.png",
+    "output": "a4-round-study.png"
+  }
+]

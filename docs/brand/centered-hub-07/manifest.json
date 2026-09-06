@@ -1,0 +1,26 @@
+[
+  {
+    "id": "c1-bilateral",
+    "title": "C1 / Bilateral",
+    "src": "c1-bilateral-study.png",
+    "output": "c1-bilateral-study.png"
+  },
+  {
+    "id": "c2-fourfold",
+    "title": "C2 / Fourfold",
+    "src": "c2-fourfold-study.png",
+    "output": "c2-fourfold-study.png"
+  },
+  {
+    "id": "c3-canopy",
+    "title": "C3 / Canopy",
+    "src": "c3-canopy-study.png",
+    "output": "c3-canopy-study.png"
+  },
+  {
+    "id": "c4-command-square",
+    "title": "C4 / Command Square",
+    "src": "c4-command-square-study.png",
+    "output": "c4-command-square-study.png"
+  }
+]

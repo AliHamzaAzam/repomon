@@ -1,0 +1,32 @@
+[
+  {
+    "id": "01-conductor",
+    "title": "Conductor",
+    "src": "01-conductor-study.png",
+    "output": "01-conductor-study.png"
+  },
+  {
+    "id": "02-fleet-r",
+    "title": "Fleet R",
+    "src": "02-fleet-r-study.png",
+    "output": "02-fleet-r-study.png"
+  },
+  {
+    "id": "03-mission",
+    "title": "Mission",
+    "src": "03-mission-study.png",
+    "output": "03-mission-study.png"
+  },
+  {
+    "id": "04-repo-grid",
+    "title": "Repo Grid",
+    "src": "04-repo-grid-study.png",
+    "output": "04-repo-grid-study.png"
+  },
+  {
+    "id": "05-overwatch",
+    "title": "Overwatch",
+    "src": "05-overwatch-study.png",
+    "output": "05-overwatch-study.png"
+  }
+]

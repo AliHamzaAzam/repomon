@@ -1,0 +1,38 @@
+[
+  {
+    "id": "01-drift",
+    "title": "01 / Drift",
+    "src": "01-drift-study.png",
+    "output": "01-drift-study.png"
+  },
+  {
+    "id": "02-counterweight",
+    "title": "02 / Counterweight",
+    "src": "02-counterweight-study.png",
+    "output": "02-counterweight-study.png"
+  },
+  {
+    "id": "03-phase",
+    "title": "03 / Phase",
+    "src": "03-phase-study.png",
+    "output": "03-phase-study.png"
+  },
+  {
+    "id": "04-duet",
+    "title": "04 / Duet",
+    "src": "04-duet-study.png",
+    "output": "04-duet-study.png"
+  },
+  {
+    "id": "05-facet",
+    "title": "05 / Facet",
+    "src": "05-facet-study.png",
+    "output": "05-facet-study.png"
+  },
+  {
+    "id": "06-resonance",
+    "title": "06 / Resonance",
+    "src": "06-resonance-study.png",
+    "output": "06-resonance-study.png"
+  }
+]
