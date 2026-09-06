@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, within } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
 import type { PaneTarget } from "./terminalTargets";
@@ -10,6 +11,63 @@ const panes: PaneTarget[] = [
 ];
 
 describe("PanePicker", () => {
+  it("enters the portaled picker and returns focus on Escape from a footprint control", async () => {
+    const { unmount } = render(() => (
+      <PanePicker multitasking available={panes} selected={panes} onChange={vi.fn()} />
+    ));
+    const trigger = screen.getByRole("button", { name: "Configure multitasking panes" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Choose multitasking panes" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    const footprint = within(dialog).getByRole("button", { name: "Agent one: toggle double height" });
+    footprint.focus();
+    fireEvent.keyDown(footprint, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    unmount();
+  });
+
+  it("exposes width and tall state while preserving both dimensions on changes", () => {
+    const { unmount } = render(() => {
+      const [spans, setSpans] = createSignal({ one: { columns: 1 as 1 | 2, rows: 1 as 1 | 2 } });
+      return <PanePicker multitasking available={panes} selected={panes} spans={spans()}
+        onChange={vi.fn()} onSpanChange={(_, span) => setSpans({ one: span })} />;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Configure multitasking panes" }));
+    const narrow = screen.getByRole("button", { name: "Agent one: one column wide" });
+    const wide = screen.getByRole("button", { name: "Agent one: two columns wide" });
+    const tall = screen.getByRole("button", { name: "Agent one: toggle double height" });
+    expect(narrow).toHaveAttribute("aria-pressed", "true");
+    expect(wide).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(tall);
+    fireEvent.click(wide);
+    expect(wide).toHaveAttribute("aria-pressed", "true");
+    expect(narrow).toHaveAttribute("aria-pressed", "false");
+    expect(tall).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(tall);
+    expect(tall).toHaveAttribute("aria-pressed", "false");
+    expect(wide).toHaveAttribute("aria-pressed", "true");
+    unmount();
+  });
+
+  it("disables hiding the last visible pane and enables it once another pane is selected", () => {
+    const { unmount } = render(() => {
+      const [selected, setSelected] = createSignal([panes[0]]);
+      return <PanePicker available={panes} selected={selected()}
+        onChange={(windows) => setSelected(panes.filter((pane) => windows.includes(pane.window)))} />;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Configure lane panes" }));
+    expect(screen.getByRole("button", { name: "Hide Agent one" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Show Agent two" }));
+    expect(screen.getByRole("button", { name: "Hide Agent one" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Hide Agent one" }));
+    expect(screen.getByRole("button", { name: "Show Agent one" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Hide Agent two" })).toBeDisabled();
+    unmount();
+  });
+
   it("portals the multitasking picker above the terminal stacking context and changes selection", () => {
     const onChange = vi.fn();
     const { container, unmount } = render(() => (

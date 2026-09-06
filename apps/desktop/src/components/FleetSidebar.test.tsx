@@ -429,6 +429,22 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("running")).toBeInTheDocument();
   });
 
+  it.each(["Enter", " "])("selects a minimized lane with %j without intercepting its expand button", (key) => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+    const expand = screen.getByRole("button", { name: "Expand lane main" });
+    const row = expand.closest(".fleet-row")!;
+    fireEvent.keyDown(row, { key });
+    expect(fleet.setSelectedLaneId).toHaveBeenCalledExactlyOnceWith(10);
+    vi.mocked(fleet.setSelectedLaneId).mockClear();
+    fireEvent.keyDown(expand, { key });
+    expect(fleet.setSelectedLaneId).not.toHaveBeenCalled();
+    fireEvent.click(expand);
+    expect(screen.getByRole("button", { name: "Minimize inactive lane main" })).toBeInTheDocument();
+    expect(fleet.setSelectedLaneId).not.toHaveBeenCalled();
+  });
+
   it("shows a reset-time tooltip only for windows that carry reset_at (E9)", () => {
     // Pin "now" to a fixed local instant so the 5h window's reset_at (a few hours later, same
     // local day) resolves to the time-only same-day form deterministically, regardless of the

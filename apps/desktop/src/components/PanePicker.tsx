@@ -30,6 +30,13 @@ export default function PanePicker(props: PanePickerProps) {
 
   const toggleOpen = () => {
     setOpen((value) => !value);
+    if (open()) {
+      // The portal is outside the toolbar's tab order. Enter the picker so keyboard users
+      // reach its controls directly, including when every selection control is disabled.
+      queueMicrotask(() => {
+        if (open()) dialog?.focus();
+      });
+    }
   };
 
   const positionDialog = () => {
@@ -126,7 +133,15 @@ export default function PanePicker(props: PanePickerProps) {
             ref={dialog}
             id={dialogId}
             role="dialog"
+            tabIndex={-1}
             aria-label={props.multitasking ? "Choose multitasking panes" : "Choose lane panes"}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              setOpen(false);
+              trigger?.focus();
+            }}
             style={dialogStyle()}
             class="fixed z-[100] flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_18px_55px_var(--shadow)]"
           >
@@ -162,11 +177,12 @@ export default function PanePicker(props: PanePickerProps) {
                           <div class="flex min-w-0 items-center gap-2">
                             <button
                               type="button"
-                              class={`focus-ring flex size-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                              class={`focus-ring flex size-5 shrink-0 items-center justify-center rounded border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                                 selected() ? "border-signal bg-signal text-white" : "border-line text-transparent hover:border-signal/60"
                               }`}
                               aria-label={`${selected() ? "Hide" : "Show"} ${target.label}`}
                               aria-pressed={selected()}
+                              disabled={selected() && selectedWindows().length === 1}
                               onClick={() => toggle(target)}
                             >
                               <IconCheck size={12} />
@@ -216,12 +232,14 @@ export default function PanePicker(props: PanePickerProps) {
                                   type="button"
                                   class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 1 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
                                   aria-label={`${target.label}: one column wide`}
+                                  aria-pressed={span().columns === 1}
                                   onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 1 })}
                                 >1×</button>
                                 <button
                                   type="button"
                                   class={`focus-ring rounded px-1.5 py-0.5 font-mono text-[9px] ${span().columns === 2 ? "bg-foreground text-background" : "bg-background text-muted hover:text-foreground"}`}
                                   aria-label={`${target.label}: two columns wide`}
+                                  aria-pressed={span().columns === 2}
                                   onClick={() => props.onSpanChange?.(target.window, { ...span(), columns: 2 })}
                                 >2×</button>
                                 <button
