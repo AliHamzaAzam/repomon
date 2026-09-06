@@ -343,6 +343,34 @@ describe("ControlCenter component UI", () => {
     expect(actions.openShortcutsGuide).toHaveBeenCalled();
   });
 
+  it("contains keyboard focus and lets the clear button own Enter", async () => {
+    const { fleet, actions, notifications, messages } = setup();
+    render(() => <ControlCenter fleet={fleet} actions={actions} notifications={notifications} messages={messages} />);
+    actions.openControl();
+    const input = await screen.findByRole("textbox", { name: "Search commands, repositories, and lanes" });
+    input.focus();
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(input).toHaveFocus();
+
+    fireEvent.input(input, { target: { value: "feature" } });
+    const clear = screen.getByRole("button", { name: "Clear query" });
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(clear).toHaveFocus();
+    expect(fireEvent.keyDown(clear, { key: "Enter" })).toBe(true);
+    expect(actions.controlOpen()).toBe(true);
+    fireEvent.keyDown(clear, { key: "Tab" });
+    expect(input).toHaveFocus();
+    clear.focus();
+    fireEvent.click(clear);
+    expect(input).toHaveValue("");
+    expect(input).toHaveFocus();
+
+    fireEvent.input(input, { target: { value: "feature" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(fleet.setSelectedLaneId).toHaveBeenCalledWith(10);
+    expect(actions.controlOpen()).toBe(false);
+  });
+
   it("closes palette on Escape key press", async () => {
     const { fleet, actions, notifications, messages } = setup();
     render(() => (

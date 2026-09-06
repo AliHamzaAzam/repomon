@@ -20,9 +20,9 @@ export default function ShortcutsOverlay(props: ShortcutsOverlayProps) {
   let previouslyFocused: HTMLElement | null = null;
   let dialogRef: HTMLDivElement | undefined;
 
-  function close() {
+  function close(restoreFocus = true) {
     props.actions.closeShortcutsGuide();
-    queueMicrotask(() => (previouslyFocused?.isConnected ? previouslyFocused : null)?.focus());
+    if (restoreFocus) queueMicrotask(() => (previouslyFocused?.isConnected ? previouslyFocused : null)?.focus());
   }
 
   // Snapshot what had focus (and therefore which scope is relevant) the instant the overlay
@@ -31,10 +31,25 @@ export default function ShortcutsOverlay(props: ShortcutsOverlayProps) {
     if (!isOpen()) return;
     previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setActiveScope(detectActiveScope(previouslyFocused));
+    queueMicrotask(() => dialogRef?.querySelector<HTMLInputElement>("input")?.focus());
   });
 
   function onKeyDown(event: KeyboardEvent) {
     if (!isOpen()) return;
+    if (event.key === "Tab" && dialogRef) {
+      const controls = [...dialogRef.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]',
+      )];
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -74,7 +89,7 @@ export default function ShortcutsOverlay(props: ShortcutsOverlayProps) {
               <button
                 type="button"
                 class="focus-ring rounded p-1 text-muted hover:text-foreground"
-                onClick={close}
+                onClick={() => close()}
                 aria-label="Close"
               >
                 <IconClose size={14} />
@@ -89,8 +104,8 @@ export default function ShortcutsOverlay(props: ShortcutsOverlayProps) {
                 type="button"
                 class="focus-ring text-signal hover:underline"
                 onClick={() => {
+                  close(false);
                   props.actions.openSettingsTab("keyboard");
-                  close();
                 }}
               >
                 Open full reference in Settings

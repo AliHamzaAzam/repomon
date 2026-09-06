@@ -337,10 +337,25 @@ export default function ControlCenter(props: ControlCenterProps) {
   function onKeyDown(e: KeyboardEvent) {
     if (!isOpen()) return;
 
+    if (e.key === "Tab") {
+      const clear = inputRef?.parentElement?.querySelector<HTMLButtonElement>("button");
+      if (!clear || (e.shiftKey && document.activeElement === inputRef)) {
+        e.preventDefault();
+        (clear ?? inputRef)?.focus();
+      } else if (!e.shiftKey && document.activeElement === clear) {
+        e.preventDefault();
+        inputRef?.focus();
+      }
+      return;
+    }
+
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
       closePalette();
+    } else if (document.activeElement !== inputRef) {
+      // The clear button owns Enter and Space; only the search field navigates results.
+      return;
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       const list = filteredItems();

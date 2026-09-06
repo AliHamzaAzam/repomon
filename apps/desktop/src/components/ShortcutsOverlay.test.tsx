@@ -37,12 +37,41 @@ describe("ShortcutsOverlay", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText("Search shortcuts")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByPlaceholderText("Search shortcuts")).toHaveFocus());
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => {
       expect(actions.shortcutsGuideOpen()).toBe(false);
     });
+  });
+
+  it("keeps Tab and Shift+Tab within the modal controls", async () => {
+    const actions = createActionsStore(fleetStub());
+    render(() => <ShortcutsOverlay actions={actions} />);
+    actions.openShortcutsGuide();
+    await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    const first = screen.getByRole("button", { name: "Close" });
+    const last = screen.getByRole("button", { name: "Open full reference in Settings" });
+
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+  });
+
+  it("does not restore background focus when handing off to Settings", async () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const actions = createActionsStore(fleetStub());
+    render(() => <ShortcutsOverlay actions={actions} />);
+    actions.openShortcutsGuide();
+    await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    fireEvent.click(screen.getByRole("button", { name: "Open full reference in Settings" }));
+    await Promise.resolve();
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
   });
 
   it("closes on a click outside the dialog", async () => {
