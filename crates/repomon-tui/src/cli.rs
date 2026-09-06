@@ -1,7 +1,4 @@
-//! Headless CLI subcommands: `repomon add|remove|discover|lane …|daemon …`.
-//!
-//! Repo/lane commands talk to the running daemon (the single SQLite writer); daemon
-//! commands drive the login service (launchd or systemd) in `repomon_core::service`.
+//! Runs headless commands through the daemon and manages platform login services.
 
 use std::path::PathBuf;
 
@@ -18,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::client::DaemonClient;
 
-// Lives in `src/attach_client.rs` (declared here to keep `lib.rs` untouched — it is a
+// Lives in `src/attach_client.rs` (declared here to keep `lib.rs` untouched - it is a
 // cross-track conflict hotspot during the native-Windows waves).
 #[path = "attach_client.rs"]
 pub mod attach_client;
@@ -385,11 +382,7 @@ fn parse_rate(raw: &str) -> Result<f64, String> {
     Ok(rate)
 }
 
-/// Token usage and cost, read from the daemon's ledger.
-///
-/// The ledger is local and passive: it reads what the agents already wrote to disk. A cost is
-/// what the same tokens would have cost on the provider's API, which is what a subscription plan
-/// is worth rather than what it billed.
+/// Report passive ledger usage as estimated API-equivalent cost, not subscription billing.
 async fn handle_usage(cmd: UsageCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
     let client = connect(socket, config).await?;
     match cmd {
@@ -806,10 +799,8 @@ pub async fn handle(cmd: Command, config: &Config, socket: Option<PathBuf>) -> R
     Ok(())
 }
 
-/// `repomon remote …` — manage the companion-app bridge. Enable/Disable/Status and an un-named
-/// Pair edit the config *file* (the shared token never crosses the RPC surface); the daemon picks
-/// those up on restart. The per-device flows (`pair --name`, `devices`, `revoke`) instead talk to
-/// the running daemon over the local socket, since device tokens live in the store.
+/// Use config files for bridge settings and the shared token, and local RPCs for per-device tokens
+/// stored by the daemon.
 async fn handle_remote(cmd: RemoteCmd, config: &Config, socket: Option<PathBuf>) -> Result<()> {
     match cmd {
         RemoteCmd::Pair { name: Some(name) } => remote_pair_named(config, socket, name).await,
@@ -899,8 +890,8 @@ fn handle_remote_config(cmd: RemoteCmd) -> Result<()> {
     Ok(())
 }
 
-/// Render a pairing URL as a scannable QR plus the URL and the sharing warning. Shared by the
-/// legacy config-token pair and the per-device `pair --name` flow so both print identically.
+/// Prints the pairing QR, URL, and sharing warning consistently for shared-token and per-device
+/// pairing.
 fn render_pair_qr(url: &str) -> Result<()> {
     let code = qrcode::QrCode::new(url.as_bytes())?;
     let art = code
@@ -913,7 +904,7 @@ fn render_pair_qr(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// `repomon remote pair --name <device>` — mint (or re-show) this device's own revocable token via
+/// `repomon remote pair --name <device>` - mint (or re-show) this device's own revocable token via
 /// the daemon and print its QR.
 async fn remote_pair_named(config: &Config, socket: Option<PathBuf>, name: String) -> Result<()> {
     let client = crate::ensure_daemon(config, socket).await?;
@@ -929,7 +920,7 @@ async fn remote_pair_named(config: &Config, socket: Option<PathBuf>, name: Strin
     Ok(())
 }
 
-/// `repomon remote devices` — list paired devices in aligned rows, then the legacy shared token.
+/// Lists paired devices and the shared configuration token in aligned rows.
 async fn remote_devices(config: &Config, socket: Option<PathBuf>) -> Result<()> {
     let client = crate::ensure_daemon(config, socket).await?;
     let resp = client.call("remote.devices", None).await?;
@@ -956,7 +947,7 @@ async fn remote_devices(config: &Config, socket: Option<PathBuf>) -> Result<()> 
             println!("{name:<name_w$}  {role:<6}  created {created}  seen {seen}");
         }
     }
-    // The shared config token (if configured) isn't a listed device — call it out so it isn't
+    // The shared config token (if configured) isn't a listed device - call it out so it isn't
     // mistaken for gone. It's retired by rotating it: `repomon remote enable --rotate-token`.
     if config.remote.token.is_some() {
         println!("(config token - shared; repomon remote enable --rotate-token to retire)");
@@ -964,7 +955,7 @@ async fn remote_devices(config: &Config, socket: Option<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-/// `repomon remote revoke <name>` — revoke a device's token via the daemon.
+/// `repomon remote revoke <name>` - revoke a device's token via the daemon.
 async fn remote_revoke(config: &Config, socket: Option<PathBuf>, name: String) -> Result<()> {
     let client = crate::ensure_daemon(config, socket).await?;
     let resp = client
@@ -982,10 +973,8 @@ async fn remote_revoke(config: &Config, socket: Option<PathBuf>, name: String) -
     Ok(())
 }
 
-/// `repomon orchestrate` — talk to the repomind orchestrator. Ensure the daemon is up, ask it to
-/// start (or reuse) the single daemon-owned orchestrator session, then `tmux attach` to that
-/// durable window. The session-building (MCP config + `claude` invocation) now lives daemon-side
-/// in `orchestrator.start`, so the CLI and the TUI drive **one** shared orchestrator.
+/// Start or reuse the daemon’s shared orchestrator session and attach using its backend-provided
+/// target.
 #[allow(clippy::too_many_arguments)]
 async fn handle_orchestrate(
     config: &Config,
@@ -999,10 +988,8 @@ async fn handle_orchestrate(
     // Make sure a daemon is running, then drive it (it owns the orchestrator window).
     let client = crate::ensure_daemon(config, socket).await?;
 
-    // `orchestrator.start` below is idempotent — a no-op if a session is already running (e.g.
-    // the TUI auto-started repomind at its own default autonomy when the command-center opened).
-    // Check first so we never assert an autonomy that isn't actually in force: only print the
-    // "starting at {autonomy}" banner when this call is the one that actually launches it.
+    // Check existing status so the banner never claims requested autonomy when an existing session
+    // retains its own.
     let status = client
         .call("orchestrator.status", None)
         .await
@@ -1064,12 +1051,8 @@ async fn handle_orchestrate(
     attach_tmux_target(&target, resp.get("attach"))
 }
 
-/// Attach this process to a `session:window` target. Prefers the daemon-provided attach command
-/// (the optional `attach` response field: `{ program, args }`); falls back to the classic tmux
-/// invocation on repomon's dedicated socket (the socket label is the session name — the target's
-/// prefix) for daemons without the field. `$TMUX` is dropped so this works even from inside tmux.
-/// On unix we `exec` the attach program so it owns the terminal directly (like a raw attach);
-/// detaching ends the command.
+/// Use the backend attach command or session-scoped tmux fallback, clearing TMUX so nested
+/// invocation works and using exec on Unix.
 fn attach_tmux_target(target: &str, attach: Option<&Value>) -> Result<()> {
     let parsed = attach.and_then(|a| {
         let program = a.get("program")?.as_str()?.to_string();
@@ -1158,7 +1141,7 @@ pub enum SchedulesCmd {
     Remove { id: i64 },
 }
 
-/// `repomon orchestrate --schedule <spec> "<prompt>"` — register a standing run.
+/// `repomon orchestrate --schedule <spec> "<prompt>"` - register a standing run.
 async fn handle_schedule_add(
     config: &Config,
     socket: Option<PathBuf>,
@@ -1238,7 +1221,7 @@ pub enum ApprovalsCmd {
     Remove { repo: String, pattern: String },
 }
 
-/// `repomon approvals ...` — the CLI surface over the approval allowlist. The same rules feed
+/// `repomon approvals ...` - the CLI surface over the approval allowlist. The same rules feed
 /// the daemon's auto-approve; force-push/rm -rf/reset --hard always escalate regardless.
 async fn handle_approvals(
     cmd: ApprovalsCmd,
@@ -1304,7 +1287,7 @@ pub enum PlaybooksCmd {
     Delete { name: String },
 }
 
-/// `repomon playbooks ...` — the human approval surface for orchestrator-drafted playbooks.
+/// `repomon playbooks ...` - the human approval surface for orchestrator-drafted playbooks.
 /// Drafts are inert until approved here (or via the daemon RPC this drives).
 async fn handle_playbooks(
     cmd: PlaybooksCmd,
@@ -1662,7 +1645,7 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
         } => {
             // Verb-level duplicate-agent guard: refuse to spawn into a lane that already has a live
             // managed agent (which would put two agents in one worktree), unless --force. This is
-            // intentionally NOT enforced daemon-side — the TUI multi-spawns a lane on purpose.
+            // intentionally NOT enforced daemon-side - the TUI multi-spawns a lane on purpose.
             if !force {
                 let target: Lane = lane_get(&client, lane).await?;
                 if let Some(live) = fleet::live_managed_agent(&target) {
@@ -1906,7 +1889,7 @@ async fn handle_daemon(
             } else {
                 println!("no running daemon at {}", socket.display());
             }
-            // Also stop a service-managed instance (launchd/systemd), if any — but only when
+            // Also stop a service-managed instance (launchd/systemd), if any - but only when
             // targeting the default socket. An explicit `--socket` means an isolated daemon;
             // unloading the service would take down the real fleet alongside it.
             if !explicit_socket {
@@ -2438,7 +2421,7 @@ mod tests {
     #[test]
     fn lane_approve_binds_args() {
         use clap::Parser;
-        // Defaults: no choice, no window.
+
         let cli = crate::Cli::try_parse_from(["repomon", "lane", "approve", "--lane", "7"])
             .expect("lane approve should parse");
         match cli.command {
@@ -2456,7 +2439,7 @@ mod tests {
             }
             _ => panic!("expected `lane approve`"),
         }
-        // An explicit choice binds.
+
         let cli = crate::Cli::try_parse_from([
             "repomon", "lane", "approve", "--lane", "7", "--choice", "no",
         ])
@@ -2490,7 +2473,7 @@ mod tests {
     #[test]
     fn lane_read_binds_args() {
         use clap::Parser;
-        // Default transcript limit is 12.
+
         let cli = crate::Cli::try_parse_from(["repomon", "lane", "read", "--lane", "3"])
             .expect("lane read should parse");
         match cli.command {
@@ -2506,7 +2489,7 @@ mod tests {
             }
             _ => panic!("expected `lane read`"),
         }
-        // An explicit limit overrides.
+
         let cli = crate::Cli::try_parse_from([
             "repomon",
             "lane",
@@ -2556,9 +2539,8 @@ mod tests {
         use repomon_core::Config;
         use std::path::PathBuf;
 
-        // The regression this guards: `repomon --socket X daemon stop|status|restart` used to
-        // resolve the socket from config alone and hit the DEFAULT daemon — stopping the real
-        // fleet daemon when the caller meant an isolated one.
+        // An explicit socket override must apply to every daemon-control action, preventing
+        // accidental control of the default daemon.
         let config = Config {
             socket_path: Some(PathBuf::from("/tmp/from-config.sock")),
             ..Default::default()

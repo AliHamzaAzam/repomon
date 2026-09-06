@@ -1,7 +1,4 @@
-//! View modes and arrow-first key mapping.
-//!
-//! Arrow keys drive navigation at every level; `hjkl` are aliases. `↵`/`→` zoom in,
-//! `esc`/`←` zoom out, `space` toggles the babysit grid (Phase 2).
+//! Defines view modes and arrow-first navigation with letter-key aliases.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
@@ -15,11 +12,11 @@ pub enum View {
     /// Babysit grid of live tiles.
     Grid,
     NewLane,
-    /// Per-repo commit-density timeline (Phase 3).
+    /// Shows per-repository commit density.
     Timeline,
-    /// Detected work sessions (Phase 3).
+    /// Shows detected work sessions.
     Sessions,
-    /// Global commit search (Phase 3).
+    /// Searches commits across repositories.
     Search,
     /// Interactive repo browser (add repos by exploring the filesystem).
     AddRepo,
@@ -48,7 +45,7 @@ pub enum Action {
     NewLane,
     DeleteLane,
     /// Unregister the selected lane's whole repo from repomon (two-press confirm). Worktree
-    /// files and running agents are left untouched — re-add with `repomon add`.
+    /// files and running agents are left untouched - re-add with `repomon add`.
     RemoveRepo,
     StartFilter,
     Refresh,

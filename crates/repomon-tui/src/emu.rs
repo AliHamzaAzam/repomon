@@ -1,11 +1,5 @@
-//! The embedded terminal renderer: a vt100 emulator fed by the daemon's `event.agent.bytes`
-//! stream (tmux `pipe-pane` under the hood), rendered straight into the ratatui buffer.
-//!
-//! This replaces the lossy capture→re-parse pipeline for the Focus view: the emulator sees
-//! the pane's actual byte stream, so alternate-screen switches, absolute cursor addressing,
-//! and every SGR attribute render exactly as a real terminal would. Seeded from one
-//! `capture-pane -e` snapshot; the first full app redraw (the SIGWINCH from `agent.resize`)
-//! corrects any seed drift.
+//! Renders daemon terminal bytes through vt100 into ratatui, with a best-effort capture seed for
+//! initial display.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -34,7 +28,7 @@ impl Emu {
     }
 
     /// Seed from a `capture-pane -e` snapshot: captured lines are `\n`-joined, but a bare LF
-    /// only moves the emulator down — re-anchor each line to column 0.
+    /// only moves the emulator down - re-anchor each line to column 0.
     pub fn seed_capture(&mut self, capture: &str) {
         self.feed(capture.replace('\n', "\r\n").as_bytes());
     }
@@ -57,7 +51,7 @@ impl Emu {
         Some((col, row))
     }
 
-    /// Whether the app requested bracketed paste — pastes should then be wrapped in the
+    /// Whether the app requested bracketed paste - pastes should then be wrapped in the
     /// `ESC[200~` / `ESC[201~` markers so it can tell paste from typing.
     pub fn bracketed_paste(&self) -> bool {
         self.parser.screen().bracketed_paste()
@@ -132,8 +126,7 @@ mod tests {
     #[test]
     fn renders_text_colors_and_absolute_cursor_addressing() {
         let mut emu = Emu::new(1, "lane-1".into(), 5, 20);
-        // Red text, then jump to row 3 col 5 (1-based in the escape) and write there — the
-        // kind of absolute addressing the old line-based pipeline could not represent.
+
         emu.feed(b"\x1b[31mred\x1b[0m\r\n");
         emu.feed(b"\x1b[3;5HJUMPED");
         let rows = render_to_strings(&emu, 20, 5);
@@ -147,7 +140,7 @@ mod tests {
 
         // The cursor sits right after JUMPED: col 4+6=10, row 2 (0-based).
         assert_eq!(emu.cursor(), Some((10, 2)));
-        // An app hiding the cursor hides ours.
+
         emu.feed(b"\x1b[?25l");
         assert_eq!(emu.cursor(), None);
     }

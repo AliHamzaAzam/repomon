@@ -1,5 +1,5 @@
-//! Rendering for the views. Flat, brutalist layout — light/heavy rules, single-char glyphs,
-//! two-space indents — with a semantic color palette over the top (status colors + a
+//! Rendering for the views. Flat, brutalist layout - light/heavy rules, single-char glyphs,
+//! two-space indents - with a semantic color palette over the top (status colors + a
 //! configurable accent; see [`crate::theme`]). `accent = "mono"` restores the no-color look.
 
 use chrono::{DateTime, Local, Utc};
@@ -29,7 +29,7 @@ const FOCUS_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  
 const GRID_KEYS: &str = "←→ move · click focus (type in place) · dbl terminal · ↵ open  ·  e spawn · s stop · p pin · g/G next · f find  ·  spc/esc fleet · q quit";
 const NOTIF_KEYS: &str =
     "↑↓ move · ↵ open · t attach · d dismiss · c clear  ·  1 fleet · ←/esc back · q quit";
-/// Keys that work from (almost) every view — the help overlay's second section.
+/// Keys that work from (almost) every view - the help overlay's second section.
 const GLOBAL_KEYS: &str = "1 fleet · 2 timeline · 3 sessions · 4 search · 5 notifications · 6/O repomind  ·  v peek · f find · ? help · q quit";
 const GRID_INSERT_KEYS: &str = "keys → agent (esc · ⇧⇥ · ^C sent)  ·  ^O / click-out blur";
 const NEWLANE_KEYS: &str =
@@ -91,7 +91,7 @@ pub fn render(f: &mut Frame, app: &App) {
     corner(f, app);
 }
 
-/// The footer hint string for a view — what the `?` help overlay expands. Command-mode strings
+/// The footer hint string for a view - what the `?` help overlay expands. Command-mode strings
 /// only: insert modes swallow `?` before it can open help.
 fn hints_for(view: View) -> &'static str {
     match view {
@@ -131,9 +131,9 @@ fn view_title(view: View) -> &'static str {
     }
 }
 
-/// The `?` help overlay: the current view's footer hints expanded one per row — parsed by the
+/// The `?` help overlay: the current view's footer hints expanded one per row - parsed by the
 /// same `split_items_depth0`/`split_key_label` the footer uses, so footer and help can never
-/// drift — plus the global view-switching keys.
+/// drift - plus the global view-switching keys.
 fn render_help(f: &mut Frame, app: &App) {
     use ratatui::widgets::{Block, Borders, Clear};
     if !app.help_open {
@@ -219,8 +219,8 @@ fn render_help(f: &mut Frame, app: &App) {
     );
 }
 
-/// The prompt-peek popup (`v`): the waiting agent's dialog — title, body, options with the
-/// steerable cursor — centered over the current view, plus the triage-queue counter.
+/// The prompt-peek popup (`v`): the waiting agent's dialog - title, body, options with the
+/// steerable cursor - centered over the current view, plus the triage-queue counter.
 fn render_prompt_popup(f: &mut Frame, app: &App) {
     use ratatui::widgets::{Block, Borders, Clear};
     let Some(peek) = &app.peek else { return };
@@ -310,7 +310,7 @@ const AGENTS_KEYS: &str = "↑↓ select  ·  n new · e edit · d delete · * d
 const AGENTS_EDIT_KEYS: &str = "tab switch field · type  ·  ↵ save · esc cancel";
 
 /// The agent manager: a list of agents (built-ins read-only, customs editable) with an
-/// inline add/edit form. `★` marks the default; `✓`/`✗` is PATH detection.
+/// inline add/edit form. `star` marks the default; `check`/`cross` is PATH detection.
 fn render_agents(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -377,7 +377,7 @@ fn render_agents(f: &mut Frame, app: &App) {
         let star = if a.default { "★" } else { " " };
         let mark = if a.detected { "✓" } else { "✗" };
         let kind = if a.custom { "custom " } else { "builtin" };
-        // Spell out a failed PATH check so the bare ✗ isn't cryptic.
+        // Spell out a failed PATH check so the bare cross isn't cryptic.
         let note = if a.detected { "" } else { "   not on PATH" };
         let mut line = Line::raw(format!(
             "  {star} {mark} {:<16} {kind}  $ {}{note}",
@@ -401,7 +401,7 @@ const SETTINGS_KEYS: &str = "↑↓ / click a row  ·  ←/→ change · space/�
 const SETTINGS_EDIT_KEYS: &str = "type the continue message  ·  ↵ save · esc cancel";
 
 /// The settings view: accent color (cycles, live preview), auto-continue on/off, and the
-/// continue message — each persisted to `~/.config/repomon/config.toml` via the daemon.
+/// continue message - each persisted to `~/.config/repomon/config.toml` via the daemon.
 fn render_settings(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -462,7 +462,7 @@ fn render_settings(f: &mut Frame, app: &App) {
             onoff(s.spawn_prompt),
             "space toggles",
         ),
-        // Notifications group — the master switch then per-trigger toggles (indented).
+        // Notifications group - the master switch then per-trigger toggles (indented).
         ("notifications", onoff(s.notify_enabled), "master · space"),
         ("  · needs you", onoff(s.notify_needs_you), "space toggles"),
         (
@@ -524,7 +524,7 @@ fn render_settings(f: &mut Frame, app: &App) {
         .unwrap_or(0)
         + 2;
     let val_w = 28usize;
-    // Items start one row below the body top (after a leading blank) — record it for clicks.
+    // Items start one row below the body top (after a leading blank) - record it for clicks.
     app.settings_geom.set(rows[1].y + 1);
     let mut lines = vec![Line::raw("")];
     for (i, (name, value, hint)) in items.iter().enumerate() {
@@ -1014,7 +1014,7 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
 
 /// The fuzzy lane switcher (`f`): type to filter every lane across all repos, ↵ opens the
 /// highlighted one in Focus. Matches rank by query score, then by how urgently the lane needs
-/// you, then recency — so with an empty query the most pressing lanes are already on top.
+/// you, then recency - so with an empty query the most pressing lanes are already on top.
 fn render_lane_jump(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -1131,7 +1131,7 @@ fn render_fleet(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
     let content = rows[0];
     let (lines, selected_line, lane_rows, brain_line) = fleet_lines(app, content);
-    // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds —
+    // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds -
     // this is what lets the fleet grow past one screenful and still be navigable with ↑/↓.
     let h = content.height as usize;
     let max_scroll = lines.len().saturating_sub(h);
@@ -1197,7 +1197,7 @@ const REPOMIND_MARK: &str = "R ";
 fn orch_attention_label(attention: &str) -> &'static str {
     match attention {
         "permission" | "decision" => "repomind · question for you",
-        _ => "repomind · waiting for you", // "end_of_turn" and any future word
+        _ => "repomind · waiting for you",
     }
 }
 
@@ -1248,10 +1248,10 @@ fn orch_pane_window(app: &App, height: usize) -> Option<Vec<Line<'static>>> {
 fn render_orchestrator(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
-        Constraint::Length(2), // header
-        Constraint::Min(0),    // summary + pane
-        Constraint::Length(1), // mode line
-        Constraint::Length(1), // footer
+        Constraint::Length(2),
+        Constraint::Min(0), // summary + pane
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(area);
     f.render_widget(
@@ -1310,7 +1310,7 @@ fn render_orchestrator(f: &mut Frame, app: &App) {
         ]
     });
     f.render_widget(Paragraph::new(right), body[2]);
-    // Draw repomind's real cursor where you're typing (insert mode, live tail) — same mechanism as
+    // Draw repomind's real cursor where you're typing (insert mode, live tail) - same mechanism as
     // the lane focus/insert pane.
     if app.orch_insert && app.scroll == 0 {
         if let Some(p) = app.orch_output.as_ref() {
@@ -1420,10 +1420,10 @@ fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize,
 fn render_split(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
-        Constraint::Length(2), // header
-        Constraint::Min(0),    // sidebar + live output
-        Constraint::Length(1), // mode line
-        Constraint::Length(1), // footer
+        Constraint::Length(2),
+        Constraint::Min(0), // sidebar + live output
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(area);
     f.render_widget(
@@ -1446,7 +1446,7 @@ fn render_split(f: &mut Frame, app: &App) {
         .collect();
     f.render_widget(Paragraph::new(divider), body[1]);
     // Record the pane size so the event loop resizes the agent's tmux window to match (reflow to
-    // the visible width — no right-edge clipping).
+    // the visible width - no right-edge clipping).
     app.focus_pane_dims
         .set(Some((body[2].width, body[2].height)));
     // With the pinned repomind row selected the right column previews its live pane; otherwise the
@@ -1492,7 +1492,7 @@ fn render_split(f: &mut Frame, app: &App) {
             click_zone(app, body[2], id, None, true);
         }
     }
-    // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
+    // Show the agent's text cursor where you're typing - INSERT mode at the live tail only.
     if app.focus_insert && app.scroll == 0 && has_output {
         if let Some(p) = id.and_then(|i| app.output.get(&i)) {
             if let Some((cx, cy)) = p.cursor {
@@ -1555,10 +1555,10 @@ fn render_split(f: &mut Frame, app: &App) {
 fn render_focus(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
-        Constraint::Length(2), // header
+        Constraint::Length(2),
         Constraint::Min(0),    // live output
         Constraint::Length(1), // input line
-        Constraint::Length(1), // footer
+        Constraint::Length(1),
     ])
     .split(area);
 
@@ -1608,7 +1608,7 @@ fn render_focus(f: &mut Frame, app: &App) {
         };
         if let Some(e) = &app.emu {
             e.render(pane, f.buffer_mut());
-            // The emulator knows the real cursor — draw it where you're typing.
+            // The emulator knows the real cursor - draw it where you're typing.
             if app.focus_insert {
                 if let Some((cx, cy)) = e.cursor() {
                     if cx < pane.width && cy < pane.height {
@@ -1621,7 +1621,7 @@ fn render_focus(f: &mut Frame, app: &App) {
         body.extend(focus_output(app, lane.map(|l| l.id), avail, out_y0));
         f.render_widget(Paragraph::new(body), rows[1]);
 
-        // Show the agent's text cursor where you're typing — INSERT mode at the live tail only.
+        // Show the agent's text cursor where you're typing - INSERT mode at the live tail only.
         if app.focus_insert && app.scroll == 0 {
             if let Some((cx, cy)) = lane
                 .and_then(|l| app.output.get(&l.id))
@@ -1672,10 +1672,10 @@ fn render_focus(f: &mut Frame, app: &App) {
 fn render_grid(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
-        Constraint::Length(2), // header
+        Constraint::Length(2),
         Constraint::Min(0),    // live tiles
         Constraint::Length(1), // position indicator (just above the footer)
-        Constraint::Length(1), // footer
+        Constraint::Length(1),
     ])
     .split(area);
 
@@ -1714,7 +1714,7 @@ fn render_grid(f: &mut Frame, app: &App) {
 
     let active = app.grid_active.min(n - 1);
 
-    // Two columns (when wide enough); rows as needed — with a vertical/horizontal rule between
+    // Two columns (when wide enough); rows as needed - with a vertical/horizontal rule between
     // tiles so each live pane reads as its own box.
     let cols = if area.width >= 80 { 2 } else { 1 };
     let tile_rows = n.div_ceil(cols);
@@ -1746,7 +1746,7 @@ fn render_grid(f: &mut Frame, app: &App) {
                 )),
                 cell,
             );
-            // Vertical rule between this tile and the next column's tile.
+
             if c + 1 < cols && idx + 1 < n {
                 let vd = cells[c * 2 + 1];
                 let vline: Vec<Line> = (0..vd.height)
@@ -1755,7 +1755,7 @@ fn render_grid(f: &mut Frame, app: &App) {
                 f.render_widget(Paragraph::new(vline), vd);
             }
         }
-        // Horizontal rule between this row of tiles and the next.
+
         if r + 1 < tile_rows {
             f.render_widget(
                 Paragraph::new(rule(grid_rows[r * 2 + 1].width, false, app)),
@@ -1765,7 +1765,7 @@ fn render_grid(f: &mut Frame, app: &App) {
     }
 
     // Instagram-style position indicator at the bottom (above the footer): a dot per tile, the
-    // active one filled and accent-colored, plus its name — so what's selected is clear at a glance.
+    // active one filled and accent-colored, plus its name - so what's selected is clear at a glance.
     let label = app
         .lanes
         .iter()
@@ -1841,7 +1841,7 @@ fn tile_lines(
         let bs = if focused { base } else { badge_style };
         spans.push(Span::styled(badge, bs));
     }
-    // When click-focused, the tile is capturing keystrokes — make that unmistakable.
+    // When click-focused, the tile is capturing keystrokes - make that unmistakable.
     if focused {
         spans.push(Span::styled(
             "  ⌨ typing (^O / click-out to blur)".to_string(),
@@ -1897,7 +1897,7 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
         .iter()
         .find(|s| s.status == AgentStatus::RateLimited);
     let stalled = sessions.iter().find(|s| !s.inferred && s.stale);
-    // The latest dxkit gate block for any session — worn while the loop repairs, cleared by
+    // The latest dxkit gate block for any session - worn while the loop repairs, cleared by
     // the next gate run that passes.
     let gate_tag = sessions
         .iter()
@@ -1912,7 +1912,7 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
         )
     } else if waiting > 0 {
         // Name what the wait is (the most urgent one when agents disagree): a real question,
-        // a routine permission ask, shippable work, or a finished turn — never a generic
+        // a routine permission ask, shippable work, or a finished turn - never a generic
         // "needs you".
         let (glyph, word) = match max_waiting_attention(lane) {
             Attention::Decision => ("⏸", "question"),
@@ -1940,7 +1940,7 @@ fn agent_badge(lane: &Lane, app: &App) -> (String, Style) {
 }
 
 /// The most urgent attention among a lane's waiting sessions (inferred placeholders never
-/// count) — what a "⏸" actually is: a question, a permission ask, shippable work, or a
+/// count) - what a "pause" actually is: a question, a permission ask, shippable work, or a
 /// finished turn.
 fn max_waiting_attention(lane: &Lane) -> Attention {
     use repomon_core::agent::attention::agent_attention_in;
@@ -1953,7 +1953,7 @@ fn max_waiting_attention(lane: &Lane) -> Attention {
         .unwrap_or(Attention::None)
 }
 
-/// The waiting glyph for one session: `?` question, `⏸` permission, `✓` finished turn.
+/// The waiting glyph for one session: `?` question, `pause` permission, `check` finished turn.
 fn waiting_glyph(sess: &repomon_core::model::AgentSession) -> &'static str {
     match agent_attention(sess) {
         Attention::Decision => theme::WAIT_QUESTION,
@@ -1983,10 +1983,7 @@ fn fmt_resume(resume_at: Option<DateTime<Utc>>) -> String {
     }
 }
 
-/// The bottom-right corner: usage for the focused agent's account (Claude `/usage` or Codex
-/// `/status`) — `5h NN% · wk NN% · <reset>`, drawn over the free right end of the last row of
-/// *every* view. Falls back to the focused lane's rate-limit countdown when there's no scraped
-/// usage for that account, and draws nothing when there's nothing to show — never fake numbers.
+/// Show focused-account usage or a lane reset countdown when available, never fabricated values.
 fn corner(f: &mut Frame, app: &App) {
     let Some((text, style)) = corner_text(app) else {
         return;
@@ -2020,7 +2017,7 @@ fn corner_text(app: &App) -> Option<(String, Style)> {
 }
 
 /// Format one account's usage as `[label · ]<win> NN% · <win> NN% · <reset>` from its limit
-/// windows (the first two — usually 5h + weekly), plus the soonest reset. The account label shows
+/// windows (the first two - usually 5h + weekly), plus the soonest reset. The account label shows
 /// only when more than one account is in play. `None` when there are no windows.
 fn format_usage(app: &App, u: &repomon_core::agent::AccountUsage) -> Option<(String, Style)> {
     let windows = &u.report.windows;
@@ -2058,7 +2055,7 @@ fn fmt_reset_short(t: DateTime<Utc>) -> String {
     }
 }
 
-/// The focused lane's rate-limit countdown, when usage numbers aren't available — so the corner
+/// The focused lane's rate-limit countdown, when usage numbers aren't available - so the corner
 /// stays useful even if the probe is off or failed.
 fn corner_fallback(app: &App) -> Option<(String, Style)> {
     use repomon_core::model::AgentStatus;
@@ -2087,7 +2084,7 @@ fn ago(t: DateTime<Utc>) -> String {
 
 /// Parse a captured pane (with `-e` ANSI escapes) into styled lines, trimming the trailing blank
 /// rows tmux pads the pane with. Called once per `event.agent.output` delta (in
-/// `App::on_notification`) and cached, so the render path only slices — it never re-parses.
+/// `App::on_notification`) and cached, so the render path only slices - it never re-parses.
 pub fn parse_pane(raw: &str) -> Vec<Line<'static>> {
     use ansi_to_tui::IntoText;
     let raw = strip_osc(raw);
@@ -2102,10 +2099,8 @@ pub fn parse_pane(raw: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// Remove OSC sequences (`ESC ] … BEL` or `ESC ] … ESC \`) before ANSI parsing: ansi-to-tui
-/// (≤8.0.1) consumes an ST-terminated OSC through to end of line, deleting the visible text of
-/// the OSC 8 hyperlinks Claude Code wraps file paths in. The link text itself sits between the
-/// wrappers, so dropping only the escapes keeps it.
+/// Strip OSC wrappers first because ansi-to-tui can consume hyperlink text after an ST-terminated
+/// escape.
 fn strip_osc(raw: &str) -> std::borrow::Cow<'_, str> {
     if !raw.contains("\x1b]") {
         return std::borrow::Cow::Borrowed(raw);
@@ -2171,11 +2166,7 @@ fn output_window(total: usize, height: usize, scroll: usize) -> (usize, usize) {
     (end - h, end)
 }
 
-/// Place the real terminal cursor at the agent pane's cursor, when it falls inside the visible
-/// window of the rendered pane. `area` is the pane's screen rect; `start` is the index of the first
-/// visible captured line and `count` how many are shown; `(cx, cy)` is the agent cursor in
-/// captured-pane coordinates (col, row). No-op when the cursor row is scrolled out of view or the
-/// column runs past the pane width.
+/// Place the terminal cursor only when its captured row and column lie inside the visible pane.
 fn place_pane_cursor(f: &mut Frame, area: Rect, start: usize, count: usize, (cx, cy): (u16, u16)) {
     let cy = cy as usize;
     if cy < start || cy >= start + count {
@@ -2198,7 +2189,7 @@ fn focus_output(
     out_y0: u16,
 ) -> Vec<Line<'static>> {
     // Pre-parsed lines: the scrollback snapshot when scrolled, else the live tail. (Both are
-    // parsed once on update — see `parse_pane` — so this hot path only slices.)
+    // parsed once on update - see `parse_pane` - so this hot path only slices.)
     let lines: &[Line<'static>] = if app.scroll > 0 {
         app.scroll_lines.as_deref().unwrap_or(&[])
     } else {
@@ -2317,8 +2308,6 @@ fn render_new_lane(f: &mut Frame, app: &App) {
     f.render_widget(footer(NEWLANE_KEYS, app, rows[1].width), rows[1]);
 }
 
-// ---- shared line builders ----------------------------------------------------
-
 #[allow(clippy::type_complexity)]
 fn fleet_lines(
     app: &App,
@@ -2344,7 +2333,7 @@ fn fleet_lines(
 
     let visible = app.visible_lanes();
     let repos = distinct_repos(&visible);
-    // The same definition the urgent filter and g/G jumps use — so a stalled or
+    // The same definition the urgent filter and g/G jumps use - so a stalled or
     // dead-rate-limited lane counts here too, not just a Waiting one.
     let needs = visible
         .iter()
@@ -2412,7 +2401,7 @@ fn fleet_lines(
             None => lane_row(lane, now, app, selected),
             Some(s) => match lane.agent_sessions.get(s) {
                 Some(sess) => agent_subrow(sess, app, selected),
-                None => continue, // index stale (lane list changed mid-frame) — skip defensively
+                None => continue, // index stale (lane list changed mid-frame) - skip defensively
             },
         };
         if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
@@ -2514,7 +2503,7 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
             }
             Some(s) => match lane.agent_sessions.get(s) {
                 Some(sess) => agent_subrow(sess, app, selected),
-                None => continue, // index stale (lane list changed mid-frame) — skip defensively
+                None => continue, // index stale (lane list changed mid-frame) - skip defensively
             },
         };
         if !selected && row.session.is_none() && app.hover_lane == Some(lane.id) {
@@ -2624,7 +2613,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             ]));
         }
     }
-    // Plain shell terminals (no agent) — open as many as you like with `t`.
+    // Plain shell terminals (no agent) - open as many as you like with `t`.
     let term_line = if app.terminals.is_empty() {
         "  terminals  none  ·  t open a shell here".to_string()
     } else {
@@ -2652,8 +2641,6 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-// ---- atoms -------------------------------------------------------------------
-
 fn footer(keys: &str, app: &App, width: u16) -> Paragraph<'static> {
     use ratatui::style::Modifier;
     // A fresh notification takes over the footer line briefly (then the key hints return).
@@ -2666,16 +2653,13 @@ fn footer(keys: &str, app: &App, width: u16) -> Paragraph<'static> {
         }
     }
     // Reserve room for the bottom-right usage corner (drawn on top by `corner()`), so the hint bar
-    // never slides under it — measured exactly as `corner()` measures, in chars.
+    // never slides under it - measured exactly as `corner()` measures, in chars.
     let reserve = corner_text(app).map_or(0, |(t, _)| t.chars().count() as u16 + 1);
     let budget = width.saturating_sub(reserve);
     Paragraph::new(Line::from(footer_spans(keys, app, budget)))
 }
 
-/// Render a footer hint string into styled spans: each item's leading key token(s) in the accent
-/// (bold), labels and separators muted, and the source's `"  ·  "` group breaks promoted to a muted
-/// `│` rail. Truncates at item boundaries to `budget` columns, ending in a muted `" …"`, so the
-/// usage corner keeps clear space. Glyph widths are counted in chars (as `corner()` does).
+/// Style leading key tokens and truncate at item boundaries within the reserved footer budget.
 fn footer_spans(keys: &str, app: &App, budget: u16) -> Vec<Span<'static>> {
     let muted = app.theme.muted();
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -2717,7 +2701,7 @@ fn footer_spans(keys: &str, app: &App, budget: u16) -> Vec<Span<'static>> {
     spans
 }
 
-/// Split a hint group into items on `" · "`, but only at paren depth 0 — so the middots inside a
+/// Split a hint group into items on `" · "`, but only at paren depth 0 - so the middots inside a
 /// parenthetical like `"(esc · ⇧⇥ · ^C sent)"` never split the prose. Items are trimmed.
 fn split_items_depth0(group: &str) -> Vec<&str> {
     let chars: Vec<(usize, char)> = group.char_indices().collect();
@@ -2790,7 +2774,7 @@ fn split_key_label(item: &str) -> (String, Option<String>) {
     (key, label)
 }
 
-/// Whether a token is made entirely of key glyphs (arrows, enter, tab, shift, modifiers) — used to
+/// Whether a token is made entirely of key glyphs (arrows, enter, tab, shift, modifiers) - used to
 /// chain a second symbolic key onto the first, e.g. the `"↑↓ ↵"` in `"↑↓ ↵ open"`.
 fn is_glyph_token(t: &str) -> bool {
     !t.is_empty() && t.chars().all(|c| "↑↓←→↵⇥⇧^/+*,".contains(c))
@@ -2798,7 +2782,7 @@ fn is_glyph_token(t: &str) -> bool {
 
 fn header_line(width: u16, left: &str, right: &str, app: &App) -> Line<'static> {
     // The view title is the accent; the clock on the right is muted. Unseen notifications get
-    // a ⚑ badge beside the clock, visible from every view (`5` opens the feed and clears it).
+    // a unread badge beside the clock, visible from every view (`5` opens the feed and clears it).
     let unread = app.unread_notifs();
     let badge = if unread > 0 {
         format!("⚑ {unread} · ")
@@ -2843,7 +2827,7 @@ fn interleaved(count: usize) -> Vec<Constraint> {
 }
 
 fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {
-    // Heavy header rules take the accent; light section rules are muted — so dividers read as a
+    // Heavy header rules take the accent; light section rules are muted - so dividers read as a
     // distinct layer instead of blending with the white body text.
     let c = if heavy { theme::HEAVY } else { theme::LIGHT };
     let style = if heavy {
@@ -2855,7 +2839,7 @@ fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {
 }
 
 fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
-    // "  NAME ─────…" — the repo name in the accent, the rule muted, so each group is delineated.
+    // "  NAME ─────…" - the repo name in the accent, the rule muted, so each group is delineated.
     let used = 2 + name.chars().count() + 1;
     let dashes = (width as usize).saturating_sub(used);
     Line::from(vec![
@@ -2866,7 +2850,7 @@ fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
     ])
 }
 
-/// `Some("×N")` when several agents share one lane — the compact multi-agent marker shown in the
+/// `Some("×N")` when several agents share one lane - the compact multi-agent marker shown in the
 /// Fleet list and the Split sidebar (mirrors the Grid badge's `×N`). `None` for 0 or 1 agent.
 fn agent_count_badge(lane: &Lane) -> Option<String> {
     let n = lane.agent_sessions.len();
@@ -2905,7 +2889,7 @@ fn agent_subrow(
     use repomon_core::model::AgentStatus;
     let (glyph, gstyle) = match sess.status {
         AgentStatus::RateLimited => (theme::RATE_LIMITED, app.theme.rate_limited()),
-        // Stalled outranks the Running/Idle underneath it — that's the whole point.
+        // Stalled outranks the Running/Idle underneath it - that's the whole point.
         _ if sess.stale => (theme::STALLED, app.theme.needs_you()),
         AgentStatus::Waiting => (waiting_glyph(sess), app.theme.needs_you()),
         AgentStatus::Running => (theme::AGENT_ACTIVE, app.theme.running()),
@@ -2913,7 +2897,7 @@ fn agent_subrow(
         _ => ("·", app.theme.dim()),
     };
     let summary = if selected && app.renaming {
-        format!("{}_", app.rename_buf) // live rename buffer + cursor
+        format!("{}_", app.rename_buf)
     } else {
         trunc(&agent_summary(sess), 30)
     };
@@ -2945,9 +2929,9 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
     let any_inferred = lane.agent_sessions.iter().any(|s| s.inferred);
     let any_stalled = lane.agent_sessions.iter().any(|s| !s.inferred && s.stale);
     let (active, active_style) = if any(AgentStatus::RateLimited) {
-        (theme::RATE_LIMITED, app.theme.rate_limited()) // ⏳ paused on a usage limit
+        (theme::RATE_LIMITED, app.theme.rate_limited())
     } else if any(AgentStatus::Waiting) {
-        // ? question · ⏸ permission · ✓ finished turn / shippable — all amber "blocked on you".
+        // ? question · pause permission · check finished turn / shippable - all amber "blocked on you".
         let glyph = match max_waiting_attention(lane) {
             Attention::Decision => theme::WAIT_QUESTION,
             Attention::Permission => theme::WAITING,
@@ -2955,11 +2939,11 @@ fn lane_row(lane: &Lane, now: DateTime<Utc>, app: &App, selected: bool) -> Line<
         };
         (glyph, app.theme.needs_you())
     } else if any_stalled {
-        (theme::STALLED, app.theme.needs_you()) // ⚠ alive but frozen mid-work
+        (theme::STALLED, app.theme.needs_you())
     } else if any(AgentStatus::Running) {
-        (theme::AGENT_ACTIVE, app.theme.running()) // ▶ working
+        (theme::AGENT_ACTIVE, app.theme.running())
     } else if any_inferred {
-        // ◐ active — files are changing but we can't name the agent (worktree subagent).
+        // ◐ active - files are changing but we can't name the agent (worktree subagent).
         (
             theme::INFERRED_ACTIVE,
             app.theme.running().add_modifier(Modifier::DIM),
@@ -3148,7 +3132,7 @@ mod tests {
     #[test]
     fn parse_pane_keeps_osc8_hyperlink_text() {
         // Claude Code wraps file paths in OSC 8 hyperlinks; tmux `capture-pane -e` passes them
-        // through, and ansi-to-tui (≤8.0.1) eats from the introducer to end of line — the path
+        // through, and ansi-to-tui (≤8.0.1) eats from the introducer to end of line - the path
         // and closing paren vanished from the agent screen. Both terminators must survive.
         let st = "\x1b[1mUpdate\x1b[0m(\x1b]8;id=zqbfql;file:///Users/a/blog_visuals.py\x1b\\~/a/blog_visuals.py\x1b]8;;\x1b\\)";
         let flat: String = parse_pane(st)[0]
@@ -3169,7 +3153,6 @@ mod tests {
 
     #[test]
     fn items_split_only_at_top_level() {
-        // A plain group: every " · " is a boundary.
         assert_eq!(
             split_items_depth0("↑↓ lane · tab session"),
             vec!["↑↓ lane", "tab session"],
@@ -3202,17 +3185,16 @@ mod tests {
 
     #[test]
     fn key_label_splits_and_chains_glyphs() {
-        // Single symbolic key + label.
         assert_eq!(
             split_key_label("i quick-type"),
             ("i".into(), Some("quick-type".into())),
         );
-        // Two-key glyph run: both arrows chain into the key.
+
         assert_eq!(
             split_key_label("↑↓ ↵ open"),
             ("↑↓ ↵".into(), Some("open".into())),
         );
-        // Bare key, no label.
+
         assert_eq!(split_key_label("q"), ("q".into(), None));
         // Multi-word labels are preserved (paren prose rides in the label).
         assert_eq!(

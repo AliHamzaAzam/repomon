@@ -1,18 +1,13 @@
-//! Theme: a tasteful semantic color palette over the flat, brutalist layout. The status colors are
-//! fixed (running=green, needs-you=amber, rate-limited=cyan, muted=gray) so meaning stays
-//! consistent; the one configurable hue is the **accent** (headers, selection, dividers, dirty
-//! marks) — any named color or `#hex`, default cyan. `accent = "mono"` turns color off for the
-//! original monochrome look.
+//! Defines semantic status colors and a configurable accent, with mono disabling color.
 
 use ratatui::style::{Color, Modifier, Style};
 use repomon_core::model::AgentStatus;
 
-// Status glyphs.
 pub const DIRTY: &str = "●";
 pub const CLEAN: &str = "○";
 pub const AGENT_ACTIVE: &str = "▶";
 pub const WAITING: &str = "⏸";
-/// A waiting agent sitting on a real decision-question (vs a routine permission ⏸).
+/// A waiting agent sitting on a real decision-question (vs a routine permission pause).
 pub const WAIT_QUESTION: &str = "?";
 /// A waiting agent that simply finished its turn (no dialog on screen).
 pub const WAIT_DONE: &str = "✓";
@@ -24,16 +19,15 @@ pub const INFERRED_ACTIVE: &str = "◐";
 pub const UP: char = '↑';
 pub const DOWN: char = '↓';
 
-// Horizontal rules.
 pub const HEAVY: char = '━';
 pub const LIGHT: char = '─';
-// Vertical rule (column divider).
+
 pub const VLIGHT: char = '│';
 
 // Density blocks, low to high (timeline).
 pub const DENSITY: [&str; 6] = [" ", "▁", "░", "▒", "▓", "█"];
 
-// Fixed semantic colors — named ANSI so they respect the terminal's own palette.
+// Fixed semantic colors - named ANSI so they respect the terminal's own palette.
 const RUNNING: Color = Color::Green;
 const NEEDS_YOU: Color = Color::Yellow;
 const RATE_LIMIT: Color = Color::Cyan;
@@ -87,8 +81,6 @@ impl Theme {
         }
     }
 
-    // --- structural ---
-
     /// Selected row: reverse video, tinted by the accent when colored.
     pub fn selected(&self) -> Style {
         let s = Style::default().add_modifier(Modifier::REVERSED);
@@ -119,7 +111,7 @@ impl Theme {
             _ => s,
         }
     }
-    /// Mouse-hover highlight — bold plus a subtle row background (when colored), distinct from the
+    /// Mouse-hover highlight - bold plus a subtle row background (when colored), distinct from the
     /// reverse-video selection. (Needs a terminal that reports mouse motion; not all do.)
     pub fn hover(&self) -> Style {
         let s = Style::default().add_modifier(Modifier::BOLD);
@@ -142,8 +134,6 @@ impl Theme {
         self.accented().add_modifier(Modifier::BOLD)
     }
 
-    // --- semantic status colors (plain when mono) ---
-
     pub fn running(&self) -> Style {
         self.fg(RUNNING)
     }
@@ -157,7 +147,7 @@ impl Theme {
         self.muted()
     }
 
-    /// The style for an agent status — used by badges, glyphs, and mode lines.
+    /// The style for an agent status - used by badges, glyphs, and mode lines.
     pub fn status(&self, status: AgentStatus) -> Style {
         match status {
             AgentStatus::Running => self.running(),
@@ -168,7 +158,7 @@ impl Theme {
     }
 
     /// The accent as RGB, for gradients. Named ANSI accents map to representative truecolor
-    /// values (only used for shading — everything else stays palette-respecting ANSI).
+    /// values (only used for shading - everything else stays palette-respecting ANSI).
     fn accent_rgb(&self) -> Option<(u8, u8, u8)> {
         match self.accent? {
             Color::Rgb(r, g, b) => Some((r, g, b)),
@@ -245,7 +235,7 @@ mod tests {
     fn mono_disables_color() {
         let t = Theme::from_accent(Some("mono"));
         assert!(!t.colored());
-        // No foreground color in any semantic style.
+
         assert_eq!(t.running().fg, None);
         assert_eq!(t.needs_you().fg, None);
         assert_eq!(t.muted().fg, None);
@@ -255,7 +245,6 @@ mod tests {
 
     #[test]
     fn footer_key_is_bold_and_mono_safe() {
-        // Colored: accent fg + bold.
         let c = Theme::from_accent(None);
         assert_eq!(c.footer_key().fg, Some(Color::Cyan));
         assert!(c.footer_key().add_modifier.contains(Modifier::BOLD));
@@ -281,7 +270,7 @@ mod tests {
             Theme::from_accent(Some("#ff8800")).accent,
             Some(Color::Rgb(0xff, 0x88, 0x00))
         );
-        // Unknown name → default cyan, still colored.
+
         let t = Theme::from_accent(Some("chartreuse"));
         assert!(t.colored());
         assert_eq!(t.accent, Some(Color::Cyan));

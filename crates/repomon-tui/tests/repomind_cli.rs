@@ -1,12 +1,4 @@
-//! One CLI integration test: `repomon repomind status|boot|export` against an isolated daemon.
-//!
-//! Table rendering is covered by the pure-function unit tests in `cli.rs`
-//! (`format_repomind_status`/`format_repomind_boot`/`format_repomind_export`); this test only
-//! exercises the RPC round trip through `repomon_tui::cli::handle`, the same entry point the
-//! `repomon` binary calls for a headless subcommand.
-//!
-//! `[repomind] home` points at a tempdir for the whole test: the operator's real `~/repomind` is
-//! never created, read, or written.
+//! Exercises repomind CLI status, boot, and export against isolated home and data directories.
 
 use std::path::Path;
 use std::time::Duration;

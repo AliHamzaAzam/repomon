@@ -1,20 +1,9 @@
-//! Windows attach pop-out: launch the raw byte-proxy attach client (`repomon attach-host
-//! <window>`) in a *separate* terminal so the FleetView TUI keeps running.
-//!
-//! On macOS/Linux "attach" hands the current terminal over to tmux (see [`app::run_attach`] —
-//! it blocks until the user detaches). The TUI has no terminal to give up on Windows, so it
-//! pops the agent out instead: into a titled Windows Terminal tab when `wt.exe` is on PATH, and
-//! otherwise a brand-new console (`CREATE_NEW_CONSOLE`). Both keep the embedded focus-view
-//! renderer live alongside them (decision #2 in the plan: embedded + external window).
-//!
-//! The launcher choice and the `wt.exe` argv are pure logic, unit-tested on every OS; only the
-//! process spawn is `#[cfg(windows)]`.
-//!
-//! [`app::run_attach`]: crate::app
+//! Opens a separate Windows Terminal tab or console for an agent; Unix attaches in the caller’s
+//! terminal.
 
 /// `CREATE_NEW_CONSOLE`: the fallback attach client gets its own console window rather than
 /// sharing the TUI's (which its raw-VT takeover would corrupt). The `wt.exe` path needs no such
-/// flag — Windows Terminal hosts the client in its own tab's pseudoconsole.
+/// flag - Windows Terminal hosts the client in its own tab's pseudoconsole.
 #[cfg(windows)]
 const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
@@ -36,10 +25,8 @@ pub fn choose_launcher(wt_on_path: bool) -> Launcher {
     }
 }
 
-/// The `wt.exe` argument vector that opens `program args…` in a titled new tab:
-/// `new-tab --title <title> <program> <args…>`. Windows Terminal treats everything after the
-/// `new-tab` options as the commandline to run, so no `--` terminator is used (nor needed — the
-/// attach client's program and args never start with a dash).
+/// Builds a titled Windows Terminal tab command without an option terminator, since the attach
+/// program and arguments do not begin with dashes.
 pub fn wt_argv(title: &str, program: &str, args: &[String]) -> Vec<String> {
     let mut v = vec![
         "new-tab".to_string(),
@@ -52,7 +39,7 @@ pub fn wt_argv(title: &str, program: &str, args: &[String]) -> Vec<String> {
 }
 
 /// Pop the attach client (`program args…`, i.e. `repomon attach-host <window>`) out into a
-/// separate terminal, titled `title`. Returns once the launcher has been spawned — the TUI
+/// separate terminal, titled `title`. Returns once the launcher has been spawned - the TUI
 /// never blocks on the popped-out window (unlike the Unix in-terminal attach).
 #[cfg(windows)]
 pub fn launch(title: &str, program: &str, args: &[String]) -> anyhow::Result<()> {
@@ -63,7 +50,7 @@ pub fn launch(title: &str, program: &str, args: &[String]) -> anyhow::Result<()>
         Launcher::WindowsTerminal => {
             // `wt.exe` is an app-execution alias; CreateProcess resolves it off PATH. It hands
             // the tab to the running Windows Terminal and exits, so this spawn is fire-and-forget
-            // (never wait on it — the attach client lives under WindowsTerminal.exe, not us).
+            // (never wait on it - the attach client lives under WindowsTerminal.exe, not us).
             Command::new("wt.exe")
                 .args(wt_argv(title, program, args))
                 .spawn()

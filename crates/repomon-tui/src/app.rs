@@ -34,9 +34,6 @@ use crate::notify::{self, NotifEvent, NotifKind};
 use crate::theme::Theme;
 use crate::view;
 
-// The Windows attach pop-out (Track F). Declared here — like `cli::attach_client` — so `lib.rs`
-// stays untouched; the pure-logic argv/launcher helpers are reachable (and dead-code-free) on
-// every OS because `app` is a public module.
 #[path = "popout.rs"]
 pub mod popout;
 
@@ -116,8 +113,8 @@ pub struct GridTile {
     pub window: Option<String>,
 }
 
-/// A row in the fleet sidebar: a lane (header), or — when `expand_agents` is on and the lane runs
-/// several agents — one of that lane's agent sub-rows.
+/// A row in the fleet sidebar: a lane (header), or - when `expand_agents` is on and the lane runs
+/// several agents - one of that lane's agent sub-rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FleetRow {
     /// Index into [`App::visible_lanes`].
@@ -213,13 +210,13 @@ pub struct App {
     pub filter: String,
     pub filtering: bool,
     /// Inline rename of the selected agent sub-row (expanded sidebar): active flag, edit buffer,
-    /// and the pinned target — the agent's durable transcript `session_id`, captured when the
+    /// and the pinned target - the agent's durable transcript `session_id`, captured when the
     /// rename starts so a cursor move / refresh during the edit can't retarget it.
     pub renaming: bool,
     pub rename_buf: String,
     rename_target: Option<String>,
     /// The prompt-peek popup (`v`): the waiting agent's parsed dialog, answerable in place.
-    /// An overlay, not a `View` — the underlying view stays rendered beneath it.
+    /// An overlay, not a `View` - the underlying view stays rendered beneath it.
     pub peek: Option<PeekState>,
     /// The `?` help overlay: the current view's key hints, expanded. Any key closes it.
     pub help_open: bool,
@@ -238,7 +235,7 @@ pub struct App {
     pub output: HashMap<LaneId, Pane>,
     /// Whether Focus is in insert mode (keystrokes forwarded live to the agent).
     pub focus_insert: bool,
-    /// True while Focus is driving a repomon-managed agent — so when it exits (`/exit` or
+    /// True while Focus is driving a repomon-managed agent - so when it exits (`/exit` or
     /// stop) we can drop back out of Focus instead of staring at a dead pane.
     focus_managed: bool,
     /// Consecutive lane refreshes the focused agent has been absent. Detach (Focus → Split) only
@@ -275,10 +272,8 @@ pub struct App {
     /// The `(lane, window, cols, rows)` of the last `agent.resize` sent, so it fires only on a real
     /// size/focus change rather than every tick.
     last_resize: Option<(LaneId, String, u16, u16)>,
-    /// When that resize was sent. The dedup expires after [`RESIZE_REASSERT`] so the TUI
-    /// re-asserts its desired size: an external resizer (an old phone build, a manual tmux
-    /// attach) would otherwise squeeze the pane forever — the dedup key never changes on the
-    /// TUI's side, so it would never notice. Re-sending the same size is a tmux no-op.
+    /// Expire resize deduplication so external resizing cannot leave the pane permanently below the
+    /// TUI’s requested dimensions.
     last_resize_at: Option<std::time::Instant>,
     /// The `(cols, rows)` of the last `orchestrator.resize` sent, so it fires only on a real size
     /// change. Cleared after an attach (which restores the window's client-follow size).
@@ -308,10 +303,7 @@ pub struct App {
     pub settings_editing: bool,
     /// Screen row of the first settings item (for click hit-testing), set during render.
     pub settings_geom: std::cell::Cell<u16>,
-    /// Last-seen state (status + stall flag) per real agent session, for notification
-    /// edge-detection. A session that left the snapshot is expressed by key absence (there is
-    /// no `None` value), which is what lets each agent in a shared lane fire its own alerts
-    /// instead of one rolled-up status.
+    /// Tracks each real session independently, using missing keys to detect disappearance.
     prev_status: HashMap<(LaneId, SessKey), SessState>,
     /// True once the first lane list has seeded `prev_status` (so startup doesn't notify for
     /// every already-running agent at once).
@@ -323,16 +315,11 @@ pub struct App {
     /// Whether `prev_status` was built including subagents (the `notify_subagents` toggle). When it
     /// flips, the tracked key set changes wholesale, so `detect_notifications` re-seeds.
     notif_subagents: bool,
-    /// Debounce keyed by (lane, session, kind): the last time each *kind* of alert fired for a
-    /// session. Keying on the kind suppresses a flapping identical alert without swallowing a
-    /// genuinely different transition (e.g. a usage-limit alert right after a needs-you one);
-    /// keying on the session lets two agents in one lane each raise the same kind of alert.
+    /// Debounce by lane, session, and kind so one session’s alert cannot suppress another’s
+    /// distinct transition.
     notif_debounce: HashMap<(LaneId, SessKey, NotifKind), Instant>,
-    /// Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) when
-    /// each (lane, session, kind) last fired. A repeat fires only once that advances — real work
-    /// since the last alert — so the status flapping a 30s debounce can't catch (idle-decay, lsof
-    /// undercount, sniff wobble) doesn't re-alert. Covers NeedsYou/RateLimited/Resumed; Idle keeps
-    /// to `notif_debounce`. The `Instant` is for pruning only.
+    /// Latch alerts to transcript message activity, not file mtime, so detection flaps cannot
+    /// repeat them without new work; Instant is only for pruning.
     notif_latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)>,
     /// In-app notification history (newest last), shown in the Notifications view.
     pub notifications: VecDeque<NotifEvent>,
@@ -360,19 +347,15 @@ pub struct App {
     pub sessions: Vec<WorkSession>,
     pub search_query: String,
     pub search_results: Vec<Commit>,
-    /// Latest commits for the selected lane's worktree (its branch history) — shown in the
+    /// Latest commits for the selected lane's worktree (its branch history) - shown in the
     /// Split detail, with a fallback when there's nothing today.
     pub recent_commits: Vec<Commit>,
     recent_commits_lane: Option<LaneId>,
-    /// Which of the selected lane's agent sessions is highlighted (for adopt). Several
-    /// concurrent agents can run in one worktree; this cursor picks among them. Derived: the
-    /// daemon orders `agent_sessions` newest-active-first and re-sorts it as agents take
-    /// turns, so `sync_session_cursor` re-derives this position from `session_ref` on every
-    /// tick — a raw index held across refreshes would silently drift onto a different agent
-    /// (wrong usage account, keys routed to the wrong pane).
+    /// Tracks the selected session’s current position, re-derived from stable identity after every
+    /// fleet refresh.
     pub session_idx: usize,
     session_lane: Option<LaneId>,
-    /// The durable identity of the agent the session cursor is on — the source of truth that
+    /// The durable identity of the agent the session cursor is on - the source of truth that
     /// `session_idx` is re-derived from each tick. `None` until a lane's first pin.
     session_ref: Option<SessionRef>,
     /// Consecutive refreshes the anchored agent has been missing from the selected lane (see
@@ -382,15 +365,12 @@ pub struct App {
     /// during one bad snapshot (the cursor sync runs per event-loop iteration) can't exhaust
     /// the grace that is meant to be measured in data refreshes.
     session_ref_miss_gen: u64,
-    /// Bumped by every successful `refresh_lanes` — the anchor miss counter's clock.
+    /// Bumped by every successful `refresh_lanes` - the anchor miss counter's clock.
     refresh_gen: u64,
-    /// The agent each lane had selected when you last left it (saved from `session_ref` on
-    /// lane change), so returning to a multi-agent lane restores your pick instead of
-    /// snapping back to the first slot. Keyed by a stable identity (transcript id / tmux
-    /// window), so it survives the session list reordering.
+    /// Remembers selection by identity per lane so returning survives session reorder.
     session_memory: HashMap<LaneId, SessionRef>,
     /// After spawning an agent, the (lane, tmux window) to move the session cursor onto once it
-    /// shows up in `lane.list` — so a fresh spawn lands you on the *new* agent, not the old one.
+    /// shows up in `lane.list` - so a fresh spawn lands you on the *new* agent, not the old one.
     /// Cleared when matched (or after a few refreshes if the window never appears).
     pending_focus_window: Option<(LaneId, String)>,
     /// Successful data refreshes spent waiting for [`Self::pending_focus_window`] to appear.
@@ -398,10 +378,10 @@ pub struct App {
     /// Plain shell terminals open for the selected lane (tmux window names).
     pub terminals: Vec<String>,
     terminals_lane: Option<LaneId>,
-    /// Every lane's open plain terminals `(lane, window)` — the Grid's shell tiles. Synced
+    /// Every lane's open plain terminals `(lane, window)` - the Grid's shell tiles. Synced
     /// from `terminal.list_all` while the Grid is open.
     pub term_windows: Vec<(LaneId, String)>,
-    /// Live pane per terminal window, pushed by `event.agent.output` (window-tagged) — the
+    /// Live pane per terminal window, pushed by `event.agent.output` (window-tagged) - the
     /// shell-tile counterpart of the lane-keyed `output`.
     pub term_output: HashMap<String, Pane>,
     /// When `term_windows` was last fetched (throttles the Grid's list_all poll).
@@ -414,7 +394,7 @@ pub struct App {
     /// by the first press.
     repo_remove_pending: Option<i64>,
     /// Pending bulk repo-discover (root, found paths): armed by a first `d`, committed by a second
-    /// — so a recursive scan of a deep folder can't flood the fleet on a single keypress.
+    /// - so a recursive scan of a deep folder can't flood the fleet on a single keypress.
     discover_pending: Option<(String, Vec<String>)>,
     /// Two-press confirm for unregistering a whole repo from the Fleet (`X`): the repo id armed
     /// by the first press. Cleared by any other action, so navigating away cancels it.
@@ -435,7 +415,7 @@ pub struct App {
     last_viewport_focus: Option<(LaneId, String)>,
     last_viewport_windows: Vec<String>,
     /// When the viewport was last sent. Expires after [`VIEWPORT_REASSERT`] so the daemon's
-    /// focus-ownership beat (`agent.fit` arbitration) stays fresh while this TUI is alive —
+    /// focus-ownership beat (`agent.fit` arbitration) stays fresh while this TUI is alive -
     /// an unchanged viewport is re-sent, which is otherwise a no-op.
     last_viewport_at: Option<std::time::Instant>,
     /// Last terminal title emitted (OSC 2), to skip redundant writes.
@@ -446,9 +426,8 @@ pub struct App {
     attach_target: Option<AttachSpec>,
     /// When set, the stdin-reader thread pauses (so tmux owns the terminal during an attach).
     input_suspended: Arc<AtomicBool>,
-    /// Set by the reader thread once it has actually entered its paused branch — so an attach waits
-    /// for a CONFIRMED handoff (the reader is no longer touching stdin) instead of a guessed sleep,
-    /// preventing the reader from fighting tmux for the terminal (split input / spurious detach).
+    /// Confirms the reader has stopped touching stdin before attach hands the terminal to tmux,
+    /// preventing competing reads.
     reader_parked: Arc<AtomicBool>,
     /// Per-account Claude usage (from the daemon's `/usage` probe), shown in the bottom-right
     /// corner for the focused agent's account. Empty unless `usage_probe` is enabled.
@@ -463,25 +442,18 @@ pub struct App {
     /// The orchestrator's resolved agent (Claude account) and model, for the pinned row's label.
     pub orch_agent: Option<String>,
     pub orch_model: Option<String>,
-    /// repomind's current attention (from `orchestrator.status`'s `attention` field):
-    /// `"permission"`, `"decision"`, or `"end_of_turn"` when it's asking the human something;
-    /// `None` (mapped from the wire's `"none"`) otherwise. Drives the pinned row's needs-you
-    /// styling and the command-center header.
+    /// Carries actionable orchestrator attention, mapping the wire’s none value to absence.
     pub orch_attention: Option<String>,
     /// A short "why" for `orch_attention` (the pending dialog's question, or a tail of
     /// repomind's last message), from `orchestrator.status`'s `headline` field.
     pub orch_headline: Option<String>,
-    /// True once `apply_orchestrator_status` has applied a first status (mirrors `notif_seeded`
-    /// for the lane path): gates the "repomind needs you" popup so a cold start where repomind is
-    /// already awaiting attention seeds `orch_attention` instead of reading it as a none→attention
-    /// edge and firing a spurious popup. Only the popup is seeded — the pinned row/header above
-    /// still reflect the real value on this first call.
+    /// Seed initial attention without a popup while still displaying its current value.
     orch_notif_seeded: bool,
     /// Last time the orchestrator pane changed; drives the "chatting" vs "idle" pinned-row state.
     pub orch_last_output: Option<Instant>,
     /// INSERT mode in the command-center view: keystrokes forward to `orchestrator.send_input`.
     pub orch_insert: bool,
-    /// Two-press confirm for restarting repomind (`r r`) in the command-center — a restart kills
+    /// Two-press confirm for restarting repomind (`r r`) in the command-center - a restart kills
     /// the live session, so a single stray keypress must not do it. Any other key disarms.
     pub orch_restart_armed: bool,
     /// The watch flag we last pushed to the daemon (`orchestrator.watch`), mirrored so `sync_viewport`
@@ -693,15 +665,8 @@ impl App {
         }
     }
 
-    /// Update the pinned-row/command-center state from an `orchestrator.status` shape
-    /// (`{running, agent, model, window, attention, headline}`). On the none→needs-attention edge —
-    /// repomind just raised a dialog or finished a turn — fires the same native popup an agent's
-    /// NeedsYou gets (mirrors [`fire_notification`](Self::fire_notification)), unless the user is
-    /// already looking at the command-center (its row/header already show it) or notifications are
-    /// off. The first application only seeds `orch_attention` (see `orch_notif_seeded`): otherwise
-    /// a cold start where repomind is already awaiting attention would read `had_attention == false`
-    /// (this struct's fields start unset) as a genuine edge and fire a spurious startup popup — the
-    /// same problem `detect_notifications`' `notif_seeded` guard solves for the lane path.
+    /// Refresh display state on every payload, seeding the first value and notifying later
+    /// attention edges only when settings and view coverage allow.
     fn apply_orchestrator_status(&mut self, v: &serde_json::Value) {
         self.orch_running = v.get("running").and_then(|b| b.as_bool()).unwrap_or(false);
         self.orch_agent = v
@@ -737,13 +702,8 @@ impl App {
         }
     }
 
-    /// Whether `apply_orchestrator_status` should pop the "repomind needs you" notification for
-    /// the update just applied: `seeding` is `true` only on that call's first-ever application
-    /// (see `orch_notif_seeded`) — never fires, no matter how the other conditions read, since a
-    /// cold start where repomind is already awaiting attention isn't a real edge. Otherwise mirrors
-    /// [`Self::notif_enabled_for`]'s gating plus the command-center's own-coverage check. Split out
-    /// as a pure decision so it's unit-testable without invoking the real (OS-popping)
-    /// `notify::send_native`.
+    /// Suppress initial seeding and covered or disabled attention alerts without invoking native
+    /// delivery.
     fn orch_popup_should_fire(&self, seeding: bool, had_attention: bool) -> bool {
         !seeding
             && !had_attention
@@ -753,7 +713,7 @@ impl App {
             && self.settings.notify_needs_you
     }
 
-    /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick — usage moves
+    /// Pull per-account `/usage` from the daemon, throttled well below the 1s tick - usage moves
     /// slowly and the daemon only re-probes every few minutes. Leaves the previous value on error
     /// (and stays empty when `usage_probe` is off, so the corner falls back / hides).
     async fn sync_usage(&mut self) {
@@ -771,7 +731,7 @@ impl App {
         }
     }
 
-    /// Pull just the lane list — the only thing needing per-second freshness in live views (so
+    /// Pull just the lane list - the only thing needing per-second freshness in live views (so
     /// an agent that exits on its own is noticed promptly). Commits/repos change on git events,
     /// which arrive as notifications that trigger a full [`refresh`].
     pub async fn refresh_lanes(&mut self) {
@@ -786,25 +746,23 @@ impl App {
                 self.lanes = visible_lanes(l);
                 // New snapshot: advance the anchor miss counter's clock (see `refresh_gen`).
                 self.refresh_gen = self.refresh_gen.wrapping_add(1);
-                // Forget remembered agent selections for lanes that no longer exist.
+
                 let live_lane_ids: HashSet<_> = self.lanes.iter().map(|lane| lane.id).collect();
                 self.session_memory
                     .retain(|id, _| live_lane_ids.contains(id));
                 // A successful fetch is one real chance for a just-spawned window to have
-                // appeared — the only clock the spawn-focus give-up may tick on.
+                // appeared - the only clock the spawn-focus give-up may tick on.
                 self.age_pending_focus();
                 // Run notification edge-detection only on a *successful* fetch. Seeding off a
                 // failed first call (empty lanes) would make the next good refresh treat every
-                // running agent as a fresh transition — the startup storm seeding prevents.
+                // running agent as a fresh transition - the startup storm seeding prevents.
                 self.detect_notifications();
                 self.sort_lanes();
                 if let Some(id) = keep {
                     self.select_lane_session(id, keep_ref);
                 }
-                // Track how many consecutive refreshes the focused agent has been missing, so a
-                // transient overlay flap (one bad snapshot) doesn't detach the user — only a
-                // sustained absence does. Counted here (per data refresh), consumed by
-                // `check_focus_alive` (which runs every render tick). See [`FOCUS_DETACH_GRACE`].
+                // Count missing focused agents per data refresh so one bad overlay cannot detach
+                // the user.
                 if self.focus_managed {
                     let present = self
                         .selected_lane()
@@ -819,10 +777,7 @@ impl App {
         self.clamp_selection();
     }
 
-    /// Order lanes for display: repo groups keep their original (daemon) order, and within each
-    /// group pinned lanes come first, then by attention (waiting > stuck on a limit > running),
-    /// then most recent activity. Stable, so ties keep the daemon's order — the cursor is
-    /// remapped by the caller since this runs on every refresh.
+    /// Order repository groups by daemon order, then lanes by pin, attention, and stable lane ID.
     fn sort_lanes(&mut self) {
         let mut repo_order: HashMap<i64, usize> = HashMap::new();
         for l in &self.lanes {
@@ -834,10 +789,8 @@ impl App {
             .iter()
             .map(|l| (l.id, self.lane_attention(l)))
             .collect();
-        // Within a repo + pin + attention bucket, order by lane id (creation order) — a STABLE
-        // key. Sorting by recent activity here made lanes bubble around on every agent output
-        // (visible jumbling, worse with the expanded agent tree). Needs-you still floats up via
-        // the `attention` bucket; only the within-bucket churn is removed.
+        // Use lane ID within equal-attention groups so routine agent output cannot reorder the lane
+        // list.
         self.lanes
             .sort_by_key(|l| (repo_order[&l.repo.id], !l.pinned, attention[&l.id], l.id));
     }
@@ -900,7 +853,7 @@ impl App {
         self.status = msg;
     }
 
-    /// `G`: jump_attention, then go all the way into the pane — select the session the fresh
+    /// `G`: jump_attention, then go all the way into the pane - select the session the fresh
     /// banner identified (if any) and request a tmux attach. Does nothing extra when the jump
     /// found no lane blocked on you.
     fn jump_attention_attach(&mut self) {
@@ -919,7 +872,7 @@ impl App {
         };
         let from_banner = banner_sess.as_ref().is_some_and(|(id, _)| *id == lane_id);
         if !needs && !from_banner {
-            return; // the jump didn't land on an alerting lane — stay put, no attach
+            return; // the jump didn't land on an alerting lane - stay put, no attach
         }
         if let Some((_, sid)) = banner_sess.filter(|(id, _)| *id == lane_id) {
             self.select_session(lane_id, sid.as_deref());
@@ -927,10 +880,8 @@ impl App {
         self.attach_request = Some(lane_id);
     }
 
-    /// The lanes with an answerable dialog on screen, in display order — the queue the
-    /// prompt-peek popup walks. Tighter than `lane_needs_attention` (which also counts
-    /// end-of-turn, stalled, and rate-limited lanes): `v` exists to ANSWER dialogs, and a
-    /// lane with nothing to answer would only open an empty popup.
+    /// Only answerable dialogs belong in the prompt-peek queue; other attention states would open
+    /// an empty prompt.
     fn triage_queue(&self) -> Vec<LaneId> {
         self.visible_lanes()
             .into_iter()
@@ -943,7 +894,7 @@ impl App {
             .collect()
     }
 
-    /// `v`: open the prompt-peek popup — on the selected lane when it's blocked on the user,
+    /// `v`: open the prompt-peek popup - on the selected lane when it's blocked on the user,
     /// else on the first lane in the triage queue.
     pub async fn open_peek(&mut self) {
         let queue = self.triage_queue();
@@ -960,7 +911,7 @@ impl App {
     }
 
     /// Point the popup at `lane_id`: seed instantly from the last `lane.list` snapshot, then
-    /// refresh from a live pane capture (best-effort — the seed already renders, and the reply
+    /// refresh from a live pane capture (best-effort - the seed already renders, and the reply
     /// is ignored if the popup moved on meanwhile).
     async fn show_peek(&mut self, lane_id: LaneId, queue: &[LaneId]) {
         let Some(lane) = self.lanes.iter().find(|l| l.id == lane_id) else {
@@ -1040,7 +991,7 @@ impl App {
     }
 
     /// Send the chosen option to the peeked agent via `agent.answer`, guarded by the summary
-    /// the popup is showing — the daemon re-captures and refuses if the pane moved on.
+    /// the popup is showing - the daemon re-captures and refuses if the pane moved on.
     async fn peek_answer(&mut self, choice: usize) {
         let Some(p) = &self.peek else { return };
         let Some(dialog) = &p.dialog else {
@@ -1171,7 +1122,7 @@ impl App {
         }
     }
 
-    /// Select lane `id` — clearing any filter that hides it — and open it in Focus.
+    /// Select lane `id` - clearing any filter that hides it - and open it in Focus.
     fn jump_to_lane(&mut self, id: LaneId) {
         let exists = |me: &Self| me.visible_lanes().iter().any(|l| l.id == id);
         if !exists(self) && (!self.filter.is_empty() || self.urgent_only) {
@@ -1201,11 +1152,8 @@ impl App {
             .flat_map(|l| session_statuses(l.id, &l.agent_sessions, subagents))
             .collect();
 
-        // Re-seed (don't diff) on the first list, or after returning from a full-screen attach.
-        // While the TUI was parked the daemon owned desktop popups (its `local_watcher_seen`
-        // heartbeat went stale), so replaying the transitions that happened in the gap would
-        // double-fire what the daemon already delivered. The subagent toggle flipping likewise
-        // changes the tracked key set wholesale, so re-seed there too.
+        // Reseed after attach or a subagent-toggle change so the TUI does not replay alerts already
+        // delivered by the daemon or infer edges from a changed key set.
         if !self.notif_seeded || self.notif_reseed || subagents != self.notif_subagents {
             self.prev_status = now;
             self.notif_seeded = true;
@@ -1215,7 +1163,7 @@ impl App {
         }
 
         let live_lanes: HashSet<LaneId> = self.lanes.iter().map(|l| l.id).collect();
-        // Lanes that currently have a managed real session — used by the diff to suppress the
+        // Lanes that currently have a managed real session - used by the diff to suppress the
         // identity handoff where the no-transcript `Fallback` key vanishes in the same refresh
         // its `Transcript` key first appears (the agent didn't stop, it became identifiable).
         let lanes_with_managed: HashSet<LaneId> = self
@@ -1225,7 +1173,7 @@ impl App {
             .map(|l| l.id)
             .collect();
 
-        // Decide what to fire first (updating the debounce as we go), then deliver — delivery
+        // Decide what to fire first (updating the debounce as we go), then deliver - delivery
         // composes from `self.lanes` and mutates `self`, so it can't run while we still hold a
         // borrow into the lanes here.
         let mut fires: Vec<((LaneId, SessKey), NotifKind)> = Vec::new();
@@ -1242,7 +1190,7 @@ impl App {
                 }
             }
             // Activity latch: don't re-fire an alert for a session that hasn't done real work
-            // since it last fired — gates out the status flapping (idle-decay, lsof undercount,
+            // since it last fired - gates out the status flapping (idle-decay, lsof undercount,
             // sniff wobble) the time-debounce can't. Idle has no activity anchor, so it's exempt.
             let activity = self
                 .lanes
@@ -1319,11 +1267,11 @@ impl App {
     }
 
     /// Compose + deliver a notification about one session: native popup, banner, history entry.
-    /// `quiet` records the event in the feed only — the popup/banner were already covered by a
+    /// `quiet` records the event in the feed only - the popup/banner were already covered by a
     /// coalesced burst summary.
     fn fire_notification(&mut self, id: LaneId, key: &SessKey, kind: NotifKind, quiet: bool) {
         // Compose under an immutable borrow that ends before we mutate `self`. The session may
-        // be gone when its disappearance was the trigger — compose degrades to a generic line.
+        // be gone when its disappearance was the trigger - compose degrades to a generic line.
         let subagents = self.settings.notify_subagents;
         let Some((title, body, session_id)) = self.lanes.iter().find(|l| l.id == id).map(|l| {
             let sess = session_by_key(l, key, subagents);
@@ -1357,7 +1305,7 @@ impl App {
         }
     }
 
-    /// Notifications not yet seen (the feed hasn't been opened since they fired) — the ⚑ badge.
+    /// Notifications not yet seen (the feed hasn't been opened since they fired) - the unread badge.
     pub fn unread_notifs(&self) -> usize {
         self.notifications.iter().filter(|e| !e.read).count()
             + self
@@ -1406,7 +1354,7 @@ impl App {
             });
             if self.settings.expand_agents && lane.agent_sessions.len() > 1 {
                 // Emit sub-rows in a STABLE order (by durable session identity), not the daemon's
-                // newest-active-first order — otherwise renamed rows jump around as agents take
+                // newest-active-first order - otherwise renamed rows jump around as agents take
                 // turns. `session` keeps the real index so selection still targets the right agent.
                 for s in stable_session_order(&lane.agent_sessions) {
                     rows.push(FleetRow {
@@ -1436,7 +1384,7 @@ impl App {
     pub fn selected_lane(&self) -> Option<&Lane> {
         let row = self.fleet_rows().get(self.selected).copied()?;
         if row.orchestrator {
-            return None; // the pinned repomind row targets no lane
+            return None;
         }
         self.visible_lanes().into_iter().nth(row.lane_idx)
     }
@@ -1494,7 +1442,7 @@ impl App {
     }
 
     /// The Grid's tiles: agent panes first (the most active lanes, as ever), then every open
-    /// plain terminal (`t` shells) of a visible lane — in lane display order — up to 8 tiles.
+    /// plain terminal (`t` shells) of a visible lane - in lane display order - up to 8 tiles.
     pub fn grid_tiles(&self) -> Vec<GridTile> {
         let mut tiles: Vec<GridTile> = self
             .grid_lane_ids()
@@ -1554,8 +1502,8 @@ impl App {
         }
     }
 
-    /// Tell the daemon which lanes are visible — and, in Split/Focus, which agent window the
-    /// selected lane should stream (so Tab between a lane's agents retargets the pane) — if
+    /// Tell the daemon which lanes are visible - and, in Split/Focus, which agent window the
+    /// selected lane should stream (so Tab between a lane's agents retargets the pane) - if
     /// either changed.
     pub async fn sync_viewport(&mut self) {
         let live = self.live_lanes();
@@ -1569,7 +1517,7 @@ impl App {
             Vec::new()
         };
         // Name the pane the user is actively watching (Split/Focus, or the highlighted Grid
-        // tile — its terminal window when it's a shell tile) so the daemon streams it at the
+        // tile - its terminal window when it's a shell tile) so the daemon streams it at the
         // fast cadence and lets the other viewport panes back off.
         let focus = match self.view {
             View::Grid => {
@@ -1631,8 +1579,8 @@ impl App {
     }
 
     /// Resize the focused agent's tmux window to match the mediated view's pane, so it reflows to
-    /// the visible width (no right-edge clipping). Only fires on a real size/focus change — view
-    /// switch, terminal resize, or return-from-attach — not every tick.
+    /// the visible width (no right-edge clipping). Only fires on a real size/focus change - view
+    /// switch, terminal resize, or return-from-attach - not every tick.
     async fn sync_pane_size(&mut self) {
         if !matches!(self.view, View::Split | View::Focus) {
             return;
@@ -1665,10 +1613,8 @@ impl App {
         self.last_resize_at = Some(std::time::Instant::now());
     }
 
-    /// Size the orchestrator's tmux window to the right-pane area while it's being streamed (the
-    /// command-center, or the Split preview when the pinned row is selected), so the captured pane
-    /// fills the view exactly instead of overflowing (too wide) or rendering blank (too tall, so
-    /// `output_window` would slice off the trailing empty rows). Mirrors `sync_pane_size`.
+    /// Fit the streamed orchestrator to its visible pane to avoid capture overflow and blank
+    /// trailing rows.
     async fn sync_orchestrator_size(&mut self) {
         let streaming = self.view == View::Orchestrator
             || (self.view == View::Split && self.orchestrator_selected());
@@ -1734,11 +1680,8 @@ impl App {
         }
     }
 
-    /// Age the spawn-focus intent by one *data refresh*: called from `refresh_lanes` on a
-    /// successful fetch, so [`PENDING_FOCUS_GIVE_UP_TICKS`] measures ~1s lane refreshes — the
-    /// cadence the window can actually appear at — rather than event-loop iterations (which a
-    /// burst of typing runs hundreds of per second). Resolution (and the drop on navigating to
-    /// another lane) stays in [`Self::sync_session_cursor`].
+    /// Age spawn focus only on successful data refreshes so typing cannot exhaust the appearance
+    /// budget.
     fn age_pending_focus(&mut self) {
         if self.pending_focus_window.is_none() {
             return;
@@ -1754,7 +1697,7 @@ impl App {
     /// to the number of sessions on that lane.
     fn sync_session_cursor(&mut self) {
         let sel = self.selected_lane().map(|l| l.id);
-        // Honor a just-spawned agent's focus intent FIRST — before the expanded early-return below,
+        // Honor a just-spawned agent's focus intent FIRST - before the expanded early-return below,
         // which would otherwise skip it. Once its window appears on the spawn lane, point the
         // cursor (and, when expanded, the selected row) at the new agent.
         if let Some((lane, window)) = self.pending_focus_window.clone() {
@@ -1778,21 +1721,17 @@ impl App {
                         return;
                     }
                     None => {
-                        // Not in the list yet (transcript/window lag) — keep waiting. Expiry is
-                        // counted per data refresh in `age_pending_focus`, NOT here: this runs
-                        // once per event-loop iteration (i.e. per keystroke), so counting here
-                        // let a typing burst right after `e` burn the give-up budget before the
-                        // window had any chance to appear — dropping the intent and leaving the
-                        // keys routed at the lane's previous agent.
+                        // Wait for a data refresh to age this intent; per-keystroke expiry could
+                        // retarget input before the new window appears.
                     }
                 }
             } else {
-                // Selection moved off the spawn lane before the agent appeared — drop the intent.
+                // Selection moved off the spawn lane before the agent appeared - drop the intent.
                 self.pending_focus_window = None;
                 self.pending_focus_ticks = 0;
             }
         }
-        // In expanded mode an agent sub-row IS the session cursor — drive `session_idx` straight
+        // In expanded mode an agent sub-row IS the session cursor - drive `session_idx` straight
         // from the selected row (the row itself is identity-remapped on refresh, so it's safe);
         // the anchor mirrors it so collapsing keeps the pick.
         if self.settings.expand_agents {
@@ -1801,10 +1740,7 @@ impl App {
             }) = self.selected_row()
             {
                 let lane_id = self.selected_lane().map(|l| l.id);
-                // Same agent? Compare by identity, not raw index — the daemon re-sorts
-                // `agent_sessions` as agents take turns, so the same agent's row carries a
-                // new index after every re-sort; wiping the scrollback for that would kick
-                // the user out of what they were reading.
+                // Compare identity rather than position so reordered sessions retain scrollback.
                 let same_agent = self.session_lane == lane_id
                     && self.session_ref.as_ref().and_then(|r| {
                         self.selected_lane()
@@ -1819,11 +1755,8 @@ impl App {
             }
         }
         if sel != self.session_lane {
-            // Remember the agent the outgoing lane had selected, then restore the one we last
-            // had on the lane we're arriving at — so returning to a multi-agent project keeps
-            // your pick instead of snapping to the first slot. Identity-keyed, so it survives
-            // the session list reordering; falls back to the first agent when the remembered
-            // one is gone (or this lane was never visited).
+            // Restore the remembered identity on lane changes, falling back only when that agent is
+            // gone.
             if let (Some(old), Some(r)) = (self.session_lane, self.session_ref.clone()) {
                 self.session_memory.insert(old, r);
             }
@@ -1839,10 +1772,7 @@ impl App {
             self.reset_scroll(); // scrollback buffer belonged to the previous lane
             return;
         }
-        // Same lane, possibly a new snapshot: re-resolve the anchor EVERY tick. The daemon
-        // orders `agent_sessions` newest-active-first and re-sorts it as agents take turns,
-        // so identity is the truth and `session_idx` merely its current position. No scroll
-        // reset on a position change — it is the same agent.
+        // Re-resolve the identity each tick without resetting scroll for a mere position change.
         let resolved = self.session_ref.as_ref().and_then(|r| {
             self.selected_lane()
                 .and_then(|l| session_index_for_ref(&l.agent_sessions, r))
@@ -1871,7 +1801,7 @@ impl App {
                 }
                 if self.session_ref.is_none() {
                     // First contact with a populated lane (arrival landed on an empty lane, or
-                    // nothing was ever pinned): pin the current occupant — and hold it, per
+                    // nothing was ever pinned): pin the current occupant - and hold it, per
                     // the pin-on-arrival rule, instead of following the daemon's re-sorts.
                     self.pin_session(self.session_idx);
                 } else if self.session_ref_miss_gen != self.refresh_gen {
@@ -1888,7 +1818,7 @@ impl App {
         }
     }
 
-    /// Point the session cursor at `idx` on the selected lane and anchor it by identity —
+    /// Point the session cursor at `idx` on the selected lane and anchor it by identity -
     /// every deliberate cursor move funnels through here so `sync_session_cursor`'s per-tick
     /// re-resolve can never snap the cursor back to a stale pick.
     fn pin_session(&mut self, idx: usize) {
@@ -1900,7 +1830,7 @@ impl App {
         self.session_ref_misses = 0;
     }
 
-    /// Drop out of Focus once the agent we were driving exits (its managed session is gone —
+    /// Drop out of Focus once the agent we were driving exits (its managed session is gone -
     /// e.g. the user typed `/exit`, or it crashed). Avoids sitting on a dead pane.
     fn check_focus_alive(&mut self) {
         if self.view != View::Focus {
@@ -1917,7 +1847,7 @@ impl App {
             self.focus_missing_ticks = 0;
         } else if self.focus_managed && self.focus_missing_ticks >= FOCUS_DETACH_GRACE {
             // Sustained absence (counted per lane refresh in `refresh_lanes`, not per render tick)
-            // — a real exit, not a one-snapshot flap. Drop back to Split.
+            // - a real exit, not a one-snapshot flap. Drop back to Split.
             self.focus_managed = false;
             self.focus_missing_ticks = 0;
             self.focus_insert = false;
@@ -1937,7 +1867,7 @@ impl App {
     /// Key handling in the babysit Grid: a linear cursor over the live tiles (arrows move it,
     /// dots show position), `↵` focuses the active tile, and esc/spc/q leave the view.
     async fn grid_key(&mut self, key: KeyEvent) {
-        // Click-focused a tile? Keystrokes go straight to that pane (like Split/Focus insert) —
+        // Click-focused a tile? Keystrokes go straight to that pane (like Split/Focus insert) -
         // the active tile's agent, or its plain terminal; ^O blurs, as does a click on empty
         // space.
         if self.focus_insert {
@@ -1994,7 +1924,7 @@ impl App {
                 self.toggle_pin().await;
             }
             // Hop to the next tile whose agent needs you, wrapping. (Shell tiles never need
-            // you — the filter naturally skips them.)
+            // you - the filter naturally skips them.)
             KeyCode::Char('g') if n > 0 => {
                 let tiles = self.grid_tiles();
                 let need: Vec<usize> = tiles
@@ -2027,15 +1957,12 @@ impl App {
         }
     }
 
-    /// The managed tmux window of the session the cursor is on (Tab cycles it) — where keys,
+    /// The managed tmux window of the session the cursor is on (Tab cycles it) - where keys,
     /// captures, stops, and attaches are routed. `None` falls back to the lane's first slot
     /// (external/inferred sessions have no window of their own).
     fn selected_window(&self) -> Option<String> {
-        // A just-spawned agent routes immediately: `agent.spawn` already returned its window
-        // name, but the session takes a beat to show up in `lane.list` (overlay lag) — until
-        // then `session_idx` still points at the lane's previous agent, and keys typed right
-        // after `e` would land in the wrong pane (or, via the daemon's `None` fallback, in the
-        // lane's FIRST window). The cursor follows once the window appears (`sync_session_cursor`).
+        // Route immediately to the returned spawn window while its fleet row is still pending,
+        // avoiding input to the previous agent.
         if let Some((lane, w)) = &self.pending_focus_window {
             if self.selected_lane().map(|l| l.id) == Some(*lane) {
                 return Some(w.clone());
@@ -2046,11 +1973,8 @@ impl App {
             .and_then(|s| s.tmux_window.clone())
     }
 
-    /// Wait (bounded) for the stdin reader thread to confirm it has parked, so `tmux attach` gets
-    /// sole ownership of the terminal — a confirmed handoff instead of a guessed sleep, so the
-    /// reader can't keep reading stdin and split keystrokes with tmux (which corrupts the terminal
-    /// and can feed tmux a sequence it misreads as a detach key). Bounded (~400ms) so a reader
-    /// wedged in a blocking read can't hang the attach; a timeout is logged for diagnosis.
+    /// Bound the wait for reader parking before handing stdin to attach, preventing competing
+    /// readers from splitting terminal input.
     async fn await_reader_parked(&self) {
         for _ in 0..40 {
             if self.reader_parked.load(Ordering::Relaxed) {
@@ -2061,8 +1985,8 @@ impl App {
         tui_log("WARN reader did not park before attach; terminal handoff may be racy");
     }
 
-    /// The usage account key of the agent the user is looking at — the selected lane's selected
-    /// session — for attributing the usage corner. Claude agents key on their config dir; Codex
+    /// The usage account key of the agent the user is looking at - the selected lane's selected
+    /// session - for attributing the usage corner. Claude agents key on their config dir; Codex
     /// keys on `"codex"`; other kinds have no usage probe (`None`). Matches `AccountUsage::key`.
     pub fn focused_account_key(&self) -> Option<String> {
         use repomon_core::model::AgentKind;
@@ -2089,7 +2013,7 @@ impl App {
         if n <= 1 {
             return;
         }
-        // An explicit Tab overrides a pending spawn-focus snap — otherwise the cursor would
+        // An explicit Tab overrides a pending spawn-focus snap - otherwise the cursor would
         // appear to move while `selected_window()` kept routing keys at the pending window.
         self.pending_focus_window = None;
         self.pending_focus_ticks = 0;
@@ -2099,11 +2023,11 @@ impl App {
             (self.session_idx + n - 1) % n
         };
         self.pin_session(idx);
-        // The scrollback snapshot belonged to the previous agent's window — drop it so the new
+        // The scrollback snapshot belonged to the previous agent's window - drop it so the new
         // agent shows its own live tail instead of stale lines.
         self.reset_scroll();
         // In expanded mode the selected row drives session_idx, so move the cursor onto the new
-        // agent's sub-row — otherwise the per-tick cursor sync snaps session_idx straight back.
+        // agent's sub-row - otherwise the per-tick cursor sync snaps session_idx straight back.
         if self.settings.expand_agents {
             if let Some(lane_id) = self.selected_lane().map(|l| l.id) {
                 self.select_lane_session(lane_id, self.session_ref.clone());
@@ -2126,7 +2050,7 @@ impl App {
                     .get("cursor")
                     .and_then(|v| v.as_array())
                     .and_then(|a| Some((a.first()?.as_u64()? as u16, a.get(1)?.as_u64()? as u16)));
-                // A window-tagged terminal stream (a Grid shell tile) has its own store — a
+                // A window-tagged terminal stream (a Grid shell tile) has its own store - a
                 // lane's agent pane and its terminals must never overwrite each other.
                 match note
                     .params
@@ -2178,7 +2102,7 @@ impl App {
         } else if note.method == "event.orchestrator.status" {
             self.apply_orchestrator_status(&note.params);
         } else {
-            // Don't refresh inline — the event loop coalesces a burst of notifications into a
+            // Don't refresh inline - the event loop coalesces a burst of notifications into a
             // single refresh (each `refresh()` is a ~100ms lane.list, and bursts/exit-focus
             // backlogs would otherwise stack into a multi-hundred-ms stall).
             self.refresh_pending = true;
@@ -2206,7 +2130,7 @@ impl App {
                     return;
                 }
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
-                // Remember the real pointer column from positioned events — wheel events report
+                // Remember the real pointer column from positioned events - wheel events report
                 // column 0 on many terminals, so this is how we know which pane the wheel is over.
                 if !matches!(
                     me.kind,
@@ -2243,10 +2167,8 @@ impl App {
                             self.settings_click(me.row).await;
                         }
                     }
-                    // Split: route the wheel by which side the pointer is over — the agent pane
-                    // (right of the 26-col sidebar + 1-col divider) scrolls its output; the sidebar
-                    // navigates lanes. Wheel events report column 0 on many terminals, so fall back
-                    // to the last positioned pointer column. A left-click focuses the clicked lane.
+                    // Some terminals report wheel column zero; use the last positioned event to
+                    // choose sidebar navigation or pane scrolling.
                     View::Split => {
                         let col = if me.column > 0 {
                             me.column
@@ -2288,7 +2210,7 @@ impl App {
                 return;
             }
             // Bracketed paste from the terminal (enabled globally): one event for the whole
-            // pasted text, routed by mode — never replayed as a stream of key events by the
+            // pasted text, routed by mode - never replayed as a stream of key events by the
             // terminal itself anymore.
             Event::Paste(text) => {
                 self.handle_paste(text).await;
@@ -2307,9 +2229,9 @@ impl App {
         match self.view {
             // Inline session rename is modal: while active it swallows every key, in any view.
             _ if self.renaming => self.rename_key(key).await,
-            // So is the prompt-peek popup — it answers/steers/closes, whatever the view below.
+            // So is the prompt-peek popup - it answers/steers/closes, whatever the view below.
             _ if self.peek.is_some() => self.peek_key(key).await,
-            // The help overlay reads until any key dismisses it.
+
             _ if self.help_open => self.help_open = false,
             View::NewLane => self.new_lane_key(key).await,
             View::Split => self.split_key(key).await,
@@ -2337,11 +2259,8 @@ impl App {
         }
     }
 
-    /// Bracketed paste, routed by mode. Agent insert modes get the whole text as one input
-    /// burst — wrapped in real paste markers when the focused app asked for them (the
-    /// embedded emulator tracks the `?2004` mode); repomind insert forwards it whole; every
-    /// other mode replays it as typed characters, so text fields (filter, rename, New Lane,
-    /// find …) behave exactly as they did when the terminal streamed pastes per-char.
+    /// Forward paste as one burst in insert modes, using bracketed markers when requested; other
+    /// modes receive characters for their text controls.
     async fn handle_paste(&mut self, text: String) {
         if self.orch_insert {
             let _ = self
@@ -2465,7 +2384,7 @@ impl App {
                 } else {
                     format!("renamed → {label}")
                 };
-                self.refresh_lanes().await; // show the new label at once
+                self.refresh_lanes().await;
             }
             Err(e) => self.status = format!("rename failed: {e}"),
         }
@@ -2548,8 +2467,8 @@ impl App {
         }
     }
 
-    /// Unregister the selected repo (must already be registered — marked `+`). Two presses of
-    /// `x`: the first arms, the second removes. Only repomon's bookkeeping goes away — the
+    /// Unregister the selected repo (must already be registered - marked `+`). Two presses of
+    /// `x`: the first arms, the second removes. Only repomon's bookkeeping goes away - the
     /// project, its worktrees, and any running agents on disk are untouched.
     async fn remove_browsed(&mut self) {
         let Some(entry) = self.browse_entries.get(self.browse_selected) else {
@@ -2625,7 +2544,7 @@ impl App {
                         self.status = format!("added {}", e.name);
                         self.refresh().await;
                         let here = self.browse_path.clone();
-                        self.load_browse(Some(here)).await; // refresh "added" markers
+                        self.load_browse(Some(here)).await;
                     }
                     Err(err) => self.status = format!("add failed: {err}"),
                 }
@@ -2633,11 +2552,10 @@ impl App {
         }
     }
 
-    /// Discover git repos under the browsed folder and register them — behind a confirming second
+    /// Discover git repos under the browsed folder and register them - behind a confirming second
     /// press (like repo removal), since a recursive scan of a deep folder can register dozens of
     /// repos at once. First `d` scans and reports the count; second `d` commits the add.
     async fn discover_here(&mut self) {
-        // Second press: commit the pending add.
         if let Some((root, found)) = self.discover_pending.take() {
             let mut added = 0;
             for path in &found {
@@ -2656,7 +2574,7 @@ impl App {
             self.load_browse(Some(here)).await;
             return;
         }
-        // First press: scan and arm (no repos added yet).
+
         let root = self.browse_path.clone();
         let found: Vec<String> = self
             .client
@@ -2730,7 +2648,7 @@ impl App {
     async fn load_settings(&mut self) {
         self.settings_idx = 0;
         self.settings_editing = false;
-        self.load_agents().await; // populate nl_agents for the default-agent picker
+        self.load_agents().await;
         if let Ok(v) = self.client.call("config.get", None).await {
             self.apply_settings_value(&v);
         }
@@ -2844,7 +2762,7 @@ impl App {
             Ok(v) => self.apply_settings_value(&v),
             Err(e) => self.status = format!("settings save failed: {e}"),
         }
-        // Re-theme the whole TUI from the new accent immediately.
+
         self.theme = Theme::from_accent(Some(&self.settings.accent));
     }
 
@@ -2876,7 +2794,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.settings_editing = false;
-                    self.load_settings().await; // discard the in-progress edit
+                    self.load_settings().await;
                 }
                 _ => {}
             }
@@ -2983,7 +2901,7 @@ impl App {
             }
             17 => {
                 // Toggling changes the fleet row count, so re-anchor the cursor to the same
-                // lane/agent afterward (else `selected` drifts to a different — or out-of-range — row).
+                // lane/agent afterward (else `selected` drifts to a different - or out-of-range - row).
                 let keep = self.selected_lane().map(|l| l.id);
                 let keep_ref = self.selected_session_ref();
                 self.settings.expand_agents = !self.settings.expand_agents;
@@ -3011,10 +2929,8 @@ impl App {
         }
     }
 
-    /// The agent names the orchestrator can run under: Claude account variants, custom agents,
-    /// and `codex` — the MCP-capable CLIs. Aider stays excluded (no MCP client, so it can't
-    /// drive the fleet tools; the daemon would reject it anyway). Built from the `agent.detect`
-    /// list already loaded into `nl_agents`.
+    /// Offer the TUI picker’s Claude accounts, custom commands, and Codex from the detected-agent
+    /// list.
     fn orchestrator_agent_choices(&self) -> Vec<String> {
         self.nl_agents
             .iter()
@@ -3125,7 +3041,7 @@ impl App {
     }
 
     /// Point the session cursor at `session_id` on the selected lane (no-op when the session
-    /// is gone or wasn't recorded — the lane's current selection stands).
+    /// is gone or wasn't recorded - the lane's current selection stands).
     fn select_session(&mut self, lane_id: LaneId, session_id: Option<&str>) {
         let Some(sid) = session_id else { return };
         let idx = self.lanes.iter().find(|l| l.id == lane_id).and_then(|l| {
@@ -3136,7 +3052,7 @@ impl App {
         if let Some(i) = idx {
             self.session_lane = Some(lane_id); // keep sync_session_cursor from resetting it
             self.session_idx = i;
-            // Anchor by identity (from the target lane — the fleet cursor may not be on it
+            // Anchor by identity (from the target lane - the fleet cursor may not be on it
             // yet), or the per-tick re-resolve would snap back to the old pick within a tick.
             self.session_ref = self
                 .lanes
@@ -3278,7 +3194,6 @@ impl App {
                             .call("agent.remove", Some(json!({ "name": orig })))
                             .await
                         {
-                            // Carry the default over to the renamed agent.
                             Ok(_) if orig_was_default => {
                                 let _ = self
                                     .client
@@ -3526,13 +3441,13 @@ impl App {
                 self.activate_lane(z.lane, z.session);
                 if dbl {
                     self.focus_insert = false;
-                    self.attach_request = Some(z.lane); // double-click → real terminal
+                    self.attach_request = Some(z.lane);
                 } else {
-                    self.focus_insert = z.interactive; // single-click → type in place / select
+                    self.focus_insert = z.interactive;
                 }
             }
             None => {
-                self.focus_insert = false; // clicked the gutter → blur
+                self.focus_insert = false;
                 self.last_click = None;
             }
         }
@@ -3637,11 +3552,8 @@ impl App {
         self.view = View::Fleet;
     }
 
-    /// Restart repomind with the saved settings: stop the live session, then start fresh — so a
-    /// changed `repomind agent` (backend) / model applies without leaving the TUI. Autonomy
-    /// resets to the default, exactly like the view's idempotent auto-start (`load_orchestrator`)
-    /// — the daemon's `orchestrator.start` re-reads `orchestrator_agent`/`orchestrator_model`
-    /// from config on a genuine spawn.
+    /// Restart so saved backend and model settings take effect, using the same default autonomy as
+    /// automatic startup.
     async fn restart_orchestrator(&mut self) {
         self.orch_restart_armed = false;
         if let Err(e) = self.client.call("orchestrator.stop", None).await {
@@ -3705,7 +3617,7 @@ impl App {
                 self.reset_scroll();
                 self.orch_insert = true;
             }
-            // `r r` restarts repomind with the saved settings — how a `repomind agent` (backend)
+            // `r r` restarts repomind with the saved settings - how a `repomind agent` (backend)
             // or model change in Settings gets applied to a live session without leaving the TUI.
             KeyCode::Char('r') if restart_armed => self.restart_orchestrator().await,
             KeyCode::Char('r') => {
@@ -3786,7 +3698,7 @@ impl App {
             .find(|z| z.rect.contains(pos))
             .map(|z| z.lane);
         if let Some(id) = lane {
-            self.jump_to_lane(id); // selects the lane and opens it in Focus
+            self.jump_to_lane(id);
             return;
         }
         if let Some(rect) = self.orch_pane_zone.get() {
@@ -3798,14 +3710,14 @@ impl App {
                 self.orch_pane_last_click = Some(now);
                 if dbl {
                     self.orch_insert = false;
-                    self.attach_orchestrator().await; // double-click → full attach
+                    self.attach_orchestrator().await;
                 } else {
-                    self.orch_insert = true; // single-click → type to repomind
+                    self.orch_insert = true;
                 }
                 return;
             }
         }
-        self.orch_insert = false; // clicked the gutter → blur
+        self.orch_insert = false;
     }
 
     /// Forward one keystroke live to the selected lane's agent (insert-mode passthrough),
@@ -3817,7 +3729,7 @@ impl App {
             return;
         };
         if literal {
-            // A printable character — buffer it. A whole paste accumulates here and the event loop
+            // A printable character - buffer it. A whole paste accumulates here and the event loop
             // flushes it as a single send_input, instead of one blocking send-keys per character.
             self.pending_input.push_str(&spec);
             return;
@@ -4026,7 +3938,7 @@ impl App {
                 self.attach_request = self.selected_lane().map(|l| l.id);
             }
             // `i` is the lightweight alternative: type to the agent without leaving repomon's
-            // chrome (mediated send-keys — handy for a quick one-liner).
+            // chrome (mediated send-keys - handy for a quick one-liner).
             KeyCode::Char('i') => {
                 self.reset_scroll();
                 self.focus_insert = true;
@@ -4080,7 +3992,6 @@ impl App {
                     .unwrap_or_else(|| "claude-code".to_string());
                 match self.client.call("lane.create", Some(params)).await {
                     Ok(lane) => {
-                        // Spin up the chosen agent in the new lane straight away.
                         let spawned = match lane.get("id").and_then(|v| v.as_i64()) {
                             Some(id) => Some((
                                 id,
@@ -4097,7 +4008,7 @@ impl App {
                         // fleet-cursor move.
                         self.refresh().await;
                         match spawned {
-                            // Land on the new agent typing-ready — creating it IS opening it.
+                            // Land on the new agent typing-ready - creating it IS opening it.
                             Some((id, Ok(v))) => {
                                 self.status =
                                     format!("created lane {} + spawned {agent}", self.nl_branch);
@@ -4105,8 +4016,7 @@ impl App {
                                     v.get("window").and_then(|w| w.as_str()).map(str::to_string);
                                 self.land_on_spawned(id, window);
                             }
-                            // No agent to type to — stay on the fleet, but say why (this error
-                            // was previously swallowed).
+
                             Some((_, Err(e))) => {
                                 self.status =
                                     format!("created lane {}; spawn failed: {e}", self.nl_branch);
@@ -4140,32 +4050,28 @@ impl App {
 
     /// Open the quick agent picker for `lane`, remembering where to return on cancel.
     async fn enter_spawn_pick(&mut self, lane: LaneId) {
-        self.load_agents().await; // populates nl_agents (+ marks the default)
+        self.load_agents().await;
         self.spawn_pick_idx = self.nl_agents.iter().position(|a| a.default).unwrap_or(0);
         self.spawn_pick_lane = Some(lane);
         self.spawn_return = Some(self.view);
         self.view = View::SpawnPick;
     }
 
-    /// Land on a just-spawned agent, typing-ready: select its lane in the fleet, arm the
-    /// pending-focus intent (which also routes keys to the window before its session shows up
-    /// in `lane.list` — see [`Self::selected_window`]), and enter Split with insert mode on —
-    /// creating an agent needs no manual open before talking to it while the sidebar stays visible.
+    /// Arm immediate input routing to the new window and enter Split insert mode while its fleet
+    /// row is pending.
     fn land_on_spawned(&mut self, lane: LaneId, window: Option<String>) {
         self.select_lane_session(lane, None);
         if let Some(w) = window {
             self.pending_focus_window = Some((lane, w));
             self.pending_focus_ticks = 0;
         }
-        self.reset_scroll(); // live tail, mirroring what `i` does
+        self.reset_scroll();
         self.view = View::Split;
         self.focus_insert = true;
     }
 
-    /// Spawn `agent` into `lane`: on success drop into Split on the *new* agent with insert on,
-    /// typing straight to it. The daemon surfaces the new window right away (a window-only
-    /// placeholder until its transcript lands), so an immediate refresh plus the pending-focus
-    /// intent put the cursor on it instead of leaving you on the lane's existing agent.
+    /// Spawn and focus the returned window, preserving input routing until the fleet overlay
+    /// catches up.
     async fn do_spawn(&mut self, id: LaneId, agent: &str) {
         match self
             .client
@@ -4236,7 +4142,7 @@ impl App {
     }
 
     /// Adopt the highlighted external agent (one running in another terminal): the daemon
-    /// resumes that exact session — against the right Claude account — in a managed tmux lane.
+    /// resumes that exact session - against the right Claude account - in a managed tmux lane.
     async fn adopt_agent(&mut self) {
         let idx = self.session_idx;
         let target = self.selected_lane().and_then(|l| {
@@ -4282,7 +4188,7 @@ impl App {
                 if let Some(spec) = AttachSpec::from_response(&v) {
                     self.attach_target = Some(spec);
                 }
-                self.terminals_lane = None; // refetch the list after we return
+                self.terminals_lane = None;
             }
             Err(e) => self.status = format!("terminal failed: {e}"),
         }
@@ -4314,11 +4220,8 @@ impl App {
         }
     }
 
-    /// Reconcile the embedded renderer with the view: while Focus shows a managed agent (and
-    /// `embedded_pty` is on), exactly that window streams bytes into a vt100 emulator; any
-    /// other state tears the stream down. Seeded from one `capture-pane -e` snapshot — the
-    /// SIGWINCH from `agent.resize`'s window fit makes the app repaint, correcting any seed
-    /// drift. A failed start leaves `emu` unset: the capture-based view renders as before.
+    /// Keep a byte-stream emulator only for managed Focus panes with embedded rendering enabled,
+    /// using capture rendering when startup fails.
     async fn sync_emu(&mut self) {
         let want = if self.view == View::Focus && self.settings.embedded_pty {
             self.selected_lane()
@@ -4386,7 +4289,7 @@ impl App {
         }
     }
 
-    /// Refresh the fleet-wide open-terminal list (the Grid's shell tiles) — only while the
+    /// Refresh the fleet-wide open-terminal list (the Grid's shell tiles) - only while the
     /// Grid is open, throttled to ~2s. Prunes streamed panes of closed terminals.
     async fn sync_term_windows(&mut self) {
         if self.view != View::Grid {
@@ -4423,7 +4326,7 @@ impl App {
     /// Refresh the selected lane's open terminals when the selection changes.
     async fn sync_terminals(&mut self) {
         // Refetch every sync (not only when the selected lane changes) so terminals another client
-        // opened in the current lane — e.g. a shell created from the desktop app — show up here too.
+        // opened in the current lane - e.g. a shell created from the desktop app - show up here too.
         let sel = self.selected_lane().map(|l| l.id);
         self.terminals_lane = sel;
         match sel {
@@ -4501,19 +4404,14 @@ impl App {
         }
     }
 
-    /// Scroll the focused agent's pane. Full-screen agents (Claude, …) run on the alternate screen
-    /// and keep their own scrollback that tmux's capture can't reach, so forward the wheel to the
-    /// agent and let it scroll itself (the streamer mirrors the result). Plain-shell agents have
-    /// real tmux scrollback, so fall back to the local capture-based scroll.
-    /// Queue a pane-scroll request (+ up / − down). Cheap and non-blocking: the event loop drains
-    /// a whole wheel/PgUp burst into `pending_scroll` and then [`flush_pane_scroll`] sends a single
-    /// `agent.scroll`, so a fast flick can't pile up dozens of RPCs and overshoot.
+    /// Coalesce wheel bursts into one pending pane-scroll request so rapid input cannot queue
+    /// excessive RPCs.
     fn pane_scroll(&mut self, up: bool, ticks: usize) {
         let d = ticks as isize;
         self.pending_scroll += if up { d } else { -d };
     }
 
-    /// Flush the accumulated pane-scroll as one `agent.scroll` — forwarded to a full-screen agent so
+    /// Flush the accumulated pane-scroll as one `agent.scroll` - forwarded to a full-screen agent so
     /// it scrolls its own history, or the local capture scroll when it isn't on the alternate screen.
     async fn flush_pane_scroll(&mut self) {
         let net = std::mem::take(&mut self.pending_scroll);
@@ -4593,7 +4491,7 @@ impl App {
         self.sel_head = None;
     }
 
-    /// The plain-text (ANSI-stripped) lines of the focused agent's pane — the same line set the
+    /// The plain-text (ANSI-stripped) lines of the focused agent's pane - the same line set the
     /// Focus view renders, so a buffer index maps 1:1 to a rendered row.
     fn focus_buffer(&self) -> Vec<String> {
         let raw = if self.scroll > 0 {
@@ -4647,8 +4545,8 @@ impl App {
     }
 
     async fn stop_agent(&mut self) {
-        // On an expanded agent sub-row with no tmux window — an external (not repomon-managed)
-        // session — there's nothing to kill, and falling through would kill the lane's primary
+        // On an expanded agent sub-row with no tmux window - an external (not repomon-managed)
+        // session - there's nothing to kill, and falling through would kill the lane's primary
         // window by default. The daemon reaps genuinely-orphaned windows on its own.
         if let Some(FleetRow {
             lane_idx,
@@ -4724,7 +4622,7 @@ impl App {
         let Some(id) = self.selected_lane().map(|l| l.id) else {
             return;
         };
-        let enabled = self.ac_off.contains(&id); // currently off → turning on
+        let enabled = self.ac_off.contains(&id);
         if enabled {
             self.ac_off.remove(&id);
         } else {
@@ -4820,13 +4718,13 @@ impl App {
                     View::Settings => self.load_settings().await,
                     View::Notifications => {
                         self.notif_sel = 0;
-                        // Opening the feed counts as catching up — clears the ⚑ unread badge.
+                        // Opening the feed counts as catching up - clears the unread unread badge.
                         for ev in self.notifications.iter_mut() {
                             ev.read = true;
                         }
                     }
                     View::Orchestrator => {
-                        self.selected = 0; // highlight the pinned row on return to Fleet
+                        self.selected = 0;
                         self.load_orchestrator().await;
                     }
                     _ => {}
@@ -4988,7 +4886,7 @@ pub async fn run(client: DaemonClient, theme: Theme) -> Result<Option<PathBuf>> 
     }
     let (in_tx, mut in_rx) = mpsc::channel::<Event>(128);
     // Read stdin on a thread, but pause it (via `input_suspended`) during a tmux attach so we
-    // don't fight tmux for the terminal — otherwise keystrokes get split and the session
+    // don't fight tmux for the terminal - otherwise keystrokes get split and the session
     // misbehaves. Polling (rather than a blocking read) lets us check the flag.
     let suspended = app.input_suspended.clone();
     let parked = app.reader_parked.clone();
@@ -5059,7 +4957,7 @@ fn visible_lanes(lanes: Vec<Lane>) -> Vec<Lane> {
 }
 
 /// How urgently a lane's sessions need the user (the most urgent session wins). Inferred
-/// file-activity placeholders never rank — they can't be acted on. `lane_needs_attention`'s
+/// file-activity placeholders never rank - they can't be acted on. `lane_needs_attention`'s
 /// threshold and [`session_rank`]'s scale move together.
 fn attention_rank(lane: &Lane, auto_continue_armed: bool) -> u8 {
     use repomon_core::agent::attention::agent_attention_in;
@@ -5078,10 +4976,7 @@ fn attention_rank(lane: &Lane, auto_continue_armed: bool) -> u8 {
         .unwrap_or(7)
 }
 
-/// One session's urgency: 0 = decision-question, 1 = permission ask, 2 = done-candidate
-/// (review?), 3 = bare end-of-turn, 4 = stalled, 5 = rate-limited with no auto-continue
-/// coming, 6 = working, 7 = nothing actionable. `lane_needs_attention`'s threshold (`<= 5`)
-/// and this scale move together.
+/// Keep this urgency scale aligned with the actionable threshold in lane_needs_attention.
 fn session_rank(
     att: repomon_core::agent::attention::Attention,
     status: AgentStatus,
@@ -5102,11 +4997,8 @@ fn session_rank(
     }
 }
 
-/// A stable identity for one agent session within a lane — the session cursor's anchor and
-/// the per-lane selection memory. The persistent `id` is `0` for daemon-overlaid
-/// placeholders so it can't be used; the Claude transcript id (preferred — UUIDs are never
-/// reused, while slot names are recycled on respawn) and the managed tmux window (the
-/// placeholder fallback) are the durable handles. See [`agent_session_ref`].
+/// Anchor selection by transcript ID, falling back to a managed window for placeholders whose
+/// persisted ID is zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRef {
     Window(String),
@@ -5117,21 +5009,17 @@ enum SessionRef {
 /// enough not to spam tmux, short enough that an externally squeezed pane heals in seconds.
 const RESIZE_REASSERT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How often an unchanged viewport is re-sent anyway — the daemon's focus-ownership beat for
+/// How often an unchanged viewport is re-sent anyway - the daemon's focus-ownership beat for
 /// `agent.fit` arbitration (its 15s TTL tolerates two missed beats). A re-send is a no-op
 /// beyond stamping the beat.
 const VIEWPORT_REASSERT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Consecutive lane refreshes a focused lane may show no managed session before Focus detaches.
-/// More than one, so a single transient overlay flap (one bad snapshot — a tmux/lsof probe blip)
-/// doesn't kick the user out of a still-running agent; a real exit stays absent and detaches
-/// within ~grace refreshes.
+/// Require consecutive missing refreshes before detaching Focus so one bad overlay cannot interrupt
+/// a live session.
 const FOCUS_DETACH_GRACE: u8 = 3;
 
-/// Consecutive cursor syncs the anchored agent may be missing from the selected lane before
-/// the cursor re-pins to whatever agent it currently rests on. More than one, so a transient
-/// overlay flap (one bad tmux/transcript snapshot) can't permanently retarget the pick; a
-/// real exit stays absent and re-pins within ~grace ticks.
+/// Require consecutive missing observations before retargeting selection so a transient overlay
+/// cannot permanently change the chosen agent.
 const SESSION_REF_GRACE: u8 = 3;
 
 /// How many ~1s refreshes to keep trying to land the cursor on a just-spawned agent's window
@@ -5149,10 +5037,8 @@ fn next_focus_missing(present: bool, missing: u8) -> u8 {
     }
 }
 
-/// Indices into `sessions` in a STABLE display order — managed agents by tmux **slot** (= spawn
-/// order: `lane-N`, `lane-N-2`, `lane-N-3`), then windowless/external sessions by start time — so
-/// expanded sub-rows (and their user labels) keep their position instead of reshuffling when the
-/// daemon re-sorts sessions by recent activity. `session_id` is only the final tiebreaker.
+/// Order managed sessions by spawn slot and other sessions by start time, using session ID only to
+/// break ties.
 fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..sessions.len()).collect();
     let key = |s: &AgentSession| {
@@ -5167,10 +5053,8 @@ fn stable_session_order(sessions: &[AgentSession]) -> Vec<usize> {
     idx
 }
 
-/// The stable identity of a session, or `None` for an inferred/keyless one (nothing to pin to).
-/// Transcript id first — UUIDs are never reused, while slot names (`lane-7-2`) are recycled on
-/// respawn, so a long-held `Window` ref could resolve to a brand-new different agent. The
-/// window is the fallback for just-spawned placeholders whose `.jsonl` hasn't appeared yet.
+/// Prefer transcript IDs over recyclable window names, retaining a window fallback for newly
+/// spawned placeholders.
 fn agent_session_ref(s: &AgentSession) -> Option<SessionRef> {
     if let Some(id) = &s.session_id {
         Some(SessionRef::Transcript(id.clone()))
@@ -5228,10 +5112,8 @@ fn enable_mouse() {
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
 }
 
-/// Discard any terminal input still buffered after returning from a tmux attach — mouse-tracking
-/// reports, the detach key's tail, terminal query replies — so it isn't replayed as a glitchy
-/// backlog when the reader thread resumes. Call while the reader is still parked, since only one
-/// place may read crossterm events at a time.
+/// Drain buffered terminal replies and detach input while the reader is parked; only one consumer
+/// may read crossterm events.
 fn drain_pending_input() {
     use ratatui::crossterm::event;
     while event::poll(Duration::from_millis(0)).unwrap_or(false) {
@@ -5263,11 +5145,8 @@ async fn event_loop(
     let mut events_alive = true;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
-        // Resolve the selected session/window BEFORE syncing the viewport, so a just-spawned
-        // window isn't momentarily streamed as the wrong pane (selected_window() is correct).
-        // Diagnostic: time the whole sync block with a per-call breakdown. Each call is awaited on
-        // this critical path, so several sub-threshold RPCs can add up to a visible stall that no
-        // single slow-RPC line would flag (e.g. the resync forced right after a detach).
+        // Resolve selection before viewport sync; timing the whole block also exposes accumulated
+        // latency across individually short RPCs.
         let sync_t = std::time::Instant::now();
         app.sync_session_cursor();
         app.sync_viewport().await;
@@ -5308,7 +5187,7 @@ async fn event_loop(
         }
         if let Some(lane) = app.attach_request.take() {
             do_attach(terminal, app, lane).await;
-            while in_rx.try_recv().is_ok() {} // drop anything queued before the reader parked
+            while in_rx.try_recv().is_ok() {}
             continue;
         }
         if let Some(spec) = app.attach_target.take() {
@@ -5333,7 +5212,7 @@ async fn event_loop(
                         }
                     }
                     // Send the whole drained burst at once: one scroll, and one send_input for a
-                    // pasted/typed run of characters — not one blocking RPC per event.
+                    // pasted/typed run of characters - not one blocking RPC per event.
                     app.flush_pane_scroll().await;
                     app.flush_pending_input().await;
                 }
@@ -5379,11 +5258,8 @@ async fn event_loop(
                 None => events_alive = false,
             },
             _ = tick.tick() => {
-                // Refresh the lane list every second in *all* views: it keeps agent state fresh
-                // (an agent that exits on its own is noticed promptly, Focus drops back to Split)
-                // AND it's what drives notification edge-detection, which must work even when the
-                // user is looking at Fleet or another view. lane.list is cheap (~55ms) at 1Hz and
-                // only runs while the TUI is open; commits/repos still refresh on git events.
+                // Refresh lanes in every view because session exit detection and notification
+                // transitions depend on it.
                 app.refresh_lanes().await;
                 // Account-usage corner: a slow, self-throttled poll (no-op most ticks).
                 app.sync_usage().await;
@@ -5396,13 +5272,11 @@ async fn event_loop(
 /// side by side), then re-enter.
 async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) {
     // Flush any input buffered just before the attach (e.g. a paste finished as the user hit attach)
-    // so it isn't silently dropped when the TUI suspends — attach requested outside the input burst
+    // so it isn't silently dropped when the TUI suspends - attach requested outside the input burst
     // skips the event-loop's post-burst flush.
     app.flush_pending_input().await;
-    // Stop the embedded byte stream while attached: the real terminal shows the pane, and the
-    // sync block re-establishes the emulator on return. On Windows the attach pops out into a
-    // separate window (below) instead of taking over this terminal, so the embedded render stays
-    // up and the stream keeps running.
+    // Unix attach takes over this terminal and pauses its emulator; a Windows popout leaves both
+    // views running.
     #[cfg(not(windows))]
     app.stop_emu().await;
     let window = app.selected_window();
@@ -5434,7 +5308,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
         return;
     }
     let spec = AttachSpec::from_parts(target, v.get("attach"));
-    // Windows: pop the agent out into a WT tab / new console and return — the TUI never suspends.
+    // Windows: pop the agent out into a WT tab / new console and return - the TUI never suspends.
     // A no-op on Unix, where the tmux-style suspend/attach path below runs unchanged.
     let title = app
         .selected_lane()
@@ -5445,7 +5319,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     }
     app.input_suspended.store(true, Ordering::Relaxed);
     // Tell the daemon we're parking now so it takes over desktop popups on its next tick rather
-    // than waiting out LOCAL_TTL for our heartbeat to go stale — closes the handoff gap.
+    // than waiting out LOCAL_TTL for our heartbeat to go stale - closes the handoff gap.
     let _ = app.client.call("watcher.park", None).await;
     app.await_reader_parked().await; // confirmed handoff: reader has released stdin to tmux
     disable_bracketed_paste();
@@ -5456,7 +5330,7 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     keepalive.abort();
     // Diagnostic: time the terminal re-init + first paint after a detach. None of these touch the
     // daemon, so a stall here (vs a slow RPC) points at ratatui::init / drain / draw rather than the
-    // network path — narrowing the "hangs for a bit on exit" report.
+    // network path - narrowing the "hangs for a bit on exit" report.
     let reinit_t = std::time::Instant::now();
     *terminal = ratatui::init();
     enable_bracketed_paste();
@@ -5467,10 +5341,10 @@ async fn do_attach(terminal: &mut DefaultTerminal, app: &mut App, lane: LaneId) 
     drain_pending_input();
     let after_drain = reinit_t.elapsed();
     app.input_suspended.store(false, Ordering::Relaxed);
-    app.last_viewport.clear(); // force a viewport resync after returning
+    app.last_viewport.clear();
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     // The daemon fired desktop popups while we were parked (our heartbeat went stale); re-seed
-    // notification edge-detection so the next refresh doesn't replay — and double-fire — them.
+    // notification edge-detection so the next refresh doesn't replay - and double-fire - them.
     app.notif_reseed = true;
     app.status = "back from the agent (it's still running): ↵ to reopen".into();
     // Snap straight back to FleetView: paint now, in the freshly re-init'd alternate screen, so the
@@ -5493,7 +5367,7 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, spec: &
     if spec.target.is_empty() {
         return;
     }
-    // Windows: pop out into a separate terminal and return (no-op on Unix — the tmux path runs).
+    // Windows: pop out into a separate terminal and return (no-op on Unix - the tmux path runs).
     let title = popout_title(spec);
     if attach_via_popout(app, spec, &title) {
         return;
@@ -5522,45 +5396,32 @@ async fn do_attach_target(terminal: &mut DefaultTerminal, app: &mut App, spec: &
     app.last_orch_resize = None;
     app.last_title.clear(); // tmux set its own title; re-assert ours next tick
     app.terminals_lane = None; // the shell may have exited; refresh the terminal list
-    // Re-seed notification edge-detection — the daemon owned popups while we were parked.
+    // Re-seed notification edge-detection - the daemon owned popups while we were parked.
     app.notif_reseed = true;
     // Paint immediately on return (see do_attach) so the detach message + stale screen don't linger.
     let _ = terminal.draw(|f| view::render(f, app));
 }
 
-/// Escape sequence emitted after `tmux attach` returns, to wipe tmux's "[detached (from session
-/// …)]" line off the PRIMARY screen so it doesn't resurface when repomon leaves its alternate
-/// screen on quit. It MUST erase the single message line IN PLACE (`\x1b[2K`) rather than do a
-/// full-screen clear (`\x1b[2J`/`\x1b[3J`): macOS Terminal.app scrolls a full-screen erase into the
-/// scrollback buffer (and exposes no clear-scrollback capability), so the line would survive there
-/// and reappear above the post-quit prompt. The message always sits exactly one line above the
-/// cursor on return, hence `up one, erase line, carriage return`.
+/// Erase only the detach-message line in place: a full-screen erase can push it into Terminal.app
+/// scrollback instead of removing it.
 const DETACH_MSG_CLEANUP: &str = "\x1b[1A\x1b[2K\r";
 
-/// Keep the daemon connection alive across a (blocking) tmux attach. While parked the TUI sends no
-/// requests, and the daemon reaps any connection that's been silent for its READ_IDLE_TIMEOUT
-/// (120s) — after which the first RPC on return is written into a dead socket and the UI hangs for
-/// the full ~15s client timeout (confirmed: silent connection closed at exactly 120.0s). A
-/// `watcher.park` ping every 45s keeps the connection live AND re-asserts the parked state, so the
-/// daemon keeps owning desktop popups. The runtime is multi-threaded, so this task runs on another
-/// worker while `run_attach` blocks the event loop's worker; the client's reader task (still
-/// draining the socket while parked) resolves each ping's response. Abort it on return.
+/// Ping while blocking attach parks the event loop so the connection stays live and the daemon
+/// retains notification ownership; abort on return.
 fn spawn_attach_keepalive(client: &DaemonClient) -> tokio::task::JoinHandle<()> {
     let client = client.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(45)).await;
             if client.call("watcher.park", None).await.is_err() {
-                break; // connection already gone — nothing left to keep alive
+                break;
             }
         }
     })
 }
 
-/// How to go "all the way in" to a window from the real terminal: the daemon-provided attach
-/// command when the response carried one (the optional `attach` field of the `*.target`
-/// responses — the backend knows how to attach to itself), else the classic tmux invocation
-/// derived from the target (older daemons without the field).
+/// Uses the backend-provided attach command, falling back to a session-scoped tmux target for
+/// compatible daemons without it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AttachSpec {
     /// The `session:window` target, kept for logging.
@@ -5589,8 +5450,7 @@ impl AttachSpec {
                 args,
             };
         }
-        // Fallback: repomon's dedicated tmux socket is labelled with the session name — the
-        // target's prefix (exactly what this client always ran before the `attach` field).
+        // The fallback tmux socket label is the session prefix of the target.
         let socket = target.split(':').next().unwrap_or("repomon").to_string();
         AttachSpec {
             program: repomon_core::agent::tmux_program()
@@ -5620,14 +5480,8 @@ fn parse_attach_field(a: &serde_json::Value) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
-/// Windows: pop the agent out into a *separate* terminal (a Windows Terminal tab, or a new
-/// console when `wt.exe` isn't on PATH) rather than handing over the TUI's terminal, and return
-/// `true` so the caller skips the whole tmux-style suspend/attach/reinit dance. The FleetView
-/// keeps running — including the embedded focus-view render — beside the popped-out window
-/// (plan decision #2: embedded + external window). `title` labels the new tab.
-///
-/// On macOS/Linux this is a no-op returning `false`, so the existing in-terminal attach path
-/// runs unchanged.
+/// Open a separate Windows terminal and keep the TUI running; other platforms use the in-terminal
+/// attach path.
 #[cfg(windows)]
 fn attach_via_popout(app: &mut App, spec: &AttachSpec, title: &str) -> bool {
     match popout::launch(title, &spec.program, &spec.args) {
@@ -5639,7 +5493,7 @@ fn attach_via_popout(app: &mut App, spec: &AttachSpec, title: &str) -> bool {
     true
 }
 
-/// macOS/Linux: never pop out — attach in the current terminal (the tmux path below).
+/// macOS/Linux: never pop out - attach in the current terminal (the tmux path below).
 #[cfg(not(windows))]
 fn attach_via_popout(_app: &mut App, _spec: &AttachSpec, _title: &str) -> bool {
     false
@@ -5665,7 +5519,7 @@ fn popout_title(spec: &AttachSpec) -> String {
 }
 
 /// Run the attach command in the real terminal. `$TMUX` is dropped so a tmux-backed attach
-/// works even when repomon runs inside tmux — otherwise tmux refuses to attach ("sessions
+/// works even when repomon runs inside tmux - otherwise tmux refuses to attach ("sessions
 /// should be nested with care").
 fn run_attach(spec: &AttachSpec) {
     let target = &spec.target;
@@ -5682,17 +5536,8 @@ fn run_attach(spec: &AttachSpec) {
         start.elapsed().as_secs_f32(),
         status.as_ref().ok().map(|s| s.code())
     ));
-    // On detach, tmux prints "[detached (from session …)]\r\n" to the PRIMARY screen (it just left
-    // its own alternate screen), leaving the cursor on the line directly below that message. repomon
-    // re-enters its alternate screen and hides it during use, but it resurfaces when repomon finally
-    // leaves the alternate screen on quit. A full-screen erase (\x1b[2J) is the WRONG tool here:
-    // macOS Terminal.app (and others) scroll erased content into the scrollback buffer instead of
-    // discarding it, so the line survives there and reappears above the post-quit prompt (Terminal.app
-    // has no clear-scrollback capability either, so \x1b[3J can't help). Erase just the message line
-    // IN PLACE — \x1b[2K never scrolls — which removes it on every terminal while preserving the
-    // user's earlier scrollback. The message is always exactly one line above the cursor: a normal
-    // print lands it one line up; a print on the bottom row scrolls it up one with the cursor — same
-    // offset either way.
+    // Erase the detach message in place to preserve earlier scrollback; full-screen erasure can
+    // retain it in Terminal.app history.
     use std::io::Write;
     let mut out = std::io::stdout();
     let _ = write!(out, "{DETACH_MSG_CLEANUP}");
@@ -5714,7 +5559,7 @@ pub(crate) fn tui_log(line: &str) {
     }
 }
 
-/// Translate a key press into a tmux key spec. `(spec, literal)` — literal printable text
+/// Translate a key press into a tmux key spec. `(spec, literal)` - literal printable text
 /// is sent with `send-keys -l`; named keys (Enter, Tab, BTab, arrows, C-c, …) without it.
 /// Strip ANSI escape sequences (CSI and simple `ESC x`) to get plain text for selection/copy.
 fn strip_ansi(s: &str) -> String {
@@ -5761,7 +5606,7 @@ fn clipboard_image_to_file() -> Option<String> {
     }
 }
 
-/// The written file genuinely holds a PNG (starts with the 8-byte PNG signature) — guards
+/// The written file genuinely holds a PNG (starts with the 8-byte PNG signature) - guards
 /// against a tool that "succeeds" with empty or non-image output.
 fn png_nonempty(path: &std::path::Path) -> bool {
     std::fs::read(path)
@@ -5813,10 +5658,8 @@ fn ps_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// The Windows PowerShell script that saves the clipboard's image to `path` as PNG.
-/// `Get-Clipboard -Format Image` is Windows PowerShell 5.1 syntax (repomon-core's argv
-/// builder always invokes `powershell`, never `pwsh`, which dropped `-Format`). Exits 1
-/// when the clipboard holds no image, matching the wl-paste/xclip contract.
+/// Use Windows PowerShell 5.1 for clipboard images because pwsh lacks -Format, returning failure
+/// when no image exists.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_clipboard_png_script(path: &str) -> String {
     format!(
@@ -5959,7 +5802,7 @@ mod tests {
         let bad = serde_json::json!({ "target": "s:=w", "attach": { "program": 7 } });
         let spec = AttachSpec::from_response(&bad).expect("target present");
         assert_eq!(spec.program, expected_prog);
-        // No target → no attach.
+
         assert!(AttachSpec::from_response(&serde_json::json!({ "target": "" })).is_none());
         assert!(AttachSpec::from_response(&serde_json::json!({})).is_none());
     }
@@ -6051,7 +5894,7 @@ mod tests {
     fn agent_session_ref_prefers_transcript_then_window() {
         // A transcript-backed agent keys on its transcript id even when it also has a window:
         // transcript UUIDs are never reused, while slot names like `lane-7-2` are recycled on
-        // respawn — a remembered Window ref could resolve to a brand-new different agent.
+        // respawn - a remembered Window ref could resolve to a brand-new different agent.
         assert_eq!(
             agent_session_ref(&managed("lane-7-2", Some("uuid-1"))),
             Some(SessionRef::Transcript("uuid-1".into()))
@@ -6145,7 +5988,7 @@ mod tests {
         app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
         app.selected = 1; // row 0 is the pinned orchestrator row
         app.sync_session_cursor();
-        // Tab onto the second agent and note its account.
+
         app.cycle_session(true);
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
         let key = app.focused_account_key().expect("account key");
@@ -6175,7 +6018,7 @@ mod tests {
         // No explicit pick: arriving on the lane pins whatever is front-most at that moment.
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
-        // b takes a turn and the daemon reorders — the default pick must not drift with it.
+        // b takes a turn and the daemon reorders - the default pick must not drift with it.
         app.lanes[0].agent_sessions = vec![b, a];
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
@@ -6205,7 +6048,7 @@ mod tests {
         for _ in 0..10 {
             app.sync_session_cursor();
         }
-        // …and re-lands on b the moment it reappears.
+
         refresh(&mut app, vec![a.clone(), b.clone()]);
         assert_eq!(
             app.selected_window().as_deref(),
@@ -6263,7 +6106,7 @@ mod tests {
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
         app.scroll = 7;
-        // The daemon re-sorts; refresh_lanes re-anchors the row by identity — same agent,
+        // The daemon re-sorts; refresh_lanes re-anchors the row by identity - same agent,
         // new raw index. That must not read as a switch and wipe the scrollback position.
         app.lanes[0].agent_sessions = vec![b.clone(), a.clone()];
         app.select_lane_session(1, Some(SessionRef::Transcript("sid-b".into())));
@@ -6273,7 +6116,7 @@ mod tests {
             app.scroll, 7,
             "a re-sort of the same agent must keep the scroll"
         );
-        // A real move to the other agent still resets it.
+
         app.cycle_session(true);
         assert_eq!(app.scroll, 0);
     }
@@ -6314,10 +6157,10 @@ mod tests {
         app.lanes = vec![fake_lane(1, vec![a.clone(), b.clone()])];
         app.selected = 1;
         app.sync_session_cursor();
-        // A notification jump lands on b by transcript id…
+
         app.select_session(1, Some("sid-b"));
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
-        // …and must hold through the next daemon re-sort.
+
         app.lanes[0].agent_sessions = vec![b, a];
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
@@ -6382,7 +6225,7 @@ mod tests {
         m = next_focus_missing(false, m);
         assert_eq!(m, 2);
         assert!(m < FOCUS_DETACH_GRACE, "a two-tick flap must not detach");
-        // …until a sustained absence reaches the grace (a real exit).
+
         m = next_focus_missing(false, m);
         assert_eq!(m, 3);
         assert!(m >= FOCUS_DETACH_GRACE, "sustained absence detaches");
@@ -6392,10 +6235,8 @@ mod tests {
 
     #[test]
     fn stable_session_order_follows_spawn_slot() {
-        // Managed agents order by tmux slot (lane-N, lane-N-2, lane-N-3), NOT by session_id and
-        // NOT by the daemon's input order (it churns by recent activity) — so sub-rows hold their
-        // position instead of reshuffling. session_ids here are anti-correlated with slot to prove
-        // the slot drives the order.
+        // Anti-correlated IDs ensure slot order, rather than incoming order or transcript ID,
+        // controls display.
         let sessions = [
             managed("lane-7", Some("zzz")),
             managed("lane-7-2", Some("mmm")),
@@ -6433,25 +6274,25 @@ mod tests {
     #[test]
     fn double_click_needs_same_lane_within_window() {
         let t0 = std::time::Instant::now();
-        // Same lane, well within the window → double-click.
+
         assert!(is_double_click(
             Some((t0, 5)),
             5,
             t0 + Duration::from_millis(100)
         ));
-        // Same lane but too slow → single clicks.
+
         assert!(!is_double_click(
             Some((t0, 5)),
             5,
             t0 + Duration::from_millis(500)
         ));
-        // A different lane is never a double-click, however fast.
+
         assert!(!is_double_click(
             Some((t0, 5)),
             7,
             t0 + Duration::from_millis(50)
         ));
-        // No previous click → not a double-click.
+
         assert!(!is_double_click(None, 5, t0));
     }
 
@@ -6460,7 +6301,7 @@ mod tests {
         // Esc must reach the agent (interrupt / clear), so it maps to the tmux key name...
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(translate_key(&esc), Some(("Escape".to_string(), false)));
-        // ...and it does NOT leave insert mode.
+
         assert!(!leaves_insert(&esc));
     }
 
@@ -6477,7 +6318,7 @@ mod tests {
             translate_key(&ctrl_right),
             Some(("C-Right".to_string(), false))
         );
-        // Alt+Backspace (delete word) and Alt+<char> too.
+
         let alt_bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
         assert_eq!(
             translate_key(&alt_bs),
@@ -6485,7 +6326,7 @@ mod tests {
         );
         let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
         assert_eq!(translate_key(&alt_b), Some(("M-b".to_string(), false)));
-        // A plain arrow is unmodified.
+
         let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(translate_key(&left), Some(("Left".to_string(), false)));
     }
@@ -6513,7 +6354,7 @@ mod tests {
         assert_eq!(translate_key(&ctrl_o), Some(("C-o".to_string(), false)));
     }
 
-    /// `apply_orchestrator_status` doesn't touch the network — it just needs *a* connected
+    /// `apply_orchestrator_status` doesn't touch the network - it just needs *a* connected
     /// `DaemonClient` to build an `App` around (`App::new` has no other constructor). A listener
     /// that accepts once and goes quiet is enough; no daemon RPC is exercised.
     async fn app_with_dummy_client() -> App {
@@ -6564,7 +6405,6 @@ mod tests {
         assert_eq!(app.orch_attention.as_deref(), Some("end_of_turn"));
         assert_eq!(app.orch_headline, None);
 
-        // "none" on the wire clears both fields — not `Some("none")`.
         app.apply_orchestrator_status(&json!({
             "running": true,
             "agent": "claude-work",
@@ -6583,19 +6423,13 @@ mod tests {
 
     #[tokio::test]
     async fn orchestrator_attention_edge_is_suppressed_by_view_and_settings() {
-        // Deliberately never flips both `notify_enabled` and `notify_needs_you` on together here:
-        // that combination reaches `notify::send_native`, which shells out to a real OS
-        // notification on this platform — not something a unit test should trigger. The two gates
-        // are instead verified independently, each suppressing on its own.
+        // Test notification gates independently so this unit test never invokes native delivery.
         let mut app = app_with_dummy_client().await;
-        // Seed first (a no-attention application, matching a real cold start with nothing
-        // pending): otherwise the fresh app's very first `apply_orchestrator_status` call below
-        // would itself be the seed call and pass for the wrong reason, masking whether the view/
-        // settings gates below actually suppress anything.
+        // Seed first so startup suppression cannot mask the view and settings gates under test.
         app.apply_orchestrator_status(&json!({ "running": true, "attention": "none" }));
         assert_eq!(app.orch_attention, None);
 
-        // Gate 1: already looking at the command-center — its row/header cover it, so the
+        // Gate 1: already looking at the command-center - its row/header cover it, so the
         // none→attention edge must not bank a popup banner even with notifications on.
         app.settings.notify_enabled = true;
         app.settings.notify_needs_you = true;
@@ -6609,7 +6443,7 @@ mod tests {
             "must not banner while already on the Orchestrator view"
         );
 
-        // Gate 2: elsewhere in the TUI, but notifications are off — still no banner.
+        // Gate 2: elsewhere in the TUI, but notifications are off - still no banner.
         app.orch_attention = None; // reset to none so the next call is a real edge
         app.settings.notify_enabled = false;
         app.view = View::Fleet;
@@ -6625,17 +6459,8 @@ mod tests {
 
     #[tokio::test]
     async fn orchestrator_popup_is_seeded_not_fired_on_first_application() {
-        // Cold start: repomind is already awaiting attention (e.g. it raised a permission dialog
-        // before the TUI attached). The very first `apply_orchestrator_status` call must seed
-        // `orch_attention` from this value rather than read the jump from the struct's default
-        // `None` as a genuine none→attention edge — mirrors `detect_notifications`'s
-        // `notif_seeded` guard for the lane path (see the `orch_notif_seeded` field doc).
-        //
-        // Both notify gates are deliberately on here (unlike the suppression test above): if
-        // seeding didn't short-circuit before the gate check, this would reach the real
-        // (OS-popping) `notify::send_native`, so a clean `notif_banner.is_none()` here is what
-        // actually proves the seed path was taken — not just that some other gate happened to be
-        // closed.
+        // Enable both gates to verify the first attention payload is seeded without reaching native
+        // delivery.
         let mut app = app_with_dummy_client().await;
         app.settings.notify_enabled = true;
         app.settings.notify_needs_you = true;
@@ -6650,10 +6475,8 @@ mod tests {
             "must not banner on the first (seed) status application"
         );
 
-        // A subsequent genuine none→attention edge, after seeding, does fire. Checked through the
-        // pure `orch_popup_should_fire` predicate rather than by feeding another payload through
-        // `apply_orchestrator_status` — with both gates on, a real edge there would reach the
-        // actual (OS-popping) `notify::send_native`, exactly what this module avoids in tests.
+        // Check subsequent attention edges through the pure predicate to avoid sending a real OS
+        // notification.
         assert!(
             app.orch_popup_should_fire(false, false),
             "a genuine none->attention edge after seeding must fire"
@@ -6662,7 +6485,7 @@ mod tests {
         assert!(!app.orch_popup_should_fire(true, false));
     }
 
-    /// A hand-built lane for cursor/routing tests — deserialized so the `oid_hex` head field
+    /// A hand-built lane for cursor/routing tests - deserialized so the `oid_hex` head field
     /// doesn't need a `gix` literal. No daemon involved; tests mutate `agent_sessions` directly.
     fn test_lane(id: i64) -> Lane {
         serde_json::from_value(json!({
@@ -6698,7 +6521,7 @@ mod tests {
         assert_eq!(kept[0].id, 1);
     }
 
-    /// An app looking at one lane whose first agent runs in `lane-7` — the state right before
+    /// An app looking at one lane whose first agent runs in `lane-7` - the state right before
     /// a second agent is spawned. Row 0 is the pinned repomind row, so `selected = 1`.
     async fn app_on_lane_7() -> App {
         let mut app = app_with_dummy_client().await;
@@ -6735,7 +6558,7 @@ mod tests {
         app.pending_focus_window = Some((7, "lane-7-2".into()));
 
         // Each keystroke runs one event-loop iteration (one cursor sync). A quick burst of
-        // typing must not expire the intent — only sustained lane refreshes may (the window
+        // typing must not expire the intent - only sustained lane refreshes may (the window
         // hasn't had a chance to appear until at least one refresh lands).
         for _ in 0..20 {
             app.sync_session_cursor();
@@ -6758,7 +6581,7 @@ mod tests {
     async fn spawn_focus_intent_expires_only_after_sustained_refreshes() {
         let mut app = app_on_lane_7().await;
         // A spawn whose window never materializes (e.g. the agent died on launch): the intent
-        // must still expire — on the refresh clock, so ~PENDING_FOCUS_GIVE_UP_TICKS seconds.
+        // must still expire - on the refresh clock, so ~PENDING_FOCUS_GIVE_UP_TICKS seconds.
         app.pending_focus_window = Some((7, "lane-7-99".into()));
         for _ in 0..PENDING_FOCUS_GIVE_UP_TICKS {
             app.age_pending_focus();
@@ -6779,7 +6602,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_lands_in_split_typing_ready() {
         let mut app = app_on_lane_7().await;
-        // `e` on lane 7 spawned a second agent into window lane-7-2.
+
         app.land_on_spawned(7, Some("lane-7-2".into()));
         assert_eq!(app.view, View::Split);
         assert!(

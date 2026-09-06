@@ -100,7 +100,6 @@ async fn waiting_badges_distinguish_attention() {
     app.refresh().await;
     assert_eq!(app.lanes.len(), 1);
 
-    // The lane row is the one carrying the agent cell.
     let lane_row = |screen: &str| {
         screen
             .lines()
@@ -109,7 +108,7 @@ async fn waiting_badges_distinguish_attention() {
             .expect("lane row missing")
     };
 
-    // A routine permission ask: the fleet row wears ⏸; the lane switcher names it.
+    // A routine permission ask: the fleet row wears pause; the lane switcher names it.
     app.lanes[0].agent_sessions = vec![fake_session(
         AgentStatus::Waiting,
         Some("Bash command — Do you want to proceed?"),
@@ -146,7 +145,7 @@ async fn waiting_badges_distinguish_attention() {
     );
     app.view = View::Fleet;
 
-    // A bare end-of-turn wait (no dialog on screen): ✓, and "done" in the badge. Dirty the
+    // A bare end-of-turn wait (no dialog on screen): check, and "done" in the badge. Dirty the
     // worktree so the finished turn does NOT read as shippable (that's the next scenario).
     app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Waiting, None)];
     app.lanes[0].state.dirty.unstaged = 1;
@@ -184,14 +183,14 @@ async fn waiting_badges_distinguish_attention() {
     app.lanes[0].agent_sessions = vec![bounced];
     app.view = View::LaneJump;
     let jump = render_to_string(&app, 100, 40).unwrap();
-    // (⛔ is double-width: the test backend dumps a filler cell after it, so match in parts.)
+    // (stop is double-width: the test backend dumps a filler cell after it, so match in parts.)
     assert!(
         jump.contains("▶ running · ⛔") && jump.contains("gate 2"),
         "gate-bounce badge missing:\n{jump}"
     );
     app.view = View::Fleet;
 
-    // A fresh ALLOWED gate verdict grants the review hint even on a dirty lane — the gate ran
+    // A fresh ALLOWED gate verdict grants the review hint even on a dirty lane - the gate ran
     // the tests/scanners, which beats the git heuristic.
     let mut passed = fake_session(AgentStatus::Waiting, None);
     passed.gate = Some(repomon_core::agent::gate::GateVerdict {
@@ -212,7 +211,7 @@ async fn waiting_badges_distinguish_attention() {
     app.view = View::Fleet;
     app.lanes[0].state.dirty.unstaged = 0;
 
-    // A stalled agent (alive but frozen mid-work): ⚠ on the row, duration in the badge.
+    // A stalled agent (alive but frozen mid-work): warning on the row, duration in the badge.
     let mut stuck = fake_session(AgentStatus::Running, None);
     stuck.stale = true;
     stuck.stalled_since = Some(chrono::Utc::now() - chrono::Duration::minutes(7));
@@ -310,7 +309,6 @@ async fn peek_popup_shows_the_dialog_and_queue() {
     assert!(frame.contains("1/1"), "queue counter missing:\n{frame}");
     assert!(frame.contains("esc"), "close hint missing:\n{frame}");
 
-    // Arrow keys steer the local selection cursor.
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     app.peek_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
         .await;
@@ -320,7 +318,6 @@ async fn peek_popup_shows_the_dialog_and_queue() {
         "cursor should move to option 2:\n{frame}"
     );
 
-    // Esc closes without sending anything.
     app.peek_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .await;
     assert!(app.peek.is_none(), "esc must close the popup");
@@ -437,7 +434,7 @@ async fn focus_renders_the_embedded_emulator() {
     app.refresh().await;
     let lane_id = app.lanes[0].id;
     app.lanes[0].agent_sessions = vec![fake_session(AgentStatus::Running, None)];
-    app.selected = 1; // row 0 is the pinned repomind row; the lane is row 1
+    app.selected = 1;
     app.view = View::Focus;
 
     // A live emulator for the focused lane: Focus renders ITS grid (absolute addressing and
@@ -484,7 +481,6 @@ async fn renders_fleet_with_a_registered_repo() {
         .await
         .expect("connect");
 
-    // Register a repo through the daemon.
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
@@ -623,7 +619,7 @@ async fn renders_fleet_with_a_registered_repo() {
         "strip not stretched to width:\n{tl}"
     );
 
-    // Notifications: the unread ⚑ badge shows in every view's header; the feed renders a
+    // Notifications: the unread unread badge shows in every view's header; the feed renders a
     // cursor (▸) on the selected row, an unread dot, the new-count, and the action footer.
     use repomon_tui::notify::{NotifEvent, NotifKind};
     app.notifications.push_back(NotifEvent {
@@ -675,8 +671,7 @@ async fn renders_fleet_with_a_registered_repo() {
     app.settings.notify_enabled = true;
     app.view = View::Settings;
     let st = render_to_string(&app, 120, 40).unwrap();
-    // The long label must not collide with its value (the old "spawnon" bug), and the value
-    // column must start at the same screen column on every row.
+
     assert!(!st.contains("spawnon"), "label/value collision:\n{st}");
     // Value column starts at the same screen column on every row. Measure the column in cells
     // (chars), not bytes, so the multi-byte ▸ marker on the selected row doesn't skew it. Use
@@ -703,7 +698,7 @@ async fn renders_fleet_with_a_registered_repo() {
         lines: orch_lines,
         cursor: None,
     });
-    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.selected = 0;
     app.view = View::Split;
     assert!(
         app.orchestrator_selected(),
@@ -740,13 +735,11 @@ async fn renders_fleet_with_a_registered_repo() {
         "split right column must show the off/start hint when repomind isn't running:\n{split_off}"
     );
 
-    // repomind attention (B4: the human<->repomind escalation loop): the pinned fleet row wears
-    // the needs-you wording when repomind is asking the human something, and the command-center
-    // header shows the attention word plus a headline.
+    // Controller attention must appear in both the pinned fleet row and the command-center heading.
     app.orch_running = true;
     app.orch_attention = Some("decision".into());
     app.orch_headline = Some("which auth method?".into());
-    app.selected = 0; // the pinned repomind row is always row 0 of the fleet
+    app.selected = 0;
     app.view = View::Fleet;
     let fleet = render_to_string(&app, 100, 40).unwrap();
     assert!(

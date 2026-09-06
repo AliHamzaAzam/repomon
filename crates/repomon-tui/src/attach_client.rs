@@ -1,12 +1,5 @@
-//! `repomon attach-host <window>` — raw byte-proxy attach client for Windows agent hosts.
-//!
-//! Connects to a `repomon-agent-host.exe` control pipe (`\\.\pipe\repomon-<session>-<window>`)
-//! per the frozen contract in `crates/repomon-host/PROTOCOL.md` and mirrors the agent in the
-//! current console: raw stdin bytes become `send_literal` frames, a `subscribe_bytes` stream
-//! (whose first frame is a full-screen replay) is written to stdout, console resizes become
-//! `resize` frames (last client wins), and F12 detaches — leaving the agent running (tmux
-//! parity). The heavy runtime is `#[cfg(windows)]`; the protocol layer below is
-//! OS-independent and unit-tested everywhere.
+//! Attaches a raw terminal to an agent’s byte stream with initial replay and resize forwarding.
+//! Detaching leaves the child running.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
@@ -67,8 +60,6 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Value>
         .context("connection closed mid-frame")?;
     Ok(Some(serde_json::from_slice(&payload)?))
 }
-
-// ---- request builders (§7) ----
 
 pub fn req_hello(id: u64) -> Value {
     json!({"id": id, "op": "hello"})
@@ -154,10 +145,6 @@ impl StreamState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Input scanner: raw VT stdin bytes -> protocol input actions
-// ---------------------------------------------------------------------------
-
 /// The VT sequence F12 produces under `ENABLE_VIRTUAL_TERMINAL_INPUT`. F12 is the local
 /// detach key (tmux parity) and is never forwarded to the agent.
 pub const DETACH_SEQ: &[u8] = b"\x1b[24~";
@@ -165,19 +152,15 @@ pub const DETACH_SEQ: &[u8] = b"\x1b[24~";
 /// What a chunk of raw stdin bytes turns into.
 #[derive(Debug)]
 pub enum InputAction {
-    /// Forward as a `send_literal` frame (§7.7) — the console's VT input translation already
+    /// Forward as a `send_literal` frame (§7.7) - the console's VT input translation already
     /// produced canonical byte sequences, so literal forwarding is byte-exact attach parity.
     Literal(String),
     /// F12: detach locally, leaving the agent running.
     Detach,
 }
 
-/// Splits a raw stdin byte stream into `send_literal` text and F12 detach events.
-///
-/// Holds back (a) any buffer tail that is a strict prefix of [`DETACH_SEQ`] and (b) any
-/// incomplete trailing UTF-8 character, so sequences split across reads reassemble. The
-/// runtime calls [`InputScanner::flush`] after a short idle timeout so a bare Esc keypress
-/// (a strict prefix of the detach sequence) still reaches the agent promptly.
+/// Splits stdin into literal text and detach events, retaining partial UTF-8 and escape sequences
+/// until complete or flushed after idle.
 #[derive(Default)]
 pub struct InputScanner {
     pending: Vec<u8>,
@@ -256,10 +239,6 @@ fn utf8_complete_len(bytes: &[u8]) -> usize {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 /// `repomon attach-host <window>` on non-Windows: agents run under tmux there.
 #[cfg(not(windows))]
 pub async fn run(_session: &str, _window: &str) -> Result<()> {
@@ -274,10 +253,6 @@ pub async fn run(_session: &str, _window: &str) -> Result<()> {
 pub async fn run(session: &str, window: &str) -> Result<()> {
     windows_impl::run(session, window).await
 }
-
-// ---------------------------------------------------------------------------
-// Windows runtime
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 mod windows_impl {
@@ -304,7 +279,7 @@ mod windows_impl {
     enum Outcome {
         /// F12: leave the agent running.
         Detached,
-        /// The host exited (agent gone) — pipe EOF on the stream connection.
+        /// The host exited (agent gone) - pipe EOF on the stream connection.
         Closed,
     }
 
@@ -312,7 +287,7 @@ mod windows_impl {
         let pipe = super::pipe_name(session, window);
 
         // Control connection: hello / resize / send_literal, request-response forever.
-        // Input cannot share the stream connection — after `subscribe_bytes` the host
+        // Input cannot share the stream connection - after `subscribe_bytes` the host
         // ignores client frames on it (§5), so we hold two connections (§2 allows this).
         let (r, w) = tokio::io::split(connect(&pipe).await?);
         let mut ctrl = Ctrl { r, w, next_id: 0 };
@@ -348,7 +323,7 @@ mod windows_impl {
         let mut mirror = tokio::spawn(async move {
             loop {
                 match super::read_frame(&mut sr).await? {
-                    None => return Ok::<(), anyhow::Error>(()), // host exited
+                    None => return Ok::<(), anyhow::Error>(()),
                     Some(v) => match state.on_frame(&v)? {
                         StreamEvent::Ack => {}
                         StreamEvent::Bytes(b) => {
@@ -534,7 +509,7 @@ mod windows_impl {
             fn SetConsoleOutputCP(codepage: u32) -> i32;
         }
 
-        /// RAII console state: VT-raw stdin (`ENABLE_VIRTUAL_TERMINAL_INPUT` only — no
+        /// RAII console state: VT-raw stdin (`ENABLE_VIRTUAL_TERMINAL_INPUT` only - no
         /// line buffering, echo, or Ctrl-C processing), VT-processing stdout, UTF-8
         /// codepages both ways. Everything is restored on drop.
         pub struct VtGuard {
@@ -609,8 +584,6 @@ mod tests {
     use serde_json::json;
     use tokio::io::AsyncWriteExt;
 
-    // ---- framing (§4) ----
-
     #[tokio::test]
     async fn frame_roundtrip_over_duplex() {
         let (mut a, mut b) = tokio::io::duplex(64 * 1024);
@@ -621,7 +594,7 @@ mod tests {
         drop(a);
         assert_eq!(read_frame(&mut b).await.unwrap(), Some(req));
         assert_eq!(read_frame(&mut b).await.unwrap(), Some(res));
-        // Clean EOF at a frame boundary -> None.
+
         assert_eq!(read_frame(&mut b).await.unwrap(), None);
     }
 
@@ -677,8 +650,6 @@ mod tests {
         assert!(read_frame(&mut b).await.is_err());
     }
 
-    // ---- pipe naming (§2) ----
-
     #[test]
     fn pipe_name_matches_protocol_example() {
         assert_eq!(
@@ -686,8 +657,6 @@ mod tests {
             r"\\.\pipe\repomon-repomon-lane-3-1"
         );
     }
-
-    // ---- request builders (§7) ----
 
     #[test]
     fn request_builders_match_protocol_shapes() {
@@ -705,8 +674,6 @@ mod tests {
             json!({"id": 11, "op": "subscribe_bytes"})
         );
     }
-
-    // ---- response parsing (§5) ----
 
     #[test]
     fn parse_response_returns_ok_payload() {
@@ -728,8 +695,6 @@ mod tests {
         assert!(parse_response(&v, 1).is_err());
     }
 
-    // ---- stream frames (§7.11) ----
-
     #[test]
     fn parse_stream_frame_decodes_standard_base64() {
         let v = json!({"stream": "bytes", "data": "aGVsbG8="});
@@ -741,8 +706,6 @@ mod tests {
         assert!(parse_stream_frame(&json!({"id": 1, "ok": {}})).is_err());
         assert!(parse_stream_frame(&json!({"stream": "bytes", "data": "!!"})).is_err());
     }
-
-    // ---- subscription ordering: ack, then replay-first byte frames ----
 
     #[test]
     fn stream_state_requires_ack_then_yields_bytes_in_order() {
@@ -771,8 +734,6 @@ mod tests {
         let mut st = StreamState::new(11);
         assert!(st.on_frame(&json!({"id": 11, "err": "nope"})).is_err());
     }
-
-    // ---- input scanner: raw VT stdin bytes -> send_literal actions + F12 detach ----
 
     fn literals(actions: &[InputAction]) -> Vec<String> {
         actions
@@ -847,8 +808,6 @@ mod tests {
         assert_eq!(literals(&second), vec!["éllo"]);
         assert!(!sc.has_pending());
     }
-
-    // ---- entry point ----
 
     #[cfg(not(windows))]
     #[tokio::test]

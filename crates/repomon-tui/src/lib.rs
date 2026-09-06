@@ -1,7 +1,4 @@
-//! `repomon` TUI — library surface.
-//!
-//! The binary is a thin wrapper around [`run_cli`]. Exposing these modules as a library lets
-//! integration tests drive the real client + app + view stack against an embedded daemon.
+//! Exposes the TUI and CLI runtime as a library for the binary and integration harnesses.
 
 pub mod app;
 pub mod cli;
