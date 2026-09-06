@@ -76,7 +76,7 @@ describe("SpawnModal error rendering", () => {
     fireEvent.click(spawnButton);
 
     const friendlyMsg = await screen.findByText(
-      "tmux isn't installed or couldn't be found — Repomon needs tmux to run agent sessions",
+      "tmux isn't installed or couldn't be found. Repomon needs tmux to run agent sessions",
     );
     expect(friendlyMsg).toBeInTheDocument();
     expect(screen.getByText("Technical details")).toBeInTheDocument();

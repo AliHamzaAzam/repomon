@@ -45,7 +45,7 @@ describe("NewLaneModal error rendering", () => {
     fireEvent.click(createButton);
 
     const friendlyMsg = await screen.findByText(
-      "git isn't installed or couldn't be found — Repomon needs git to manage repositories and worktrees",
+      "git isn't installed or couldn't be found. Repomon needs git to manage repositories and worktrees",
     );
     expect(friendlyMsg).toBeInTheDocument();
     expect(screen.getByText("Technical details")).toBeInTheDocument();
