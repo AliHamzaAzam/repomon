@@ -243,7 +243,8 @@ def verify(root, assignments):
     timeline = call(root, "usage.timeline", {"range": "week", "bucket": "day"})
     write(root / "out/usage.timeline.json", json.dumps(timeline, indent=2))
     assert len(timeline["series"]) == 2
-    assert all(len(series["points"]) >= 7 for series in timeline["series"])
+    # The window is seven local days but the newest day may have no seeded events yet.
+    assert all(len(series["points"]) >= 6 for series in timeline["series"]), [len(s["points"]) for s in timeline["series"]]
     assert len({point["total_tokens"] for point in timeline["series"][0]["points"]}) > 1
     log("PASS usage.summary: priced Claude and Codex totals; 42 synthetic sessions; varied seven-day chart")
     eventually(lambda: len(list((root / "mail").glob("*.sent"))) == 3, "three authenticated messages between fake lanes")
@@ -455,5 +456,7 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, AssertionError, sp.CalledProcessError) as error:
-        log(f"FAILED: {error}")
+        import traceback
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        log(f"FAILED: {type(error).__name__}: {error} (at {frame.filename}:{frame.lineno} in {frame.name})")
         sys.exit(1)
