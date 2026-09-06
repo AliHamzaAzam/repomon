@@ -38,8 +38,7 @@ async function applyUpdate(
   await relaunch();
 }
 
-/// Check for an update without installing it. Returns a handle to install later (used by the
-/// launch-time banner), or null when the app is current. Throws outside a Tauri build.
+/// Returns an installable update handle or null when current, throwing outside Tauri.
 export async function checkForUpdate(): Promise<AvailableUpdate | null> {
   const update = await check({ timeout: 15_000 });
   if (!update) return null;

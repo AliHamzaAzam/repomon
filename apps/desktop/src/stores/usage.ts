@@ -1,14 +1,5 @@
-/**
- * The Usage view's data. One store owns the window (range, grouping, bucket), fetches the four
- * reads together, and guards them with a monotonic token so a slow answer can never overwrite a
- * newer one.
- *
- * A window is either a named range the daemon resolves ("today", "7 days", "30 days") or an
- * explicit `[since, until]` pair. Narrowing into a bar produces the latter, and the windows it
- * came from are kept as a trail so the operator can step back out.
- *
- * The source is injectable so the store's behaviour is testable without a daemon.
- */
+/** Shares usage-window queries behind a generation guard so stale results cannot replace a newer
+ * selection, retaining drill-down history for navigation. */
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 import type {
@@ -89,7 +80,6 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** How many session rows the table asks for. */
 const SESSION_LIMIT = 200;
 
 /** Which column the sessions table is ordered by. */
@@ -103,23 +93,13 @@ const RANGE_LABELS: Record<UsageRange, string> = {
   custom: "Custom",
 };
 
-/**
- * Midnight `back` days before the day `at` falls in, in the browser's own zone.
- *
- * Day arithmetic goes through the calendar rather than through milliseconds, so a day that a
- * daylight-saving change made 23 or 25 hours long still counts as one day.
- */
+/** Use calendar arithmetic so daylight-saving days still count as one day. */
 function localMidnight(at: Date, back = 0): Date {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate() - back);
 }
 
-/**
- * The `[from, to]` a window covers. A day-aligned range means local calendar days: "today" is the
- * day the operator is having, which is the day the agent CLIs report their own totals over.
- *
- * This is also what the store sends the daemon for a named range, so the two never disagree about
- * where a day starts.
- */
+/** Resolves named ranges in the browser’s local calendar and sends explicit instants to keep daemon
+ * boundaries aligned. */
 export function resolveWindow(step: UsageWindowParams, now = new Date()): { from: Date; to: Date } {
   if (step.since && step.until) {
     const since = new Date(step.since);
@@ -289,12 +269,7 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
       const { from, to } = resolveWindow({ range: next }, now);
       goTo({ range: next, label: RANGE_LABELS[next], bucket: bucketFor(next, from, to) }, []);
     },
-    /**
-     * Pick an explicit window from the date picker or a preset. Clamped so the window can never
-     * reach into the future: whatever the caller asks for, the end lands at latest on "now" and
-     * the start at latest on that clamped end, so a stray future date never becomes a read the
-     * daemon has no data for and the header never promises tomorrow's numbers.
-     */
+    /** Clamps custom bounds to now and enforces start no later than end. */
     setCustomRange(since: Date, until: Date, label?: string) {
       const [start, end] = since <= until ? [since, until] : [until, since];
       const now = new Date();
@@ -311,10 +286,7 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
         [],
       );
     },
-    /**
-     * Narrow into one bar: a day opens as hours, an hour as quarter hours. The window it came
-     * from goes on the trail, so the breadcrumb can put it back.
-     */
+    /** Narrows a bucket to a finer range while retaining its parent for back navigation. */
     narrowTo(bucketStart: string) {
       const current = step();
       const finer = narrowerBucket(current.bucket);
@@ -388,10 +360,7 @@ export function createUsageStore(source: UsageSource = daemonUsageSource) {
         setScanning(false);
       }
     },
-    /**
-     * Force an immediate LiteLLM fetch, bypassing the daily cadence, then reload the window so
-     * the summary and sessions tables re-price against whatever just changed.
-     */
+    /** Refreshes rates immediately and reloads usage against the updated prices. */
     async refreshRates() {
       setRatesRefreshing(true);
       try {

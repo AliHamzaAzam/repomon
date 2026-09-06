@@ -103,10 +103,8 @@ export const THEME_PRESETS: ThemePreset[] = [
   },
 ];
 
-/// The accent is what a swatch shows; `applyAccent` decides what the app sets. "brand" is the
-/// default and the one exception: it clears the inline override so each theme's own AA-tuned
-/// `--signal` applies (the brand orange as text needs a different lightness in light than in dark,
-/// which one fixed value cannot give). Every other key is one fixed color across themes, as before.
+/// Uses theme-specific accessible signal colors by clearing the inline override for the default
+/// brand accent.
 export const DEFAULT_ACCENT = "brand";
 
 export const ACCENTS: Record<string, string> = {
@@ -256,10 +254,7 @@ export function saveTerminalAppearance(appearance: TerminalAppearance): void {
   window.dispatchEvent(new CustomEvent("repomon:terminal-appearance-changed", { detail: appearance }));
 }
 
-// The color inputs `terminalSurfaceStyle` blends. TerminalPane resolves these to concrete
-// rgb() strings (xterm's own color parser cannot handle var() or color-mix()), while the
-// Settings preview renders as plain CSS and can hand the raw `var(--x)` references straight
-// through -- the browser evaluates color-mix() itself either way.
+// Supplies resolved colors to xterm, whose parser cannot evaluate CSS variables or color-mix.
 export interface TerminalThemeTokens {
   background: string;
   foreground: string;
@@ -290,10 +285,7 @@ export interface TerminalSurfaceStyle {
   fontSize: number;
 }
 
-// Single source of truth for turning appearance settings into a rendered terminal surface.
-// Used by both TerminalPane (building the xterm theme + pane container background) and the
-// Settings preview (as inline CSS), so the two can never drift apart the way the preview's
-// font stack previously did.
+// Share terminal appearance resolution between the live pane and Settings preview.
 export function terminalSurfaceStyle(
   appearance: TerminalAppearance,
   tokens: TerminalThemeTokens,

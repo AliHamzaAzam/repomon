@@ -260,8 +260,7 @@ describe("usage store", () => {
         const s = source();
         const store = createUsageStore(s);
         await store.refresh();
-        // Asked for a window running six days past "now"; the end must clamp to now, not sail
-        // past it, and the header label must describe the window actually read.
+
         store.setCustomRange(new Date("2026-09-01T00:00:00Z"), new Date("2026-09-11T00:00:00Z"));
         await vi.advanceTimersByTimeAsync(0);
         expect(s.summary).toHaveBeenLastCalledWith({
@@ -288,8 +287,7 @@ describe("usage store", () => {
         const s = source();
         const store = createUsageStore(s);
         await store.refresh();
-        // Both ends land in the future; the whole window collapses onto "now" rather than
-        // reporting a since after its own until.
+
         store.setCustomRange(new Date("2026-09-10T00:00:00Z"), new Date("2026-09-20T00:00:00Z"));
         await vi.advanceTimersByTimeAsync(0);
         expect(s.summary).toHaveBeenLastCalledWith({

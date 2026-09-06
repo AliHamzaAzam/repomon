@@ -1,9 +1,4 @@
-/// The first-run setup wizard's step machine and its resume point.
-///
-/// The machine is deliberately pure and lives outside the component: the wizard is the one screen
-/// a user sees exactly once, so it is also the one screen whose bugs nobody reports. Keeping
-/// "which step comes next" as plain functions means the sequence, the bounds, and the resume
-/// behaviour can be tested without rendering anything.
+/// Defines the setup step sequence and persisted resume point independently of rendering.
 
 export type OnboardingStepId =
   | "welcome"

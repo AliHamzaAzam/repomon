@@ -73,7 +73,7 @@ describe("lane operations", () => {
       actions.deleteLane(lane());
       const del = actions.confirmOptions();
       expect(del?.danger).toBe(true);
-      expect(calls.list).toHaveLength(0); // nothing sent until confirmed
+      expect(calls.list).toHaveLength(0);
       await del?.onConfirm();
       expect(calls.list[0].method).toBe("lane.delete");
 
@@ -114,7 +114,6 @@ describe("lane operations", () => {
       expect(markClosing).toHaveBeenCalledWith("lane-7");
       expect(calls.list[0]).toEqual({ method: "agent.stop", params: { lane_id: 7, window: "lane-7" } });
 
-      // Explicit targetWindow override (e.g. from tab target)
       actions.stopAgent(lane(), null, "lane-7-3");
       await actions.confirmOptions()?.onConfirm();
       expect(markClosing).toHaveBeenCalledWith("lane-7-3");
@@ -221,7 +220,6 @@ describe("shortcuts guide", () => {
     });
   });
 });
-
 
 describe("Usage settings navigation", () => {
   it("preserves the warning filter and clears it on a normal settings open", () => {

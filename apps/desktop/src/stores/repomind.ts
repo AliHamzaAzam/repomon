@@ -35,14 +35,8 @@ export interface AddGoalOutcome {
   told: boolean;
 }
 
-/// The Add-goal write path: write a new goal file into `plans/active`, and tell the primary
-/// controller about it.
-///
-/// The tell happens FIRST, not after: whether it lands decides the file's `owner` (`repomind`
-/// when told, `unassigned` otherwise), so the file is written once with the right shape instead
-/// of being written, then patched. The write itself never depends on the tell succeeding - a home
-/// with no controller running still gets its goal file, `told: false` says so, and the caller
-/// (`RepomindPlans`) is what turns that into "start Repomind and it will pick this up at boot".
+/// Notifies the controller before saving a goal so ownership is recorded once, still saving an
+/// unassigned goal when notification fails.
 export async function addGoal(
   laneId: number,
   title: string,
@@ -71,12 +65,7 @@ interface AgentStatusEvent {
   window?: unknown;
 }
 
-/// Reads `repomind.status` for every surface that shows the home: the pinned sidebar row (state,
-/// controller count, active goals) and the Repomind panel (boot context, export state, counts).
-///
-/// One store rather than a poller per surface, so the row and the panel can never disagree about
-/// the same home. On top of the heartbeat it refreshes immediately when an agent in the controller
-/// lane changes state, which is when the numbers actually move.
+/// Shares home status across sidebar and panel, refreshing on heartbeat and controller activity.
 export function createRepomindStore(source: RepomindSource = daemonRepomindSource) {
   const [status, setStatus] = createSignal<RepomindStatus | null>(null);
   const [error, setError] = createSignal<string | null>(null);

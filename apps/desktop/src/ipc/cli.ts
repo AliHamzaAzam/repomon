@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/// What the app knows about the `repomon` command line on this machine. The version is read by
-/// running the installed copy, so it reports a working CLI rather than a file of the right name.
+/// Reports the installed CLI’s health by running its version command rather than checking only file
+/// existence.
 export interface CliStatus {
   installed: boolean;
   dir: string;

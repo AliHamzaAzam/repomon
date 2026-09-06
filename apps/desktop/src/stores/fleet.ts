@@ -68,10 +68,8 @@ export const daemonFleetSource: FleetSource = {
 
 export type LaneTone = "attention" | "fault" | "signal" | "muted";
 
-/// The repomind home's lane, flagged by the daemon when it ensures the home repo. It stays a
-/// normal lane in every other respect (file RPCs, supervision and Multitasking treat it like any
-/// other), but the sidebar gives it the pinned Repomind row instead of a repo group, and its
-/// agents are counted there rather than in the chips and repo headers.
+/// Identify the controller lane for pinned sidebar presentation while retaining ordinary lane
+/// behavior.
 export function isControllerLane(lane: Pick<Lane, "role">): boolean {
   return lane.role === "controller";
 }
@@ -98,13 +96,8 @@ function gateSuffix(lane: Lane): string {
   return blocked ? ` · gate ${blocked.net_new_findings}` : "";
 }
 
-/// One agent's state, the single vocabulary the sidebar speaks. Every pill, chip, count and
-/// filter is derived from this function and nothing else, so a lane pill reading "2 running" and
-/// a "Running" chip reading 1 can no longer describe the same fleet.
-///
-/// This is a pure projection of daemon fields. The frontend does not re-read pane text or run its
-/// own timers: when a status looks wrong, the daemon's `status_reason` says why, and the fix
-/// belongs there.
+/// Shared agent-state vocabulary derived only from daemon fields, without client-side pane parsing
+/// or timers.
 export type AgentState =
   | "decision"
   | "stalled"
@@ -135,20 +128,15 @@ const STATE_PRIORITY: readonly AgentState[] = [
 /// the operator.
 const ENDED_TURN_ATTENTION: ReadonlySet<string> = new Set(["end_of_turn", "done_candidate"]);
 
-/// Whether a `waiting` session is waiting only because its turn ended: nothing is open on screen
-/// and the daemon classified it as an end of turn rather than a dialog or a question.
-///
-/// A payload with no `attention_kind` (an older daemon) says nothing, so it is not treated as an
-/// ended turn: the conservative reading keeps the operator looking rather than not.
+/// Require an explicit end-of-turn classification so missing attention metadata cannot hide a
+/// possible question.
 function endedItsTurn(agent: AgentSession): boolean {
   if (agent.pending_dialog || agent.pending_prompt) return false;
   return ENDED_TURN_ATTENTION.has(agent.attention_kind ?? "");
 }
 
-/// `controller` marks an agent in the repomind home lane. A controller is a standing coordinator
-/// rather than a task a human handed out: its turn ending is the normal resting state, so it
-/// reads IDLE, and NEEDS YOU is kept for a pending dialog or an explicit question. A worker in a
-/// project lane keeps the old reading, where an ended turn means work is waiting to be picked up.
+/// Project daemon status into a shared display state, treating an ended controller turn as idle and
+/// an ended worker turn as needing attention.
 export function agentState(agent: AgentSession, controller = false): AgentState {
   if (agent.pending_dialog) return "decision";
   const managed = !agent.external && !agent.inferred;
@@ -211,12 +199,7 @@ const STATE_TONE: Record<AgentState, LaneTone> = {
   exited: "muted",
 };
 
-/// The row's status pill speaks one short word: `needs you`, `stalled`, `decision`, `limited`,
-/// `running`, `inferred`, `idle`, `external`, `exited`. Anything more specific than that (how many
-/// agents share the state, whether a "running" lane's only activity is a background subagent, why
-/// an inferred lane could not be identified) lives in the tooltip instead, via
-/// `laneIndicatorDetail`/`laneIndicatorTitle` - never packed into the label, where it used to
-/// crowd the row into truncating the lane name and branch next to it.
+/// Return a short lane-state label, leaving counts and explanations to its tooltip.
 export function laneIndicator(lane: Lane): LaneIndicator {
   const state = laneState(lane);
   if (state === null) return { label: "", tone: "muted", urgent: false };
@@ -251,11 +234,8 @@ export function agentStateReason(agent: AgentSession): string | null {
   return agent.status_reason ?? null;
 }
 
-/// The headline detail that used to live in the pill label itself (how many agents share the
-/// state, and whether a "running" lane's only activity is a background subagent), surfaced only
-/// in the tooltip now. `inferred` gets a standing explanation here because the daemon rarely has
-/// a `status_reason` for it: nothing failed, it just could not attribute the worktree's changes to
-/// a session.
+/// Explain counts, subagent-only activity, and unattributed work in the tooltip rather than
+/// widening the row label.
 function laneIndicatorDetail(lane: Lane, state: AgentState): string | null {
   if (state === "running") {
     const count = laneStateCount(lane, "running");
@@ -273,8 +253,7 @@ function laneIndicatorDetail(lane: Lane, state: AgentState): string | null {
   return null;
 }
 
-/// The lane pill's tooltip: the headline detail the label used to carry, plus the daemon's
-/// reasons for the agents in it.
+/// Builds the lane tooltip from its headline and daemon-provided agent reasons.
 export function laneIndicatorTitle(lane: Lane): string | undefined {
   const state = laneState(lane);
   if (state === null) return undefined;
@@ -312,12 +291,8 @@ export function fleetCounts(lanes: Lane[]): FleetCounts {
   return counts;
 }
 
-/// What the pinned Repomind row says: which lane carries the controllers, how many are in it, the
-/// most urgent state among them, and how many of those want the operator.
-///
-/// The state deliberately reuses `agentState`'s vocabulary, so the pinned row's pill and a lane
-/// pill in the groups below can never describe the same agent with two different words. A lane
-/// with no live controller has `state: null`, which the row renders as "off".
+/// Summarize the controller lane using the shared agent-state vocabulary, with null state when no
+/// controller is live.
 export interface ControllerSummary {
   lane: Lane | null;
   agents: number;
@@ -337,25 +312,16 @@ export function controllerSummary(lanes: Lane[]): ControllerSummary {
   };
 }
 
-/// The usage-probe key for the account a session runs under, matching how the daemon keys its
-/// reports. Codex has one account and is probed under `"codex"`; Claude is keyed by config dir
-/// (`config_dir: null` = the default `~/.claude`, else the dir path). Branching on the agent
-/// matters: a codex session also has `config_dir: null`, so keying on it alone resolved codex
-/// lanes to `"default"` and showed them Claude's numbers.
+/// Resolve the provider-specific usage account key so a null Codex config directory cannot select
+/// Claude's default account.
 export function accountKeyOf(session: AgentSession): string {
   if (session.agent === "codex") return "codex";
   if (session.agent === "antigravity" || session.agent === "agy") return "antigravity";
   return session.config_dir ?? "default";
 }
 
-/// The usage report for the focused agent's account, matched by account key, so the pill follows
-/// whichever account you are actually looking at instead of always showing the first probed one.
-///
-/// `focusedWindow` is the tmux window of the pane in view: a lane can run several agents on
-/// different accounts at once, and the visible tab is the one the numbers should describe. With no
-/// pane focused (or its session gone), fall back to the lane's first non-inferred session.
-/// Returns `null` when the resolved account has not been probed, rather than another account's
-/// numbers; falls back to the first report only when there is no agent to attribute to.
+/// Select usage for the focused session's account, returning null for an unprobed account and
+/// falling back to the first report only without an attributable agent.
 export function pickFocusedUsage(
   reports: AccountUsage[],
   lane: Lane | null,
@@ -375,25 +341,14 @@ export function pickFocusedUsage(
 /// The sidebar repo sort modes, mirroring the daemon's `SortMode`.
 export type RepoSortMode = "default" | "activity" | "manual";
 
-/// Order repo groups for the sidebar according to `mode`.
-///
-/// - `"activity"`: most recent lane activity first (see `sortReposByActivity`).
-/// - `"manual"`: the daemon's order is taken as-is — `repo.list` already sorts by the persisted
-///   manual positions, so re-sorting here would fight the user's drag-and-drop.
-/// - `"default"`: the daemon's order untouched.
+/// Sort by activity when requested, otherwise preserve the daemon's persisted repository order.
 export function orderRepos(repos: Repo[], lanes: Lane[], mode: string): Repo[] {
   if (mode === "activity") return sortReposByActivity(repos, lanes, true);
   return repos;
 }
 
-/// Order repo groups by their most recent lane activity, newest first, when the setting is on.
-///
-/// Only the groups move. Ordering *lanes* by activity is what the TUI removed on purpose: it made
-/// rows bubble around on every agent output. A repo's activity changes far less often, so the
-/// groups stay put while you work in one.
-///
-/// Repos with no lanes have no activity to sort by and sink to the bottom. Ties keep the incoming
-/// (daemon) order, so the result is stable across polls.
+/// Sort repository groups by recent lane activity with stable ties and empty groups last, leaving
+/// lane order unchanged.
 export function sortReposByActivity(repos: Repo[], lanes: Lane[], enabled: boolean): Repo[] {
   if (!enabled) return repos;
   const newest = new Map<number, number>();
@@ -437,10 +392,8 @@ export function matchesLane(lane: Lane, query: string): boolean {
   return false;
 }
 
-/// Overlay sessions all arrive with `id: 0` (they have no store row), but `reconcile` keys
-/// nested arrays by `id` too — duplicate keys collapse a lane's sessions to one, hiding every
-/// agent tab after the first. Re-key each session by its stable identity (transcript id, else
-/// its window) hashed to a number, so reconcile can tell them apart across polls.
+/// Assign stable session keys because duplicate wire ids would collapse nested sessions during
+/// keyed reconciliation.
 export function withSessionKeys(lanes: Lane[]): Lane[] {
   return lanes.map((lane) => ({
     ...lane,
@@ -462,10 +415,7 @@ function byPriority(a: Lane, b: Lane): number {
 }
 
 export function createFleetStore(source: FleetSource = daemonFleetSource) {
-  // repos/lanes are Solid stores updated with keyed `reconcile`, so a poll only touches the fields
-  // that actually changed and leaves every unchanged row's identity intact. That keeps the sidebar
-  // DOM stable across the 1.2s heartbeat; rebuilding every row each poll would
-  // reset CSS :hover and make hover states flicker.
+  // Keyed reconciliation preserves unchanged row identity and hover state across heartbeat updates.
   const [repoStore, setRepoStore] = createStore<Repo[]>([]);
   const [laneStore, setLaneStore] = createStore<Lane[]>([]);
   const repos = () => repoStore;
@@ -488,8 +438,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   let unsubscribe: (() => void) | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Mirrors the daemon's repo sort mode, refreshed with every poll so a change made in the TUI
-  // lands here too. Falls back to the legacy boolean for daemons that predate `sort_mode`.
+  // Refresh repository ordering on each poll to reflect changes from other clients, using the
+  // boolean fallback when sort_mode is absent.
   const [sortMode, setSortMode] = createSignal<RepoSortMode>("default");
   // Mirrors the daemon's per-lane agent tab sort mode ("activity" | "manual").
   const [tabSortMode, setTabSortMode] = createSignal<"activity" | "manual">("activity");

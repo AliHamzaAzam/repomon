@@ -1,7 +1,4 @@
-/// Builds the plain, printable HTML page behind Settings > Keyboard's "Print cheat sheet"
-/// button. Kept as a pure function of BINDINGS (plus which platform to render for) so it is
-/// testable without a Tauri runtime - the button itself just hands the result to the opener
-/// plugin as a data: URL.
+/// Builds printable shortcut HTML from the shared registry and selected platform.
 
 import { BINDINGS, formatChord, isMac, type Binding, type KeymapSection } from "./keymap";
 

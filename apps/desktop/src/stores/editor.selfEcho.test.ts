@@ -80,8 +80,7 @@ describe("EditorStore self-echo save handling (item 9)", () => {
         params: { lane_id: 1, path: "src/index.ts", op: "modified" },
       });
 
-      // From here on, file.read reflects what the in-flight write is about to produce - this
-      // is what the post-save re-check (triggered because an echo arrived mid-save) will see.
+      // Expose the pending write’s content to the post-save read triggered by a mid-save echo.
       rpcMock.mockImplementation((method: string) => {
         if (method === "file.read") {
           return Promise.resolve({ content: "modified content", mtime_ms: 2000, size: 17, kind: "text" });
@@ -133,11 +132,10 @@ describe("EditorStore self-echo save handling (item 9)", () => {
       const savePromise = editor.saveFile("src/index.ts");
       await Promise.resolve();
 
-      // Our save resolves at mtime 2000...
       resolveWrite?.({ mtime_ms: 2000, size: 13 });
 
-      // ...but a second, independent modification (not our own echo) also lands and broadcasts
-      // while our save is still in flight, and the disk now sits at a different mtime.
+      // A separate write can arrive before our save resolves, leaving a different disk modification
+      // time.
       emitDaemonEvent({
         method: "event.file.changed",
         params: { lane_id: 1, path: "src/index.ts", op: "modified" },

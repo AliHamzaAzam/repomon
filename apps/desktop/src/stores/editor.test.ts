@@ -221,7 +221,6 @@ describe("editor store", () => {
         await store.openFile("file7.rs");
         store.updateContent("file7.rs", "dirty lane 7 edits");
 
-        // Switch to lane 8
         setSelectedId(8);
         await Promise.resolve();
 
@@ -232,7 +231,6 @@ describe("editor store", () => {
         expect(store.openFiles().length).toBe(1);
         expect(store.activePath()).toBe("file8.rs");
 
-        // Switch back to lane 7
         setSelectedId(7);
         await Promise.resolve();
 
@@ -283,7 +281,6 @@ describe("editor store", () => {
           actualMtimeMs: 2000,
         });
 
-        // Keep mine re-reads mtime
         daemonCallMock.mockImplementation(async (method: string) => {
           if (method === "file.read") {
             return { content: "remote content", mtime_ms: 2000, size: 14, truncated: false };
@@ -431,8 +428,6 @@ describe("editor store", () => {
     });
   });
 });
-
-
 
 describe("restored file metadata", () => {
   it.each(["pdf", "image", "binary", "text", undefined])("restores %s tabs with the same read state as open and reload", async (kind) => {

@@ -90,9 +90,7 @@ function audioContextConstructor(): AudioContextConstructor | undefined {
   return window.AudioContext ?? candidate.webkitAudioContext;
 }
 
-/**
- * A versatile Web Audio player that supports multiple sound design profiles.
- */
+/** Plays a selected Web Audio sound profile. */
 export class WebAudioSoundPlayer implements SoundPlayer {
   private context: AudioContext | null = null;
 

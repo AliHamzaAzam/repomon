@@ -97,9 +97,9 @@ describe("hidden repos", () => {
     expect(fleet.visibleRepos().map((r) => r.id)).toEqual([1]);
     expect(fleet.hiddenRepos().map((r) => r.id)).toEqual([2]);
     expect(fleet.visibleLanes().map((l) => l.id)).toEqual([10]);
-    // A running count you cannot click through to is just noise.
+
     expect(fleet.counts().running).toBe(1);
-    // Auto-selection never lands inside a hidden repo.
+
     expect(fleet.selectedLaneId()).toBe(10);
 
     // The daemon still hands us the hidden repo and its lanes, so unhiding stays possible.
@@ -124,7 +124,7 @@ describe("sortReposByActivity", () => {
     const lanes = [
       at(10, alpha, "2026-07-20T00:00:00Z"),
       at(20, beta, "2026-07-27T00:00:00Z"),
-      // A repo's newest lane is what counts, not its oldest.
+
       at(21, beta, "2026-07-01T00:00:00Z"),
     ];
     expect(sortReposByActivity([alpha, beta], lanes, true).map((r) => r.id)).toEqual([2, 1]);
@@ -388,7 +388,6 @@ describe("fleet presentation", () => {
     const onDefault = lane({ agent_sessions: [agent({ config_dir: null })] });
     expect(pickFocusedUsage(workFirst, onDefault)?.key).toBe("default");
 
-    // A work-account lane shows work.
     const onWork = lane({ agent_sessions: [agent({ config_dir: "/Users/me/.claude-work" })] });
     expect(pickFocusedUsage(workFirst, onWork)?.key).toBe("/Users/me/.claude-work");
 
@@ -401,7 +400,6 @@ describe("fleet presentation", () => {
     });
     expect(pickFocusedUsage(workFirst, mixed)?.key).toBe("/Users/me/.claude-work");
 
-    // No agent to attribute to: fall back to the first report.
     expect(pickFocusedUsage(workFirst, lane())?.key).toBe("/Users/me/.claude-work");
     expect(pickFocusedUsage([], onDefault)).toBeNull();
   });
@@ -420,7 +418,6 @@ describe("fleet presentation", () => {
     const onCodex = lane({ agent_sessions: [agent({ agent: "codex", config_dir: null })] });
     expect(pickFocusedUsage(reports, onCodex)?.key).toBe("codex");
 
-    // Claude sessions are unaffected.
     const onClaude = lane({ agent_sessions: [agent({ config_dir: null })] });
     expect(pickFocusedUsage(reports, onClaude)?.key).toBe("default");
 
@@ -466,20 +463,18 @@ describe("fleet presentation", () => {
     expect(first.id).not.toBe(second.id);
     // Stable across polls: the same identity hashes to the same key.
     expect(withSessionKeys([target])[0].agent_sessions[0].id).toBe(first.id);
-    // A persisted (non-zero) id passes through untouched.
+
     expect(withSessionKeys([lane({ agent_sessions: [agent({ id: 42 })] })])[0].agent_sessions[0].id).toBe(42);
   });
 
   it("laneIndicator respects running status for stalled indicators", () => {
-    // Running + stale -> stalled (tone: fault)
+
     const runningStale = lane({ agent_sessions: [agent({ status: "running", stale: true })] });
     expect(laneIndicator(runningStale)).toEqual({ label: "stalled", tone: "fault", urgent: true });
 
-    // Idle + stale -> idle (not stalled)
     const idleStale = lane({ agent_sessions: [agent({ status: "idle", stale: true })] });
     expect(laneIndicator(idleStale)).toEqual({ label: "idle", tone: "muted", urgent: false });
 
-    // External + stale -> external (not stalled)
     const extStale = lane({ agent_sessions: [agent({ status: "running", external: true, stale: true })] });
     expect(laneIndicator(extStale)).toEqual({ label: "external", tone: "muted", urgent: false });
   });
@@ -507,7 +502,7 @@ describe("the repomind home", () => {
     expect(fleet.fleetLanes().map((l) => l.id)).toEqual([10]);
     // The controller's running agent and its waiting one are counted by the pinned row instead.
     expect(fleet.counts()).toEqual({ urgent: 0, running: 1, idle: 0 });
-    // Auto-selection lands in the project, never in the home.
+
     expect(fleet.selectedLaneId()).toBe(10);
     // The daemon still hands the lane over, so the pinned row and Multitasking can use it.
     expect(fleet.controllerLanes().map((l) => l.id)).toEqual([90]);
@@ -552,7 +547,7 @@ describe("the repomind home", () => {
     ];
     expect(isControllerRepo(home.id, mixed)).toBe(false);
     expect(isControllerRepo(home.id, [mixed[0]])).toBe(true);
-    // A repo with no lanes is empty, not the home.
+
     expect(isControllerRepo(project.id, mixed)).toBe(false);
   });
 
@@ -576,7 +571,6 @@ describe("the repomind home", () => {
     expect(live.urgent).toBe(1);
   });
 });
-
 
 describe("manual usage refresh", () => {
   it("waits for the RPC before reloading quota age and today's cost", async () => {
@@ -612,7 +606,6 @@ describe("manual usage refresh", () => {
     } finally { teardown(); }
   });
 });
-
 
 describe("ticketed manual refresh events", () => {
   function fixture() {

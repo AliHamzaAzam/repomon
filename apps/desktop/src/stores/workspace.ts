@@ -91,16 +91,12 @@ export function createWorkspaceStore(fleet: FleetStore) {
   );
   const lastWindowByLane = new Map<number, string>();
 
-  // The fleet store attributes account usage to the agent in view, so it needs to know which pane
-  // that is. This store owns the tab state, so mirror it across rather than duplicating the state.
-  // A render effect, not `createEffect`: this is a plain signal copy with no DOM to wait for, and
-  // running it in the same update cycle keeps the usage pill from lagging a tab switch by a tick.
+  // Mirror the focused pane synchronously so account usage updates in the same cycle as tab
+  // selection.
   createRenderEffect(() => fleet.setFocusedWindow(activeWindow()));
 
-  // Fleet polls every second and hands us a brand-new lanes array each time. Reconcile the
-  // rebuilt targets against this cache so each window keeps a stable object reference, and the
-  // reference-keyed <For> in the component keeps its TerminalPane (and its byte watch) mounted
-  // instead of tearing it down every poll.
+  // Retain per-window references so reference-keyed rendering does not remount terminal watches on
+  // each poll.
   const targetCache = new Map<string, PaneTarget>();
   // `equals` keeps the previous array when the window set is unchanged (stabilizeTargets
   // reuses object refs), so the 2s fleet poll stops cascading through laneTargets /
@@ -148,10 +144,8 @@ export function createWorkspaceStore(fleet: FleetStore) {
     if (laneId === null) return [];
     return liveSelection(laneTargets(), lanePaneSelections()[String(laneId)]);
   });
-  // Until the user saves a picker order, retain the first live order we saw and only append/remove
-  // windows. `fleet.lanes()` may be activity-sorted and is rebuilt on every poll; slicing it
-  // directly made every pane jump when another agent emitted output. Once configured, the saved
-  // selection remains the authority and `liveSelection` filters out stopped agents.
+  // Preserve first-seen pane order until a saved picker order exists, preventing activity polls
+  // from rearranging the grid.
   const multitaskTargets = createMemo<PaneTarget[]>((previous) => {
     const available = targets();
     const saved = multitaskSelection();

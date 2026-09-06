@@ -17,10 +17,7 @@ export function readAutoCollapseEmptyLanes(): boolean {
   return raw === "true";
 }
 
-/**
- * Saves the auto-collapse setting to localStorage and dispatches a window event so
- * active views (like FleetSidebar) react immediately.
- */
+/** Persists auto-collapse and broadcasts it to active views. */
 export function saveAutoCollapseEmptyLanes(enabled: boolean): void {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {
     return;
@@ -70,10 +67,7 @@ export function onSidebarShowTodayCostChanged(callback: (enabled: boolean) => vo
 
 export const LAYOUT_CHANGED_EVENT = "repomon:layout-changed";
 
-/**
- * Dispatches a global layout change event so embedded viewports (such as xterm terminal panes)
- * immediately recalculate their geometry and repaint without waiting for window resize.
- */
+/** Requests embedded viewport refitting without waiting for a window resize. */
 export function notifyLayoutChanged(): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(LAYOUT_CHANGED_EVENT));
@@ -142,10 +136,7 @@ export function readShortcutsHintLaunchCount(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
-/**
- * Records that this launch showed the hint. Call at most once per app mount - the count is a
- * launch tally, not a render tally.
- */
+/** Records one hint display per launch, never per render. */
 export function recordShortcutsHintLaunch(): void {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {
     return;
@@ -159,10 +150,7 @@ export function recordShortcutsHintLaunch(): void {
 
 export const RIGHT_PANEL_ACTIVE_TAB_KEY = "repomon:right-panel-active-tab";
 
-/**
- * Reads which right-rail tab (RightPanelHost) was last active. Returns null when nothing has
- * been persisted yet, so the host can fall back to its first registered tab.
- */
+/** Reads the saved panel tab or returns null for registry fallback. */
 export function readRightPanelActiveTab(): string | null {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {
     return null;

@@ -75,7 +75,7 @@ describe("extensions store", () => {
       await flush();
       // Scope-based call carries the account merged into the scope params...
       expect(src.list).toHaveBeenLastCalledWith({ scope: "global", account: "/Users/me/.claude-work" });
-      // ...and a CLI mutation carries it as its own argument.
+
       await store.marketplaceAdd("owner/repo");
       expect(src.marketplaceAdd).toHaveBeenCalledWith("owner/repo", "/Users/me/.claude-work");
       dispose();
@@ -99,7 +99,7 @@ describe("extensions store", () => {
       const src = source();
       const store = createExtensionsStore(src);
       await flush();
-      expect(store.cliAvailable()).toBe(false); // fixture cli_version: null
+      expect(store.cliAvailable()).toBe(false);
       await store.install("x@official");
       expect(src.install).toHaveBeenCalledWith("x@official", { scope: "global", account: "default" });
       dispose();

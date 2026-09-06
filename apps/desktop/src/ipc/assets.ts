@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-// Worktree roots already granted to the Tauri asset protocol, so `PdfViewer` (and any future
-// streamed-asset viewer) only asks the Rust side once per root instead of once per file opened.
+// Cache asset-protocol grants per worktree root to avoid repeating them for each opened file.
 const allowedRoots = new Set<string>();
 
 /// Grants the asset protocol read access to `worktreeRoot` the first time it is seen. A failed

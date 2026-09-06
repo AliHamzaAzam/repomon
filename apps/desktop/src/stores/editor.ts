@@ -125,10 +125,8 @@ export function createEditorStore(fleet: FleetStore) {
 
   const [treeExpanded, setTreeExpandedSignal] = createSignal<boolean>(true);
 
-  // In-memory per-lane state cache
   const laneStates = new Map<number, LaneEditorState>();
 
-  // Current active lane state signals
   const [openFiles, setOpenFiles] = createSignal<OpenFile[]>([]);
   const [activePath, setActivePathSignal] = createSignal<string | null>(null);
   const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set());
@@ -186,10 +184,8 @@ export function createEditorStore(fleet: FleetStore) {
     }
   }
 
-  // Updates the live signal only - safe to call on every `mousemove` of a column-resize drag.
-  // Callers persist the final width once, via `persistTreeColumnWidth`, on `mouseup` - reading
-  // and rewriting the whole localStorage blob on every mousemove event would otherwise thrash
-  // storage dozens of times a second for the length of a single drag.
+  // Persist the final resize once; live drag updates must not rewrite localStorage on every
+  // mousemove.
   function setTreeColumnWidth(width: number) {
     const clamped = Math.max(MIN_TREE_WIDTH_PX, width);
     setTreeColumnWidthSignal(clamped);
@@ -479,11 +475,8 @@ export function createEditorStore(fleet: FleetStore) {
     }));
   }
 
-  // Paths whose save RPC is currently in flight, keyed by `${laneId}:${path}`. The daemon
-  // broadcasts `event.file.changed` before `file.write` returns, so the live-refresh handler
-  // needs this to recognize its own save's echo instead of treating it as an external change.
-  // The value tracks whether an `event.file.changed` for this path arrived while the save was
-  // in flight, so it can be re-checked (via syncExternalChange) once the save settles.
+  // Track in-flight saves and their echoed events because file.changed can arrive before file.write
+  // returns; recheck recorded echoes once saving settles.
   const savingPaths = new Map<string, boolean>();
 
   async function saveFile(path: string) {
@@ -530,10 +523,8 @@ export function createEditorStore(fleet: FleetStore) {
       const hadEchoDuringSave = savingPaths.get(saveKey) === true;
       savingPaths.delete(saveKey);
       if (hadEchoDuringSave) {
-        // An event.file.changed for this path arrived while the write was in flight. It may
-        // have been our own save's echo (now settled, in which case this is a no-op) or a
-        // genuine external change landing at nearly the same time - re-check against the
-        // fresh on-disk mtime now that we have a stable savedContent/mtimeMs to compare.
+        // Recheck in-flight change events after save settles so a real concurrent external write is
+        // not mistaken for our own echo.
         void syncExternalChange(path, laneId);
       }
     }
@@ -600,10 +591,8 @@ export function createEditorStore(fleet: FleetStore) {
 
     try {
       const result = await daemonCall("file.read", { lane_id: laneId, path });
-      // Re-read the file record after the await instead of using the pre-await snapshot:
-      // another operation (e.g. our own saveFile) may have completed while this request was
-      // in flight, and a stale savedContent/mtimeMs would misreport a just-saved buffer as
-      // dirty or conflicted.
+      // Read current file state after the await so a completed save cannot be compared against a
+      // stale baseline.
       const file = findLaneOpenFile(laneId, path);
       if (!file) return;
       if (result.mtime_ms === file.mtimeMs) return;
@@ -679,7 +668,6 @@ export function createEditorStore(fleet: FleetStore) {
       return;
     }
 
-    // Restore from localStorage if available
     const saved = readPersistedStorage().lanes?.[String(newLaneId)];
     const restoredExpanded = new Set<string>(saved?.expandedDirs ?? []);
     const restoredActive = saved?.activePath ?? null;
@@ -707,7 +695,6 @@ export function createEditorStore(fleet: FleetStore) {
     setExpandedDirs(restoredExpanded);
     setDirCache(new Map());
 
-    // Eagerly load root directory and active file
     void loadDir(newLaneId, "");
     if (restoredActive) {
       void (async () => {
@@ -724,10 +711,8 @@ export function createEditorStore(fleet: FleetStore) {
     }
   }
 
-  // Initialize immediately
   switchLane(currentLaneId());
 
-  // Sync with selected lane changes
   createRenderEffect(() => {
     const lane = selectedLane();
     const newLaneId = lane?.id ?? null;
@@ -781,10 +766,7 @@ export function createEditorStore(fleet: FleetStore) {
     );
   }
 
-  // Rename and delete events must be routed by lane: multitasking keeps several lanes in the
-  // viewport at once, so an event for a background lane must never mutate the active lane's
-  // live tabs/tree state. The active lane's own signals are mutated directly; a tracked
-  // background lane's `laneStates` entry is mutated in place; an untracked lane is ignored.
+  // Route file events by lane so background multitasking changes cannot mutate active-lane tabs.
   function handleFileRenamed(from: string, to: string, laneId: number) {
     const normFrom = from.trim().replace(/\\/g, "/");
     const normTo = to.trim().replace(/\\/g, "/");
@@ -892,7 +874,6 @@ export function createEditorStore(fleet: FleetStore) {
       const op = params.op;
       const from = params.from;
 
-      // Reload affected directory levels
       const parentDir = path.split("/").slice(0, -1).join("/");
       queueDirReload(laneId, parentDir);
 

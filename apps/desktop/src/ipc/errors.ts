@@ -27,10 +27,7 @@ function extractRawString(error: unknown): string {
   return String(error ?? "");
 }
 
-/**
- * Translates low-level daemon/tauri errors (such as OS ENOENT or missing binaries)
- * into clear, actionable human copy while preserving the raw error for technical details.
- */
+/** Translates low-level failures into actionable messages while retaining raw technical detail. */
 export function translateError(
   error: unknown,
   contextInput?: ErrorContext | string,

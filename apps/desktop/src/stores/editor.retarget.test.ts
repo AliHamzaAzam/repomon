@@ -31,14 +31,12 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       const fleet = createMockFleet(1);
       const editor = createEditorStore(fleet);
 
-      // Open two files
       editor.openFile("src/index.ts");
       editor.openFile("src/utils.ts");
 
       expect(editor.openFiles().map((f) => f.path)).toEqual(["src/index.ts", "src/utils.ts"]);
       expect(editor.activePath()).toBe("src/utils.ts");
 
-      // Rename src/utils.ts to src/helpers.ts
       editor.handleFileRenamed("src/utils.ts", "src/helpers.ts", 1);
 
       expect(editor.openFiles().map((f) => f.path)).toEqual(["src/index.ts", "src/helpers.ts"]);
@@ -56,7 +54,6 @@ describe("EditorStore tab retargeting on rename and delete", () => {
 
       expect(editor.activePath()).toBe("src/components/Button.tsx");
 
-      // Rename directory "src/components" to "src/ui"
       editor.handleFileRenamed("src/components", "src/ui", 1);
 
       expect(editor.openFiles().map((f) => f.path)).toEqual([
@@ -75,7 +72,6 @@ describe("EditorStore tab retargeting on rename and delete", () => {
       editor.openFile("src/old.ts");
       expect(editor.openFiles()[0].conflict).toBeNull();
 
-      // Delete the file
       editor.handleFileDeleted("src/old.ts", 1);
 
       const file = editor.openFiles().find((f) => f.path === "src/old.ts");

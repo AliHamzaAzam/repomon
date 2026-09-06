@@ -4,10 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import App from "./App";
 import type { ConnectionSnapshot, ConnectionSource } from "./ipc/connection";
 
-// jsdom has no layout engine and does not evaluate media queries, so a width cannot be "set" and
-// observed here. What can be asserted is the structural contract the medium breakpoint relies on:
-// every toolbar word is wrapped as a `.toolbar-label` (the one thing the stylesheet hides), and
-// every button carries an accessible name that does not depend on that word being visible.
+// jsdom cannot evaluate layout, so verify hidden toolbar labels have independent accessible button
+// names.
 
 function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
   return {

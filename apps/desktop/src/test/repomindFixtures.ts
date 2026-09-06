@@ -1,8 +1,6 @@
 import type { AgentSession, Lane, RepomindStatus, Repo } from "../bindings";
 
-/// Shared fixtures for the Repomind control room's tests: one home repo, one controller lane, and
-/// the status payload the panel and its sections read. Kept in one place so a section's test and
-/// the panel's cannot describe two different homes.
+/// Shares a consistent home, controller lane, and status payload across control-room tests.
 
 export const home: Repo = {
   id: 9,

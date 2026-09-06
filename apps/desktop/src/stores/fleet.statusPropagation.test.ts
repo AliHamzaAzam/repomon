@@ -189,9 +189,7 @@ describe("status propagation latency", () => {
     vi.useRealTimers();
   });
 
-  /// The whole path the sidebar depends on, timed: the daemon reclassifies a pane, the store's
-  /// heartbeat picks it up, and the derived pill flips. One heartbeat is the budget; anything
-  /// slower is the store holding a status the daemon has already corrected.
+  /// The derived lane status must reflect a daemon change within one polling heartbeat.
   it("shows a daemon status change within one heartbeat with no event at all", async () => {
     vi.useFakeTimers();
     const feed = mutableSource();
@@ -216,8 +214,7 @@ describe("status propagation latency", () => {
     teardown();
   });
 
-  /// With the daemon pushing `event.agent.status` the same flip lands inside the 60ms event
-  /// debounce, well before the heartbeat would have carried it.
+  /// Pushed status changes must arrive within the event debounce, before the next heartbeat.
   it("shows a pushed status change inside the event debounce", async () => {
     vi.useFakeTimers();
     const feed = mutableSource();
@@ -244,9 +241,8 @@ describe("status propagation latency", () => {
 });
 
 describe("multi-agent lanes", () => {
-  /// The pill shows the most urgent state among a lane's agents, so one of five starting work has
-  /// to flip it on its own. Each row is matched by its own `tmux_window`, which the daemon puts on
-  /// every session, so a lane's slots never trade places across a poll.
+  /// A single active session must update lane urgency while each row retains its own window
+  /// identity.
   it("flips the pill when one of five agents starts running", async () => {
     const idle = (slot: number) =>
       agent({ session_id: `s${slot}`, tmux_window: `lane-7-${slot}`, status: "idle" });
@@ -271,7 +267,7 @@ describe("multi-agent lanes", () => {
     expect(laneIndicator(fleet.lanes()[0]).label).toBe("running");
     expect(fleet.counts().running).toBe(1);
     expect(fleet.counts().idle).toBe(4);
-    // Every row keeps its own window: the pill's agent is identifiable, not just countable.
+
     expect(fleet.lanes()[0].agent_sessions.map((s) => s.tmux_window)).toEqual([
       "lane-7-1",
       "lane-7-2",

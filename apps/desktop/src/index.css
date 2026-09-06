@@ -2,14 +2,8 @@
 @import "@xterm/xterm/css/xterm.css";
 
 :root {
-  /* Repomon brand palette, derived from the shipped mark (docs/brand/final): graphite ink,
-     orange command square, and the warm-white tile the Windows icon sits
-     on. The light ground is that tile exactly; the ink is the graphite exactly. The accent is the
-     same orange hue tuned per theme so it clears WCAG AA as text (the swatch value itself is only
-     2.8:1 on white), which is also why `--brand-swatch` exists separately: it is the untuned brand
-     orange for places that show the color rather than set text in it. Attention moved from amber
-     to gold and fault to crimson so the three warm states stay separable beside an orange accent.
-     Ratios are printed by `node qa/contrast.mjs`. */
+  /* Theme-adjusted brand colors meet text contrast requirements; the separate brand swatch
+   * preserves the untuned artwork color. */
   --background: hsl(48 23% 95%);
   --foreground: hsl(203 31% 21%);
   --surface: hsl(48 30% 99%);
@@ -25,12 +19,8 @@
   --brand-ink: var(--foreground);
   --brand-swatch: hsl(18 84% 61%);
 
-  /* Chart series, assigned in this fixed order and never cycled. Series 1 is the accent family so
-     the primary series reads as "this app"; the rest are spaced around the wheel from it (teal,
-     violet, blue, magenta, olive) so adjacent pairs stay apart under deuteranopia, protanopia and
-     tritanopia, and every step clears 3:1 against the chart surface (see qa/contrast.mjs). A
-     seventh series folds into "Other" rather than borrowing a colour that already means
-     something else. */
+  /* Never reuse a series color: excess groups become Other, and each chart token must meet 3:1
+   * contrast against its surface. */
   --chart-1: hsl(18 82% 40%);
   --chart-2: hsl(188 70% 27%);
   --chart-3: hsl(262 52% 50%);
@@ -252,12 +242,8 @@
   color: var(--muted);
 }
 
-/* One focus ring, in the accent, on every control that can take keyboard focus. `.focus-ring`
-   is kept for the components that already opt in; the element rules below cover the ones that
-   never did, so a keyboard user is never left guessing where they are. The terminal's hidden
-   textarea and the code editor's content surface draw their own cursors, `.settings-input` keeps
-   its border-and-shadow treatment, and the split handle draws its own bar, so those are excluded
-   here explicitly (this rule is unlayered and would otherwise outrank their opt-outs). */
+/* Exclude terminal/editor cursors, settings inputs, and split handles because they supply their own
+ * focus treatment and this unlayered rule would override it. */
 .focus-ring:focus-visible,
 button:focus-visible,
 a[href]:focus-visible,
@@ -273,10 +259,8 @@ summary:focus-visible,
   outline-offset: 1px;
 }
 
-/* Ellipsis at the start of a single line rather than the end, so a truncated path or branch name
-   keeps its most distinguishing part (the tail) on screen instead of the shared prefix every row
-   has anyway. The full string stays in the DOM (readable to search and assistive tech); only the
-   rendered line is clipped, from its start edge rather than the usual end. */
+/* Clip from the start to retain identifying path tails while keeping the complete string in the
+ * DOM. */
 .truncate-start {
   direction: rtl;
   text-align: left;
@@ -365,14 +349,8 @@ summary:focus-visible,
   grid-auto-rows: minmax(0, 1fr);
 }
 
-/* Scoped to non-multitasking grid: with only 1-2 panes, let the single row fill the bay instead
-   of sitting at its 14rem auto-row minimum with dead space below. `:not(.is-multitasking)` is
-   load-bearing — `effectiveLayout()` reports "grid" for multitasking too (see
-   TerminalWorkspace.tsx), so a fleet-wide session with just 1-2 panes selected also picks up
-   `.count-1`/`.count-2`. Without the exclusion, this selector's higher specificity (3 classes vs.
-   `.is-multitasking`'s 2) overrides the measured `grid-auto-rows` floor below with `minmax(0,
-   1fr)` for the row those panes live in — no more real height guarantee, so the row can compress
-   toward zero and clip the composer at the bottom of the terminal. */
+/* Exclude multitasking: this more-specific single-row rule would otherwise override its measured
+ * minimum and clip terminal composers. */
 .terminal-layout.is-grid.count-1:not(.is-multitasking),
 .terminal-layout.is-grid.count-2:not(.is-multitasking) {
   grid-template-rows: minmax(0, 1fr);
@@ -394,16 +372,8 @@ summary:focus-visible,
      `position: absolute` with their own z-index) can never paint over a sibling pane, even under
      row-height edge cases or GPU layer-promotion quirks from the terminal canvas. */
   isolation: isolate;
-  /* TerminalPane replaces the 14rem fallback with a fixed floor derived from cell metrics:
-     chrome plus MULTITASK_MIN_ROWS terminal rows at the renderer's actual cell height (see
-     terminalMetrics.ts), not the pane's currently rendered row count, so it cannot ratchet
-     upward the way measuring the live screen height once did. The same custom property drives
-     both this item and the grid track above: setting only the item's min-height lets a smaller
-     fixed track remain in place and neighboring rows overlap. Keeping both floors aligned makes
-     the guaranteed rows physically visible.
-     No `overflow: hidden` here: TerminalPane's own root section already clips to its box
-     (`h-full` + `overflow-hidden`), so a second clip on this wrapper was pure redundancy that
-     bought nothing and only added another place row-height math could go wrong. */
+  /* Keep the item and grid-track minimums on the same fixed cell-metric floor so rows cannot
+   * overlap or grow through feedback. */
   min-height: var(--multitask-row-min-height, 14rem);
   border-left: 2px solid var(--pane-accent);
 }
@@ -566,17 +536,10 @@ summary:focus-visible,
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 25%, transparent);
 }
 
-/* Breakpoints. The window is a desktop window with a 1040 x 680 floor (tauri.conf.json), so
-   these are the widths it actually reaches rather than phone sizes:
-     narrow  max-width 1100px   the floor and a little above it
-     medium  max-width 1280px   a half-screen window on a 2560 display, or a 13" laptop
-     wide    min-width 1600px   a full-screen window on a large display
-     short   max-height 720px   the floor height, or a laptop with the dock showing
-   Every rule below names its breakpoint; there are no other media queries in the app. */
+/* Breakpoints reflect the desktop window’s configured minimum size. */
 
-/* medium: the header's nine toolbar words no longer fit beside the lockup and the traffic lights,
-   so the buttons collapse to their icons. Each keeps its accessible name (aria-label) and title
-   tooltip, so nothing is lost for the keyboard or the screen reader. */
+/* Collapse toolbar labels when they cannot fit beside the lockup and traffic lights; icon buttons
+ * retain accessible names and tooltips. */
 @media (max-width: 1280px) {
   .header-toolbar .toolbar-label {
     display: none;
@@ -666,10 +629,7 @@ summary:focus-visible,
   flex: 0 1 auto;
 }
 
-/* Two lines per lane: name plus status pill on top, branch plus counts below. The shared box
-   (border, radius, color, hover/selected state) lives here; `.is-stacked` below turns it into the
-   two-line grammar the expanded row needs. The single-line collapsed row (an inactive lane with
-   no agents) keeps this base layout unchanged. */
+
 .fleet-row {
   display: flex;
   width: 100%;
@@ -695,12 +655,8 @@ summary:focus-visible,
   color: var(--foreground);
 }
 
-/* The expanded lane row: name and its status pill get their own line so neither has to compete
-   with the branch, agent count and change cell below for space. `align-items: stretch` (rather
-   than the base row's `center`) lets each line's flex children fill the full width, which is what
-   makes `min-w-0` truncation on the name and branch spans actually engage. About 2.4rem (38-40px)
-   tall - roomier than the old single line, but still dense enough that a working sidebar's lanes
-   fit without feeling like an empty state. */
+/* Stretch stacked rows so child truncation can use the available width while keeping the status on
+ * the name line. */
 .fleet-row.is-stacked {
   flex-direction: column;
   align-items: stretch;
@@ -710,20 +666,15 @@ summary:focus-visible,
   padding-block: 0.3rem;
 }
 
-/* Truncates from the start instead of the end, so a long branch name keeps its most identifying
-   part - the tail - on screen instead of a shared prefix like "feature/". Standard trick for
-   plain left-to-right text: reversing the box's direction moves the ellipsis to the visual start
-   without reordering the characters themselves. */
+/* Reverse the box direction to place the ellipsis before the identifying branch tail. */
 .truncate-tail {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   direction: rtl;
   text-align: left;
-  /* `isolate`, not `plaintext`: plaintext re-derives the base direction from the first strong
-     character, which for every branch name is Latin, so the box silently went back to LTR and
-     clipped the tail instead of the head. Isolating keeps the rtl base that puts the ellipsis
-     at the start while the Latin run inside still reads left to right. */
+  /* isolate preserves the RTL box direction; plaintext would infer LTR from Latin branch names and
+   * clip the wrong end. */
   unicode-bidi: isolate;
 }
 
@@ -763,10 +714,7 @@ summary:focus-visible,
   background: var(--raised);
 }
 
-/* The row's status: one short word from a fixed vocabulary (`laneIndicator`), never a compound
-   phrase with a count baked in - that detail lives in the tooltip instead. Narrower than
-   `.lane-badge` (which also sets keyboard chords) and given a floor width so the pills right-align
-   into a column across rows instead of ragging with the name next to them. */
+/* A fixed minimum aligns status pills independently of label length. */
 .lane-status {
   flex: 0 0 auto;
   min-width: 4.25rem;
@@ -932,10 +880,7 @@ summary:focus-visible,
   outline-offset: 1px;
 }
 
-/* The setup wizard's one authored motion: each step's body is a fresh element (Solid's <Switch>
-   swaps it), so this replays per step rather than once per mount. It starts already visible and
-   settles up, so a reader who lands mid-animation is never looking at nothing. The global
-   prefers-reduced-motion block above collapses it to a no-op. */
+/* Begin visible and replay per step; reduced-motion rules disable the transition. */
 .onboarding-step > * {
   animation: onboarding-step-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }

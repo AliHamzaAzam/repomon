@@ -17,8 +17,7 @@ export interface ConnectionSnapshot {
   phase: ConnectionPhase;
   endpoint: string;
   message: string | null;
-  /// One actionable line for a failure the message alone cannot explain: a missing Visual C++
-  /// runtime, or a named pipe another session already owns. Null when there is nothing to add.
+  /// Adds an actionable hint when the failure message alone cannot explain recovery.
   hint: string | null;
   /// The daemon log to offer behind "Show log", when the failure has one.
   log_path: string | null;

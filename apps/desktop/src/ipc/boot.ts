@@ -1,9 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/// The result of running `repomond --version` from wherever the app resolves the daemon. This is
-/// the one check that separates "the daemon is slow to bind" from "the daemon binary cannot run
-/// on this machine at all", which is the failure the connection pill used to hide behind an
-/// endless "Retrying".
+/// Reports whether the resolved daemon binary can execute, independently of whether it has bound
+/// its endpoint.
 export interface DaemonBootCheck {
   ok: boolean;
   path: string;

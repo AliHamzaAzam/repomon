@@ -75,7 +75,6 @@ describe("EditorStore live refresh on event.file.changed", () => {
       expect(editor.openFiles()[0].content).toBe("initial file content");
       expect(editor.openFiles()[0].cursor).toBe(8);
 
-      // Now external update changes the content on disk
       rpcMock.mockImplementation((method: string) => {
         if (method === "file.read") {
           return Promise.resolve({
@@ -93,7 +92,6 @@ describe("EditorStore live refresh on event.file.changed", () => {
         params: { lane_id: 1, path: "src/index.ts", op: "modified" },
       });
 
-      // Let microtasks run
       await Promise.resolve();
       await Promise.resolve();
 
@@ -126,7 +124,6 @@ describe("EditorStore live refresh on event.file.changed", () => {
       await editor.openFile("src/dirty.ts");
       editor.updateContent("src/dirty.ts", "locally modified dirty content");
 
-      // Disk changes externally
       rpcMock.mockImplementation((method: string) => {
         if (method === "file.read") {
           return Promise.resolve({
@@ -204,7 +201,6 @@ describe("EditorStore live refresh on event.file.changed", () => {
       void editor;
       await Promise.resolve();
 
-      // Rapidly emit 10 file changes in "src/nested"
       for (let i = 0; i < 10; i++) {
         emitDaemonEvent({
           method: "event.file.changed",
@@ -219,15 +215,12 @@ describe("EditorStore live refresh on event.file.changed", () => {
         );
       expect(nestedLists().length).toBe(0);
 
-      // Fast forward by 150ms
       vi.advanceTimersByTime(150);
       expect(nestedLists().length).toBe(0);
 
-      // Fast forward past 300ms
       vi.advanceTimersByTime(200);
       await Promise.resolve();
 
-      // Exactly 1 directory list call for "src/nested"
       expect(nestedLists().length).toBe(1);
 
       dispose();

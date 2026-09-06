@@ -44,14 +44,11 @@ describe("openAt token race prevention", () => {
       // First call targets line 10, col 1, but its load is slow (deferred p1)
       const call1 = editor.openAt("file.ts", 10, 1);
 
-      // Second call targets line 20, col 5
       const call2 = editor.openAt("file.ts", 20, 5);
 
-      // Second call immediately sets target to line 20, col 5
       expect(editor.openAtTarget()?.line).toBe(20);
       expect(editor.openAtTarget()?.column).toBe(5);
 
-      // Now resolve the first call
       deferredResolve1!({
         content: "line 1\nline 2",
         mtime_ms: 1000,

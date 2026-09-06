@@ -213,10 +213,8 @@ describe("createInputCoalescer", () => {
   });
 
   it("splits a paste larger than the chunk cap into multiple bounded sends", async () => {
-    // Regression: a multi-megabyte paste (e.g. a base64-encoded image) sent as one
-    // agent.send_input call became one oversized `tmux send-keys -l` argv on the backend,
-    // risking an ARG_MAX failure or a stall the whole app appeared frozen behind. Each chunk
-    // must stay at or under the coalescer's cap regardless of input size.
+    // Bound paste chunks so large input cannot exceed backend argument limits or stall a single
+    // request.
     const big = "x".repeat(40 * 1024); // 40 KiB, > the 8 KiB chunk cap
     const coalescer = createInputCoalescer(target);
     coalescer.push(big);

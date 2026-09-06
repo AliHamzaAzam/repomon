@@ -1,26 +1,9 @@
-/// The single source of truth for keyboard shortcuts. The global handler in App.tsx, the
-/// cheat sheet overlay, and the Settings keyboard reference all read this table, so a new
-/// binding appears in help for free.
-///
-/// Chords are modifier-based on purpose: a focused terminal forwards every bare keystroke to the
-/// agent, so an unmodified shortcut would steal input from a running session.
-///
-/// Not every entry here is dispatched from this file. Global chords are: the handler in App.tsx
-/// matches them with matchChord and this file owns their behavior. Everything else (scope other
-/// than "global") is a real binding that lives somewhere else - CodeMirror's own keymap inside
-/// the editor, xterm's custom key handler inside a terminal, FileFinder's own list navigation, or
-/// the fleet sidebar's bare-key navigation - described here only so the guide can never omit it.
-/// Each of those owning modules exports the literal table or predicate it actually runs, and a
-/// test in this file (or alongside the owning module) compares it against the entry below, so the
-/// two cannot drift apart.
+/// Defines shortcut documentation and global dispatch; scoped handlers are checked against this
+/// registry, and global modifiers leave bare terminal input available.
 
 export type KeymapSection = "Panels" | "Layout" | "Fleet" | "Lane" | "Agents" | "Terminal" | "Editor" | "Help";
 
-/// Where a binding is handled. "global" bindings go through matchChord/chordOf below and are
-/// live everywhere. Everything else only fires while the named surface has focus, and can only
-/// be reached through it: an editor binding needs the CodeMirror view focused, a terminal binding
-/// needs a terminal pane focused, "finder" needs the file finder open, "sidebar" needs the fleet
-/// list focused.
+/// Identifies the global dispatcher or focused surface that owns a binding.
 export type KeymapScope = "global" | "editor" | "terminal" | "finder" | "sidebar";
 
 /// A guard the handler checks before dispatching. "lane" needs a selected lane; "agent" also
@@ -129,10 +112,7 @@ export const BINDINGS: Binding[] = [
 
   { id: "help.open", chord: "mod+?", label: "Keyboard shortcuts", section: "Help" },
 
-  // --- Terminal-local bindings. These live in TerminalPane.tsx's attachCustomKeyEventHandler,
-  // not in the global dispatcher, so they only fire while a terminal pane has focus. See
-  // src/ipc/term.ts's isTerminalReleaseChord and isTerminalFindChord, which term.test.ts checks
-  // against the two chords below.
+  // Terminal-local chords are handled by the focused pane, not the global dispatcher.
   {
     id: "terminal.find",
     chord: "mod+shift+f",
@@ -199,10 +179,7 @@ export function numberedPanelBindings(bindings: Binding[] = BINDINGS): Binding[]
     .sort((a, b) => (digitOf(a) ?? 0) - (digitOf(b) ?? 0));
 }
 
-/// Only globally-dispatched bindings participate in chord matching. Local bindings reuse the
-/// same "mod+x" chord vocabulary to describe what they do (an editor's Mod-/ next to the fleet's
-/// own Mod-/), so indexing every entry here would let a local description silently shadow a real
-/// global binding.
+/// Index global bindings only so scoped descriptions cannot shadow global shortcuts.
 const BY_CHORD = new Map(
   BINDINGS.filter((binding) => bindingScope(binding) === "global").map((binding) => [binding.chord, binding]),
 );
@@ -220,12 +197,8 @@ export function isWindows(platform?: string): boolean {
   return typeof navigator !== "undefined" && /Win/.test(navigator.platform);
 }
 
-/// Normalize an event to a chord string, or null when the platform modifier is not held. Mod is
-/// Cmd on macOS and Ctrl elsewhere; the two are never interchangeable. A focused terminal
-/// forwards Ctrl chords straight to the agent (EOF, text navigation, and so on), so on macOS a
-/// held Ctrl must never also satisfy "mod", or the same keystroke would fire a GUI action in
-/// addition to reaching the agent. Returning null for unmodified keys is what keeps ordinary
-/// typing untouched.
+/// Normalizes platform-modified events to chords, keeping macOS Ctrl input separate from Cmd
+/// actions and ignoring bare keys.
 export function chordOf(event: KeyboardEvent, platform?: string): string | null {
   if (isMac(platform)) {
     if (!event.metaKey || event.ctrlKey) return null;
@@ -236,14 +209,8 @@ export function chordOf(event: KeyboardEvent, platform?: string): string | null 
   // number row entirely), so keying off `event.key` would make every shifted digit chord
   // unreachable while still rendering as available in the help reference.
   const digit = event.code.startsWith("Digit") ? event.code.slice(5) : null;
-  // The Slash key is the one physical key on a US layout that produces two entirely different
-  // characters depending on Shift ("/" and "?"), and both are bound to different global chords
-  // (mod+/ and mod+?). Most browsers report event.key as "?" once Shift is down, but holding a
-  // platform modifier (Cmd on macOS) can suppress that layout translation and leave event.key at
-  // the unshifted "/" even though event.shiftKey is still true - so read the shift state off
-  // event.code plus event.shiftKey rather than trusting event.key alone to have flipped. Treat it
-  // as the shifted "?" whenever code says Slash and either signal says shifted; both keep it "?"
-  // (never double-encoded as "shift+?"), and neither ever satisfies a bare "/" chord.
+  // Use the Slash code and shift state because platform modifiers can leave event.key unshifted;
+  // encode question-mark chords only once.
   const isShiftedSlash = event.code === "Slash" && (event.key === "?" || event.shiftKey);
   const key = digit ?? (isShiftedSlash ? "?" : event.key.toLowerCase());
   const shift = event.shiftKey && key !== "?" ? "shift+" : "";
@@ -255,20 +222,8 @@ export function matchChord(event: KeyboardEvent, platform?: string): Binding | n
   return chord ? BY_CHORD.get(chord) ?? null : null;
 }
 
-/// Bare-key fleet navigation: j/k or the arrow keys move the selection, "/" jumps to the filter
-/// box, and "n" jumps to the next lane needing attention. Unlike every chord above these carry no
-/// modifier at all, so App.tsx's navigateFleet only calls this once it has already confirmed the
-/// event did not land in a text input. Exported so keymap.test.ts can check it against the
-/// "sidebar" scope entries in BINDINGS directly, instead of trusting App.tsx's copy of the same
-/// logic to stay in sync by hand.
-///
-/// Guarding against every platform modifier here (not just the ones "mod" resolves to) is load
-/// bearing: this handler sits on a DOM ancestor of the fleet list and the filter input, so it
-/// sees a chord's keydown before the window-level onShortcut listener does. Cmd+Shift+/ (the
-/// help.open chord) can, depending on the browser, still carry a bare "/" in event.key even
-/// though a modifier is held - without this guard that keystroke would match "sidebar.filter" in
-/// this function first, steal the event with its own preventDefault, and the shortcuts overlay
-/// would never get a chance to open.
+/// Matches unmodified sidebar navigation outside text inputs, rejecting all modifiers so this
+/// ancestor handler cannot consume global chords.
 export function matchSidebarKey(event: KeyboardEvent): string | null {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   if (event.key === "/") return "sidebar.filter";
@@ -278,10 +233,7 @@ export function matchSidebarKey(event: KeyboardEvent): string | null {
   return null;
 }
 
-/// Convert a CodeMirror-style key string ("Mod-s", "Alt-ArrowUp", "Shift-Alt-ArrowDown") into
-/// this file's chord vocabulary ("mod+s", "alt+up", "shift+alt+down"). Exported so a test can
-/// check CodeEditor.tsx's EDITOR_LOCAL_KEYMAP against the "editor" scope entries in BINDINGS
-/// without hand-transcribing either table.
+/// Converts CodeMirror key names to the shared shortcut vocabulary.
 export function fromCodeMirrorKey(key: string): string {
   return key
     .split("-")
@@ -289,11 +241,8 @@ export function fromCodeMirrorKey(key: string): string {
     .join("+");
 }
 
-/// Two entries collide when they share both a chord and a scope: the same keystroke would try to
-/// do two different things in the same context. Sharing a chord across *different* scopes is
-/// deliberate (e.g. mod+shift+f is "search project files" globally and "find in terminal" only
-/// while a terminal pane has focus - focus decides which one fires), so this only ever compares
-/// within one scope.
+/// Describes conflicting bindings with the same chord and scope, allowing intentional reuse across
+/// focused surfaces.
 export interface KeymapConflict {
   scope: KeymapScope;
   chord: string;
@@ -353,10 +302,7 @@ function keyLabel(key: string): string {
   return key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1);
 }
 
-/// Split a chord into the individual key caps a cheat sheet should render, in order: "mod+shift+m"
-/// becomes ["⌘", "⇧", "M"] on macOS or ["Ctrl", "Shift", "M"] elsewhere. A bare local chord like
-/// "/" or "j" carries no modifier token at all, so it renders as a single cap with no platform
-/// substitution.
+/// Splits a chord into platform-aware key caps, preserving unmodified local keys.
 export function keyCapParts(chord: string, platform?: string): string[] {
   const mac = isMac(platform);
   const tokens = chord.split("+");

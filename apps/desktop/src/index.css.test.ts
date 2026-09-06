@@ -2,19 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-/// Regression coverage for the multitasking-grid CSS specificity bug (bug 3 in the
-/// fix/multitasking-layout-bugs report): `.terminal-layout.is-grid.count-1` /
-/// `.terminal-layout.is-grid.count-2` (3 classes, added so a 1-2 pane non-multitasking grid
-/// fills the bay instead of sitting at its auto-row floor) has higher specificity than
-/// `.terminal-layout.is-multitasking` (2 classes) and — before the `:not(.is-multitasking)`
-/// guard — silently won for a *multitasking* session with only 1-2 panes selected too, since
-/// `effectiveLayout()` reports "grid" for multitasking regardless of pane count. That collapsed
-/// the measured `grid-auto-rows` floor down to `minmax(0, 1fr)` for that row,
-/// letting it compress toward zero height and clip the composer at the bottom of the terminal.
-///
-/// This loads the actual shipped stylesheet into jsdom and asks the real cascade/specificity
-/// engine to resolve it — not a hand-rolled specificity calculation — so it breaks if the
-/// selector guard (or the shared measured-height variable) ever regresses.
+/// Check the shipped cascade preserves measured multitasking minimums even with only one or two
+/// selected panes.
 describe("index.css multitasking grid row sizing", () => {
   let style: HTMLStyleElement;
 
@@ -135,8 +124,7 @@ describe("index.css breakpoints", () => {
     const narrow = mediaRules().get("(max-width: 1100px)") ?? "";
     expect(narrow).toContain("min(var(--right-panel-width, 20rem), 40vw)");
     expect(narrow).toContain("15rem minmax(0, 1fr)");
-    // The old rule hid the rail outright under 980px, which the window never reaches; nothing
-    // is hidden any more.
+
     expect(narrow).not.toContain("display: none");
   });
 

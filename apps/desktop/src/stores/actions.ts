@@ -264,10 +264,7 @@ export function createActionsStore(fleet: FleetStore, workspace?: WorkspaceStore
     openControl: () => setControlOpen(true),
     closeControl: () => setControlOpen(false),
     toggleControl: () => setControlOpen((open) => !open),
-    // The shortcuts cheat sheet overlay (mod+? or a bare "?" outside a text input). Exported here
-    // as `openShortcutsGuide` rather than as a bare module function so any surface holding an
-    // ActionsStore reference - the header, the control palette, or onboarding's Done step - can
-    // open it the same way it opens every other panel.
+
     shortcutsGuideOpen,
     openShortcutsGuide: () => setShortcutsGuideOpen(true),
     closeShortcutsGuide: () => setShortcutsGuideOpen(false),

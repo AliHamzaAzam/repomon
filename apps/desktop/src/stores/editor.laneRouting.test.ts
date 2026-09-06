@@ -85,18 +85,15 @@ describe("EditorStore lane-routed rename/delete events (item 8)", () => {
 
       expect(editor.openFiles().map((f) => f.path)).toEqual(["lane1/keep.ts"]);
 
-      // A removed event arrives for lane 2 while lane 1 is active.
       emitDaemonEvent({
         method: "event.file.changed",
         params: { lane_id: 2, path: "lane2/doomed.ts", op: "removed" },
       });
       await Promise.resolve();
 
-      // Lane 1's live tabs are untouched.
       expect(editor.openFiles().map((f) => f.path)).toEqual(["lane1/keep.ts"]);
       expect(editor.openFiles()[0].conflict).toBeNull();
 
-      // Lane 2's stored state reflects the delete.
       const lane2State = editor.getLaneState(2);
       expect(
         lane2State?.openFiles.find((f) => f.path === "lane2/doomed.ts")?.conflict
@@ -129,18 +126,15 @@ describe("EditorStore lane-routed rename/delete events (item 8)", () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      // A renamed event arrives for lane 2 while lane 1 is active.
       emitDaemonEvent({
         method: "event.file.changed",
         params: { lane_id: 2, path: "lane2/new.ts", op: "renamed", from: "lane2/old.ts" },
       });
       await Promise.resolve();
 
-      // Lane 1's live tabs and active path are untouched.
       expect(editor.openFiles().map((f) => f.path)).toEqual(["lane1/keep.ts"]);
       expect(editor.activePath()).toBe("lane1/keep.ts");
 
-      // Lane 2's stored state has the retargeted path.
       const lane2State = editor.getLaneState(2);
       expect(lane2State?.openFiles.map((f) => f.path)).toEqual(["lane2/new.ts"]);
       expect(lane2State?.activePath).toBe("lane2/new.ts");
@@ -200,7 +194,6 @@ describe("EditorStore lane-scoped debounced tree reload (item 10)", () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      // Each lane's directory reloaded under its own lane id.
       expect(fileListCalls).toContainEqual({ lane_id: 1, path: "src" });
       expect(fileListCalls).toContainEqual({ lane_id: 2, path: "docs" });
       // Lane 1 was never asked to reload lane 2's directory (bare-string dir key collision).
@@ -211,7 +204,6 @@ describe("EditorStore lane-scoped debounced tree reload (item 10)", () => {
       // since nothing routed for lane 2 would ever resolve it.
       expect(editor.dirCache().has("docs")).toBe(false);
 
-      // Lane 1's own directory resolved to loaded.
       expect(editor.dirCache().get("src")?.status).toBe("loaded");
 
       // Lane 2's own stored dirCache entry for "docs" resolved to loaded, not stuck loading.

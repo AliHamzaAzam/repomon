@@ -88,10 +88,7 @@ describe("matchSidebarKey", () => {
   });
 
   it("never fires while a platform modifier is held, even if event.key still reads as the bare key", () => {
-    // Regression: some browsers report event.key as "/" for Cmd+Shift+/ (the help.open chord)
-    // even though a modifier is held. This handler sits on a DOM ancestor of the fleet filter
-    // input, ahead of the window-level chord dispatcher, so without this guard it would steal
-    // the keystroke and focus the filter instead of ever letting the shortcuts overlay open.
+    // Modified Slash must bypass ancestor sidebar navigation even when event.key remains unshifted.
     expect(matchSidebarKey(key({ key: "/", metaKey: true }))).toBeNull();
     expect(matchSidebarKey(key({ key: "/", metaKey: true, shiftKey: true }))).toBeNull();
     expect(matchSidebarKey(key({ key: "/", ctrlKey: true, shiftKey: true }))).toBeNull();
@@ -178,7 +175,7 @@ describe("matchChord", () => {
   });
 
   it("matches shifted digit chords, which report a symbol in event.key", () => {
-    // Cmd+Shift+1 on a US layout delivers key "!" — only event.code still says Digit1.
+    // Cmd+Shift+1 on a US layout delivers key "!" - only event.code still says Digit1.
     expect(matchChord(key({ key: "!", code: "Digit1", metaKey: true, shiftKey: true }), "mac")?.id).toBe("layout.focused");
     expect(matchChord(key({ key: "@", code: "Digit2", metaKey: true, shiftKey: true }), "mac")?.id).toBe("layout.split");
     // Grid uses mod+shift+0, not mod+shift+3: that chord is the macOS screenshot shortcut.
@@ -239,11 +236,8 @@ describe("matchChord", () => {
 /// punctuation keys actually bound to a global shifted chord need an entry.
 const SHIFTED_SYMBOL: Record<string, string> = { "9": "(", "0": ")", "1": "!", "2": "@" };
 
-/// Build a plausible KeyboardEvent for a registry chord string ("mod+shift+9", "mod+/", "mod+?",
-/// "mod+e", ...), on the given platform, either respecting or deliberately flipping the chord's
-/// own shift state. Digits always carry their `code` so the digit-vs-symbol ambiguity chordOf
-/// resolves via `code` is exercised the same way a real browser would trigger it; the Slash key
-/// carries `code: "Slash"` for the same reason.
+/// Build a platform chord event with physical digit/slash codes to exercise shifted-symbol
+/// normalization.
 function eventForChord(chord: string, platform: "mac" | "other", opts: { flipShift?: boolean } = {}): KeyboardEvent {
   const tokens = chord.split("+");
   const base = tokens[tokens.length - 1];

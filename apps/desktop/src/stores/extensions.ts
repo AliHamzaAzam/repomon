@@ -46,8 +46,8 @@ function message(error: unknown): string {
 
 export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   const [scope, setScopeSignal] = createSignal<ExtScopeParams>({ scope: "global" });
-  // Which Claude account (config dir) the view targets. Orthogonal to global/repo scope. Keyed the
-  // same as the usage probe: "default" = ~/.claude, a config-dir path for a variant, "codex".
+  // Select an account independently of global or repository scope, using the daemon’s usage-probe
+  // account keys.
   const [account, setAccountSignal] = createSignal<string>("default");
   const [query, setQuery] = createSignal("");
   const [filter, setFilter] = createSignal<ExtFilter>("all");
@@ -57,10 +57,8 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
   const [detailsCache, setDetailsCache] = createSignal<Record<string, string>>({});
   const [detailsErrorCache, setDetailsErrorCache] = createSignal<Record<string, string>>({});
 
-  // Every daemon call carries the scope and the selected account.
   const params = (): ExtScopeParams => ({ ...scope(), account: account() });
 
-  // Accounts to offer in the picker, surfaced by the daemon in each snapshot.
   const accounts = createMemo(() => snapshot()?.accounts ?? []);
 
   async function refresh() {
@@ -186,9 +184,8 @@ export function createExtensionsStore(source: ExtSource = daemonExtSource) {
 
   void refresh();
 
-  // Every client (this app, the TUI, iOS) refreshes on event.ext.changed so a toggle made
-  // elsewhere shows up here without waiting on a poll. Fire-and-forget: this store is created
-  // once for the app's lifetime, so there is no matching teardown to unsubscribe against.
+  // Subscribe for cross-client extension changes; this store and its subscription live for the
+  // app’s lifetime.
   void source
     .subscribe?.((event) => {
       if (event.method === "event.ext.changed") void refresh();

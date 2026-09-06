@@ -119,9 +119,9 @@ export interface ConfigView {
   usage_probe: boolean;
   expand_agents: boolean;
   sort_repos_by_activity: boolean;
-  /** "default" | "activity" | "manual" — resolved daemon-side from the setting + legacy boolean. */
+  /** "default" | "activity" | "manual" - resolved daemon-side from the setting + legacy boolean. */
   sort_mode?: string;
-  /** "activity" | "manual" — how the per-lane agent tabs are ordered. */
+  /** "activity" | "manual" - how the per-lane agent tabs are ordered. */
   tab_sort_mode?: string;
   /** Whether the companion-app WebSocket bridge is enabled at daemon startup. */
   remote_enabled?: boolean;
@@ -143,11 +143,7 @@ export interface ConfigView {
   [key: string]: unknown;
 }
 
-/**
- * A sparse per-model rate correction, as sent to `config.set`'s `usage_price_override_upsert`.
- * Only the fields the operator actually typed are included; an omitted one neither sets nor
- * clears whatever that field already resolves to (see `pricing.rs`'s `PriceOverride`).
- */
+/** Carries only edited price fields so omitted values neither replace nor clear existing overrides. */
 export interface UsagePriceOverrideUpsert {
   model: string;
   input_per_mtok?: number;
@@ -181,12 +177,7 @@ export interface OrchestratorStatus {
   headline?: string | null;
 }
 
-/**
- * `lane.diff`'s result: a lane's branch compared against the repo's base branch, plus its own
- * uncommitted state. Mirrors `LaneDiff` in crates/repomon-core/src/git/diff.rs — `commits` is the
- * raw `git log --oneline <merge_base>..HEAD` text (newline-separated "oid summary" lines), not a
- * structured array, so callers split it themselves (see GitExplorerPanel's `parseCommits`).
- */
+/** Mirrors lane.diff, whose commit list is raw git log --oneline text rather than structured rows. */
 export interface LaneDiff {
   base: string;
   merge_base: string;
@@ -274,8 +265,7 @@ interface RpcMap {
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
   "lane.diff": { params: { lane_id: number; include_patch?: boolean }; result: LaneDiff };
-  // Worktree file I/O for the in-app editor (D1/D2). Local-only (see remote.rs's
-  // remote_method_allowed) — never reachable from a paired-device connection.
+  // Worktree file operations are local-only.
   "file.list": { params: { lane_id: number; path?: string }; result: FileListResult };
   "file.read": { params: { lane_id: number; path: string }; result: FileReadResult };
   "file.read_raw": { params: { lane_id: number; path: string }; result: FileReadRawResult };
@@ -317,9 +307,8 @@ interface RpcMap {
     params: { lane_id: number; path: string };
     result: FileDiffBaseResult;
   };
-  // `to` also accepts a list of addresses, "lane-2/*", or "*" (A6 broadcast/multi-recipient
-  // mail). A single plain address still returns a bare `FleetMessage`; anything else returns a
-  // fan-out summary instead (`{ recipient_count, sent_count, results: { to, status, ... }[] }`).
+  // A single plain destination returns FleetMessage; lists and wildcards return per-recipient
+  // fan-out results.
   "message.send": {
     params: { to: string | string[]; body: string; reply_to?: string };
     result: FleetMessage | { recipient_count: number; sent_count: number; results: Array<{ to: string; status: "sent" | "no_such_session" | "delivery_error"; message_id?: string; thread_id?: string; error?: string }> };

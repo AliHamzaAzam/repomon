@@ -3,9 +3,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-/// `.truncate-tail` is the fleet row's "keep the end of the branch name" rule. It only works
-/// while the box keeps its rtl base direction; `unicode-bidi: plaintext` re-derives the direction
-/// from the Latin text and silently turns it back into an ordinary end-truncation.
+/// Keep an RTL base direction for tail-preserving truncation; plaintext bidi would derive LTR from
+/// branch names.
 describe("index.css fleet row truncation", () => {
   const raw = readFileSync(path.resolve(process.cwd(), "src/index.css"), "utf-8");
   const rule = raw.match(/\.truncate-tail\s*{[^}]*}/)?.[0] ?? "";

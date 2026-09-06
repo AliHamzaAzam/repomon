@@ -3,11 +3,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-/// The Windows builds hide the native title bar and the app draws its own caption controls
-/// (`WindowChrome.tsx`). That only works if three files agree: the two Windows-only confs turn
-/// decorations off (and still carry the window's size floor, since a `--config` overlay replaces
-/// the whole `windows` array), the shared conf leaves decorations alone for macOS and Linux, and
-/// the capability grants the window commands the controls call.
+/// Windows decoration overrides must retain size floors and match caption-command capabilities
+/// while shared platform settings remain intact.
 const tauriDir = path.resolve(process.cwd(), "src-tauri");
 const read = (file: string) => JSON.parse(readFileSync(path.join(tauriDir, file), "utf-8"));
 

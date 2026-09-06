@@ -96,7 +96,7 @@ export interface SoundArbitration {
   nativeSilent: boolean;
 }
 
-/** Custom audio is primary. Native sound is allowed only when an eligible custom cue is unavailable. */
+/** Allows native sound only when an eligible custom cue is unavailable. */
 export function arbitrateSound(
   cue: SoundCue | null,
   preferences: SoundPreferences,

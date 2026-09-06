@@ -63,19 +63,14 @@ export function isTerminalReleaseChord(event: KeyboardEvent): boolean {
   return event.key === "Escape" && event.shiftKey;
 }
 
-/// True when a key event should open the terminal's own find bar. Deliberately accepts either
-/// Cmd or Ctrl plus Shift+F on every platform, unlike the app's other chords: a focused terminal
-/// already claims both modifiers, so there is no reason to also require the platform's usual
-/// "mod". This is documented in keymap.ts's "terminal.find" entry (scope "terminal"), which
-/// term.test.ts checks against this predicate directly.
+/// Recognizes Ctrl/Cmd+Shift+F on either platform because the focused terminal already owns both
+/// modifiers.
 export function isTerminalFindChord(event: KeyboardEvent): boolean {
   return (event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f";
 }
 
-/// Convert one wheel event's delta into a SIGNED, fractional number of terminal lines (positive =
-/// scroll down). The caller accumulates this across events and only emits whole lines, so a
-/// trackpad gesture (many tiny pixel deltas) scrolls proportionally instead of one line per event
-/// — which is what made scrolling feel over-sensitive and inaccurate.
+/// Converts wheel deltas to signed fractional lines so callers can accumulate trackpad movement
+/// proportionally.
 export function wheelLines(
   deltaY: number,
   deltaMode: number,
@@ -270,10 +265,8 @@ export function createInputCoalescer(target: TerminalTarget, onError?: (error: u
   let running: Promise<void> | null = null;
   const reportError = onError ?? (() => undefined);
 
-  // Leading edge: the first keystroke sends immediately, and keys typed while a send is in
-  // flight coalesce into the next one — the RPC roundtrip itself is the batching window.
-  // (The previous fixed 8ms trailing debounce taxed every keystroke with the full delay and
-  // never actually batched at human typing speed.)
+  // Send the leading keystroke immediately and batch subsequent input during the request round
+  // trip.
   function drain(): Promise<void> {
     if (!running) {
       running = (async () => {

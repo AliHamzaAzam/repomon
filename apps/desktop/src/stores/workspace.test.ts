@@ -86,7 +86,6 @@ describe("workspace store", () => {
       ws.cycleTab(-1, tabs);
       expect(ws.activeWindow()).toBe("a");
 
-      // Wraps backwards off the front, and forwards off the end.
       ws.cycleTab(-1, tabs);
       expect(ws.activeWindow()).toBe("c");
       ws.cycleTab(1, tabs);
