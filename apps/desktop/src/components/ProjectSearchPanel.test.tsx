@@ -55,18 +55,14 @@ describe("ProjectSearchPanel request guarding", () => {
     const input = container.querySelector("input[placeholder='Search in project...']") as HTMLInputElement;
     expect(input).toBeTruthy();
 
-    // Type first query
     fireEvent.input(input, { target: { value: "first" } });
 
-    // Wait for debounced search to trigger
     await waitFor(() => {
       expect(searchResolvers.some((r) => r.query === "first")).toBe(true);
     });
 
-    // Type second query
     fireEvent.input(input, { target: { value: "second" } });
 
-    // Wait for debounced search to trigger for second query
     await waitFor(() => {
       expect(searchResolvers.some((r) => r.query === "second")).toBe(true);
     });
@@ -74,7 +70,6 @@ describe("ProjectSearchPanel request guarding", () => {
     const firstResolver = searchResolvers.find((r) => r.query === "first")!;
     const secondResolver = searchResolvers.find((r) => r.query === "second")!;
 
-    // Resolve second query first
     secondResolver.resolve({
       hits: [{ path: "second.txt", line: 2, column: 1, line_text: "second hit" }],
       truncated: false,
@@ -84,7 +79,6 @@ describe("ProjectSearchPanel request guarding", () => {
       expect(container.textContent).toContain("second.txt");
     });
 
-    // Now resolve first query later
     firstResolver.resolve({
       hits: [{ path: "first.txt", line: 1, column: 1, line_text: "first hit" }],
       truncated: false,

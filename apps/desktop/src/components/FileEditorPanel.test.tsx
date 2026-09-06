@@ -253,14 +253,8 @@ describe("FileEditorPanel open/edit/save", () => {
     view.dispatch({ changes: { from: 3, insert: "d" } });
     expect(await screen.findByTitle("Unsaved changes")).toBeInTheDocument();
 
-    // The rail Save button calls editor.saveFile directly - it never goes through CodeEditor's
-    // Mod-s keymap, which is the only place that used to call refreshDiffBase. This is an
-    // end-to-end sanity check that the wiring (saveVersion prop -> CodeEditor's effect) reaches
-    // all the way from a real Save-button click through the store to a fresh file.diff_base call;
-    // the exact call count isn't asserted here (CodeEditor's existing path/laneId-tracking effect
-    // already reruns on unrelated activeFile updates such as cursor moves, so the baseline count
-    // itself is noisy) - see the isolated, exact-count version of this behavior in
-    // CodeEditor.gitGutter.test.tsx.
+    // Verify a rail-button save refreshes the git base through saveVersion, independent of the
+    // editor keymap.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByTitle("Unsaved changes")).not.toBeInTheDocument());
 
@@ -288,10 +282,8 @@ describe("FileEditorPanel open/edit/save", () => {
     view.dispatch({ changes: { from: 5, insert: "f" } });
     view.dispatch({ selection: { anchor: 1 } });
 
-    // A keyed Show on the active file would tear down and rebuild CodeEditor (and its
-    // EditorView) on every keystroke, since updateContent produces a new OpenFile object each
-    // time - that loses undo history and focus. The same DOM node surviving three edits and a
-    // cursor move proves the non-keyed accessor form is in use.
+    // A new OpenFile object must not remount the editor on each edit and discard undo history or
+    // focus.
     expect(container.querySelector(".cm-content")).toBe(contentNode);
     expect(getView(container)).toBe(view);
     expect(view.state.doc.toString()).toBe("abcdef");
@@ -533,13 +525,11 @@ describe("FileEditorPanel lane switching", () => {
     view.dispatch({ changes: { from: 2, insert: "!" } });
     await screen.findByTitle("Unsaved changes");
 
-    // Switch to lane 8: no confirmation dialog appears
     setId(8);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByText("b.ts")).toBeInTheDocument();
     expect(screen.queryByTitle("a.ts")).not.toBeInTheDocument();
 
-    // Switch back to lane 7: tab and unsaved changes are restored
     setId(7);
     expect(await screen.findByTitle("a.ts")).toBeInTheDocument();
     expect(screen.getByTitle("Unsaved changes")).toBeInTheDocument();

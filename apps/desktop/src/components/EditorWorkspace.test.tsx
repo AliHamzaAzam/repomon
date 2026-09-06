@@ -79,10 +79,8 @@ function mockRpc(handlers: Record<string, (params: unknown) => unknown>) {
   });
 }
 
-// jsdom has no createObjectURL/revokeObjectURL on URL at all (SvgPreview is the only component in
-// this file that calls them). Stubbing them for the whole file, reset before every test, keeps
-// them always callable even if a reactive effect from an unmounted component happens to fire late
-// - reassigning them to `undefined` per-test previously broke unrelated later tests that way.
+// Keep Blob URL stubs callable throughout the file so late reactive cleanup cannot reach undefined
+// jsdom APIs.
 let capturedSvgBlobs: Blob[] = [];
 
 beforeEach(() => {
@@ -560,27 +558,21 @@ describe("EditorWorkspace component", () => {
     fireEvent.click(screen.getByText("main.ts"));
     await waitFor(() => expect(editor.activePath()).toBe("main.ts"));
 
-    // Preview toggle is not in status bar for non-markdown file
     expect(screen.queryByText(/Preview: (On|Off)/)).not.toBeInTheDocument();
 
-    // Open markdown file
     fireEvent.click(screen.getByText("notes.md"));
     await waitFor(() => expect(editor.activePath()).toBe("notes.md"));
 
-    // Preview toggle appears in status bar
     const previewBtn = await screen.findByText("Preview: Off");
     expect(previewBtn).toBeInTheDocument();
     expect(container.querySelector("[data-testid='markdown-preview']")).not.toBeInTheDocument();
 
-    // Toggle preview on
     fireEvent.click(previewBtn);
     expect(await screen.findByText("Preview: On")).toBeInTheDocument();
     expect(container.querySelector("[data-testid='markdown-preview']")).toBeInTheDocument();
 
-    // CodeEditor view is still mounted
     expect(container.querySelector(".cm-content")).toBeInTheDocument();
 
-    // Toggle preview off
     fireEvent.click(screen.getByText("Preview: On"));
     expect(await screen.findByText("Preview: Off")).toBeInTheDocument();
     expect(container.querySelector("[data-testid='markdown-preview']")).not.toBeInTheDocument();
@@ -680,7 +672,6 @@ describe("EditorWorkspace component", () => {
 
     expect(await screen.findByText("Large file: read-only")).toBeInTheDocument();
 
-    // Switch to small file
     fireEvent.click(screen.getByText("small.txt"));
     await waitFor(() => expect(editor.activePath()).toBe("small.txt"));
     expect(screen.queryByText("Large file: read-only")).not.toBeInTheDocument();

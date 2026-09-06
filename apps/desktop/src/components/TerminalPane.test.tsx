@@ -383,7 +383,7 @@ describe("TerminalPane header containment (bug 5: header can disappear under hig
     const { container } = render(() => <TerminalPane laneId={7} window="lane-7-1" label="Codex" />);
     await flushMicrotasks();
 
-    // Header render is unconditional in TerminalPane.tsx — no <Show> gates it — so it must
+    // Header render is unconditional in TerminalPane.tsx - no <Show> gates it - so it must
     // always be present regardless of transport/view state.
     expect(screen.getByText("Codex")).toBeInTheDocument();
 
@@ -396,7 +396,7 @@ describe("TerminalPane header containment (bug 5: header can disappear under hig
     const host = container.querySelector(".terminal-host");
     expect(host).not.toBeNull();
     // The terminal host is clipped at its own box (starting below the h-7 header, `top-7`), not
-    // just at the section's full-pane bounds — so an oversized/mis-sized xterm canvas during a
+    // just at the section's full-pane bounds - so an oversized/mis-sized xterm canvas during a
     // burst of live output can't paint upward over the header strip.
     expect(host!.classList.contains("overflow-hidden")).toBe(true);
     expect(host!.classList.contains("top-7")).toBe(true);
@@ -447,7 +447,6 @@ describe("TerminalPane clickable path links", () => {
 
     const provider = termInstance.linkProviders[0];
 
-    // Mock buffer active line
     termInstance.buffer = {
       active: {
         getLine: (lineIdx: number) => {
@@ -466,18 +465,15 @@ describe("TerminalPane clickable path links", () => {
       providedLinks = links;
     });
 
-    // Only src/foo.rs exists in index, src/missing.rs does not
     expect(providedLinks).toBeDefined();
     expect(providedLinks).toHaveLength(1);
     expect(providedLinks![0].text).toBe("src/foo.rs:12:4");
 
-    // Plain click should not trigger openAt
     const plainClickEvent = { metaKey: false, ctrlKey: false } as MouseEvent;
     providedLinks![0].activate(plainClickEvent, "src/foo.rs:12:4");
     expect(openAt).not.toHaveBeenCalled();
     expect(onEnsureEditorOpen).not.toHaveBeenCalled();
 
-    // Cmd-click triggers openAt and ensureEditorOpen
     const cmdClickEvent = { metaKey: true, ctrlKey: false } as MouseEvent;
     providedLinks![0].activate(cmdClickEvent, "src/foo.rs:12:4");
     expect(onEnsureEditorOpen).toHaveBeenCalled();

@@ -26,10 +26,8 @@ function setNaturalSize(img: HTMLImageElement, width: number, height: number) {
   Object.defineProperty(img, "naturalHeight", { value: height, configurable: true });
 }
 
-// The <img> element is mounted immediately (see ImageViewer's "always mounted" comment), but its
-// onload/onerror handlers are only bound once the async asset-protocol grant resolves. Firing a
-// load/error event before that point hits no handler at all, so every test waits for the real
-// asset URL to land on the element first.
+// Wait for asset URL assignment before firing load events because handlers are installed after
+// permission resolves.
 async function waitForAssetSrc(img: HTMLImageElement, absolutePath: string) {
   await waitFor(() => expect(img.src).toContain(encodeURIComponent(absolutePath)));
 }
@@ -214,14 +212,8 @@ describe("ImageViewer", () => {
   });
 
   it("locks the displayed width and height to naturalWidth/naturalHeight times scale at every zoom level", async () => {
-    // Regression test: Tailwind v4 preflight applies `img, video { max-width: 100%; height: auto }`.
-    // The inline `height` style below always overrides preflight's `height: auto`, but nothing used
-    // to override preflight's `max-width: 100%` - so once the scaled width exceeded the stage's
-    // content-box width, the browser clamped the rendered width while the height rendered at its
-    // full inline value, squashing the image horizontally. `max-w-none`/`max-h-none` on the <img>
-    // (in the utilities layer, which always wins over preflight's base layer) fixes that at the
-    // root. jsdom performs no layout, so this asserts the inline styles and classes that determine
-    // the ratio in a real browser rather than a computed, laid-out box.
+    // Override preflight’s max-width so zoom preserves aspect ratio; jsdom verifies the controlling
+    // styles rather than rendered geometry.
     render(() => <ImageViewer worktreeRoot="/repo/lane" laneId={1} path="assets/photo.png" />);
 
     const img = (await screen.findByTestId("image-viewer-img")) as HTMLImageElement;
@@ -252,7 +244,6 @@ describe("ImageViewer", () => {
       expect(img.className).toContain("max-h-none");
     }
 
-    // 100% - "actual size"
     fireEvent.keyDown(root, { key: "1", metaKey: true });
     assertLocked(100, 1, true);
 
@@ -273,7 +264,6 @@ describe("ImageViewer", () => {
     fireEvent.wheel(stage, { deltaY: deltaY152, ctrlKey: true, clientX: 0, clientY: 0 });
     assertLocked(152, 1.52, false);
 
-    // 300% - well past MIN/MAX guard rails, still no clamp.
     fireEvent.keyDown(root, { key: "1", metaKey: true });
     const deltaY300 = -Math.log(3) / 0.0025;
     fireEvent.wheel(stage, { deltaY: deltaY300, ctrlKey: true, clientX: 0, clientY: 0 });

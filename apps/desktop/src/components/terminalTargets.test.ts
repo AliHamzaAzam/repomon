@@ -16,7 +16,7 @@ describe("stabilizeTargets", () => {
   it("reuses the previous reference for a window that still exists", () => {
     const cache = new Map<string, PaneTarget>();
     const first = stabilizeTargets(cache, [target("lane-7")]);
-    // A fresh poll builds a brand-new object for the same window.
+
     const second = stabilizeTargets(cache, [target("lane-7")]);
     expect(second[0]).toBe(first[0]);
   });

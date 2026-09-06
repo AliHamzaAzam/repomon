@@ -35,12 +35,7 @@ const TerminalPane = lazy(() => import("./TerminalPane"));
 // Used only until a live xterm reports its authoritative minimum height.
 const MULTITASK_FALLBACK_ROW_HEIGHT_PX = 224;
 
-/// The shared Multitasking row minimum: the largest floor any currently visible pane has
-/// reported, or the fallback while nothing has reported yet. Pulled out as a pure function (used
-/// by the `multitaskRowMinimum` memo below) so it can be exercised directly with a plain heights
-/// map instead of a full render tree. A pane's floor is a fixed value now (see
-/// `terminalMetrics.ts`), so lowering it is just this recomputing over fresh input, and a pane
-/// that stops being visible is excluded simply by not appearing in `visibleWindows`.
+/// Returns the largest minimum among visible panes, using the fallback until any pane has reported.
 export function multitaskRowMinimumFromHeights(
   fallback: number,
   heights: Record<string, number>,
@@ -55,12 +50,8 @@ export function multitaskRowMinimumFromHeights(
   );
 }
 
-/// Drop recorded minimums for windows no longer in view. `multitaskRowMinimumFromHeights` already
-/// ignores entries outside `visibleWindows`, so this doesn't change the current row minimum, but
-/// without it a pane that closes and is later replaced by a new window reusing bookkeeping would
-/// grow `paneMinimumHeights` forever, and a pane that leaves and re-enters the view briefly holds
-/// a stale minimum from before its layout even changed. Keeps the same object when nothing needs
-/// dropping so it doesn't trigger an extra reactive update.
+/// Prunes hidden-window minimums to prevent stale reuse and unbounded growth, retaining object
+/// identity when unchanged.
 export function pruneInvisiblePaneMinimumHeights(
   heights: Record<string, number>,
   visibleWindows: ReadonlySet<string>,
@@ -160,10 +151,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
     },
     enabled: () => tabsReorderable(),
   });
-  // Drop the optimistic order whenever the authoritative lane/order changes. This also catches a
-  // reorder committed by the sidebar roster, keeping the two surfaces synchronized without a lane
-  // switch. The lane id is part of the comparison so a same-shaped order in another lane still
-  // tears down a drag against the old lane.
+  // Discard optimistic order when lane identity or backend order changes, including edits from
+  // another surface.
   let lastBackendLaneId: number | null | undefined;
   let lastBackendOrder: string | undefined;
   createEffect(() => {
@@ -274,13 +263,8 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
       const target = byWindow.get(window);
       return target ? [target] : [];
     });
-    // `warmWindows` is bookkeeping maintained by a createEffect, which can lag one tick behind
-    // the synchronous `visibleTargets()` memo it reads (e.g. right after a layout toggle or a
-    // picker selection change). A window counted in "N panes" and given a CSS grid placement
-    // must never end up with no mounted <TerminalPane> behind it — that's an empty, borderless
-    // grid cell the operator sees as a blank pane. Union in anything currently visible that the
-    // warm cache hasn't caught up to yet, so the render is always a strict superset of what's
-    // selected.
+    // Union synchronous visible targets into the warm cache because its effect can lag, leaving
+    // selected grid cells without mounted panes.
     const mountedWindows = new Set(warm.map((target) => target.window));
     const missing = visibleTargets().filter((target) => !mountedWindows.has(target.window));
     return missing.length ? [...warm, ...missing] : warm;
@@ -401,7 +385,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             </div>
           </div>
         </Show>
-        {/* Scrollable Tab Strip Container with Edge Masks and Overflow Controls */}
+
         <div class={`relative min-w-0 flex-1 items-center ${multitasking() ? "hidden" : "flex"}`}>
           <Show when={canScrollLeft()}>
             <div class="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-16 items-center bg-gradient-to-r from-surface from-40% via-surface/70 to-transparent pl-0.5">
@@ -725,7 +709,7 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
               const closing = createMemo(() => isTargetClosing(target));
               const paneSpan = createMemo(() => props.workspace.multitaskSpans()[target.window] ?? { columns: 1, rows: 1 });
               // Only worth calling out the active pane when there's more than one on screen to
-              // tell apart — a lone focused pane is already unambiguous.
+              // tell apart - a lone focused pane is already unambiguous.
               const isActivePane = createMemo(() => (
                 visible() && !closing() && effectiveLayout() !== "focused" && activeWindow() === target.window
               ));

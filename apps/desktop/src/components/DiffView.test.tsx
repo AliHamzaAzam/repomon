@@ -7,10 +7,7 @@ afterEach(() => {
   cleanup();
 });
 
-// Fixtures below are real `git diff HEAD` output captured from a scratch repo (same approach as
-// GitExplorerPanel.test.tsx's parseStatFiles fixtures) rather than hand-typed guesses, since
-// git's exact spacing/ordering around renames, binaries, and hunk headings is easy to get wrong
-// by hand.
+// Use actual git output to preserve rename, binary, and hunk formatting contracts.
 
 const MODIFY_PATCH = `diff --git a/a.txt b/a.txt
 index 83db48f..e0c9b5e 100644
@@ -216,7 +213,7 @@ describe("DiffView renderer", () => {
 
     expect(screen.getByText("created.txt")).toBeInTheDocument();
     expect(screen.getByText("multi.txt")).toBeInTheDocument();
-    // Collapsed: hunk content isn't in the DOM yet.
+
     expect(screen.queryByText("l15")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { expanded: false }).length).toBeGreaterThan(0);
   });
@@ -289,7 +286,7 @@ describe("DiffView renderer", () => {
     expect(findFileFirstChangedLine(files[0])).toBe(2);
 
     const addFiles = parseDiff(ADD_PATCH);
-    // In ADD_PATCH: line 1 is add ("+new content")
+
     expect(findFileFirstChangedLine(addFiles[0])).toBe(1);
   });
 
@@ -326,7 +323,6 @@ describe("DiffView renderer", () => {
       />
     ));
 
-    // The line 4 button corresponding to added line "+line4"
     const lineBtn = screen.getByRole("button", { name: "Open line 4 in editor" });
     fireEvent.click(lineBtn);
     expect(targetPath).toBe("a.txt");

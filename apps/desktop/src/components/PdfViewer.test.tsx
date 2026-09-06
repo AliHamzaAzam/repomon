@@ -22,11 +22,7 @@ vi.mock("pdfjs-dist", () => ({
 import PdfViewer from "./PdfViewer";
 import { resetWorktreeAssetsAllowedCacheForTests } from "../ipc/assets";
 
-// -- Fake pdf.js surface ----------------------------------------------------------------------
-//
-// A minimal stand-in for pdf.js's document/page objects: three uniform 600x800 pages, each with
-// one text item. Page 1 and page 3 both contain the word "needle" so find-in-page has more than
-// one hit to cycle through.
+// Use uniform fake pages with multiple matching text items so search can cycle between hits.
 
 const PAGE_WIDTH = 600;
 const PAGE_HEIGHT = 800;
@@ -93,8 +89,6 @@ function queueLoadingTasks(count: number) {
   });
   return tasks;
 }
-
-// -- IntersectionObserver / ResizeObserver mocks -----------------------------------------------
 
 class IntersectionObserverMock {
   static instances: IntersectionObserverMock[] = [];

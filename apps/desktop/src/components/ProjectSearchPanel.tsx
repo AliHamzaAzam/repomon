@@ -90,7 +90,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
   }
 
   createEffect(() => {
-    // Watch all search params to re-trigger search
+
     const q = query();
     void regex();
     void caseSensitive();
@@ -142,9 +142,9 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
 
   return (
     <div class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-surface">
-      {/* Search Input Controls */}
+
       <div class="flex flex-col gap-1.5 border-b border-line p-2">
-        {/* Find row */}
+
         <div class="flex items-center gap-1">
           <div class="relative flex min-w-0 flex-1 items-center">
             <IconSearch size={13} class="pointer-events-none absolute left-2 text-muted" />
@@ -170,7 +170,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
             </Show>
           </div>
 
-          {/* Option toggles */}
           <div class="flex shrink-0 items-center gap-0.5 rounded border border-line bg-background p-0.5">
             <button
               type="button"
@@ -203,7 +202,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
           </div>
         </div>
 
-        {/* Toggles for Replace and Glob */}
         <div class="flex items-center justify-between px-0.5 text-[10px] text-muted">
           <button
             type="button"
@@ -229,7 +227,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
           </button>
         </div>
 
-        {/* Replace row */}
         <Show when={showReplace()}>
           <div class="flex flex-col gap-1 pt-1">
             <div class="relative flex items-center">
@@ -265,7 +262,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
           </div>
         </Show>
 
-        {/* Glob filter row */}
         <Show when={showGlob()}>
           <div class="pt-1">
             <input
@@ -280,7 +276,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
         </Show>
       </div>
 
-      {/* Summary status bar */}
       <div class="flex items-center justify-between border-b border-line bg-surface/70 px-3 py-1 text-[11px] text-muted">
         <Show
           when={searching()}
@@ -309,14 +304,12 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
         </Show>
       </div>
 
-      {/* Error message */}
       <Show when={searchError()}>
         <div class="border-b border-fault/30 bg-fault/10 p-2 text-xs text-fault">
           {searchError()}
         </div>
       </Show>
 
-      {/* Results Tree View */}
       <div class="flex-1 overflow-y-auto p-1 text-xs outline-none">
         <Show
           when={groups().length > 0}
@@ -338,7 +331,7 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
 
               return (
                 <div class="mb-1">
-                  {/* File group header */}
+
                   <button
                     type="button"
                     class="focus-ring flex w-full items-center justify-between rounded px-1.5 py-1 text-left font-medium text-foreground hover:bg-raised/60"
@@ -369,7 +362,6 @@ export default function ProjectSearchPanel(props: ProjectSearchPanelProps) {
                     </span>
                   </button>
 
-                  {/* Hits list */}
                   <Show when={!isCollapsed()}>
                     <div class="flex flex-col pl-4">
                       <For each={group.hits}>

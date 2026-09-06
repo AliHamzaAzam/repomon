@@ -29,13 +29,6 @@ export function isMacPlatform(platformOverride?: string): boolean {
 const TRAILING_PUNCTUATION_REGEX = /[.,:;!?'"`\)\]}>]+$/;
 const LEADING_PUNCTUATION_REGEX = /^[('"`<\[{]+/;
 
-// Matches candidate path tokens in a line:
-// Candidates can start with:
-// - Windows drive: [a-zA-Z]:[/\\]
-// - Absolute Unix path: /
-// - Relative with dot: ./{1,2}[/\\]
-// - Relative path: [\w.-]+[/\\]...
-// - Bare file with line:col: [\w.-]+\.[a-zA-Z0-9_-]+:\d+
 const CANDIDATE_TOKEN_REGEX = /(?:-->\s*|at\s+(?:[a-zA-Z0-9_$.<>]+\s+\()?)?([a-zA-Z]:[\\/][^\s"'`<>()[\]]+|(?:\.{1,2}[\\/]|[\\/]|[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*[\\/])[^\s"'`<>()[\]]+|[a-zA-Z0-9_~-][a-zA-Z0-9_.~-]*\.[a-zA-Z0-9_-]+:\d+(?::\d+)?(?:[^\s"'`<>()[\]]*))/g;
 
 export function findPathRefs(line: string, options?: FindPathRefsOptions): PathRefMatch[] {
@@ -59,7 +52,6 @@ export function findPathRefs(line: string, options?: FindPathRefsOptions): PathR
       continue;
     }
 
-    // Strip leading punctuation if any
     let cleaned = candidateGroup;
     let leadingTrim = 0;
     const leadMatch = cleaned.match(LEADING_PUNCTUATION_REGEX);
@@ -68,7 +60,6 @@ export function findPathRefs(line: string, options?: FindPathRefsOptions): PathR
       cleaned = cleaned.slice(leadingTrim);
     }
 
-    // Strip trailing punctuation
     const trailMatch = cleaned.match(TRAILING_PUNCTUATION_REGEX);
     if (trailMatch) {
       cleaned = cleaned.slice(0, cleaned.length - trailMatch[0].length);
@@ -76,7 +67,6 @@ export function findPathRefs(line: string, options?: FindPathRefsOptions): PathR
 
     if (!cleaned) continue;
 
-    // Parse line and column suffixes
     let filePath = cleaned;
     let lineNumber: number | undefined;
     let columnNumber: number | undefined;

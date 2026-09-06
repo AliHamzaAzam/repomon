@@ -151,12 +151,12 @@ describe("TerminalWorkspace multitasking: every selected pane is actually mounte
     });
 
     const expectedCount = workspace.multitaskTargets().length;
-    expect(expectedCount).toBe(4); // all four agents fit under the new fallback cap of 6
+    expect(expectedCount).toBe(4);
 
     // The header text ("N LANES · N PANES") must match what's actually selected...
     expect(screen.getByText(new RegExp(`${expectedCount} panes`))).toBeTruthy();
 
-    // ...and every one of those selected panes must have a real, mounted TerminalPane header —
+    // ...and every one of those selected panes must have a real, mounted TerminalPane header -
     // not an empty grid cell with no border accent and no content (the reported bug).
     await settle(() => {
       const visible = visiblePaneWrapperDivs();
@@ -165,8 +165,7 @@ describe("TerminalWorkspace multitasking: every selected pane is actually mounte
         const wrapper = visible.find((el) => el.querySelector("section")?.getAttribute("aria-label")?.includes(target.label));
         expect(wrapper, `expected a mounted pane for ${target.label}`).toBeTruthy();
         expect(wrapper!.querySelector("section")).not.toBeNull();
-        // Every mounted multitasking pane must carry its accent border — the visual tell the
-        // operator used to distinguish "a real pane" from "an empty grid cell".
+
         expect(wrapper!.classList.contains("multitask-pane")).toBe(true);
       }
     });
@@ -231,7 +230,7 @@ describe("TerminalWorkspace multitasking: every selected pane is actually mounte
 
     await settle(() => expect(visiblePaneWrapperDivs().length).toBeGreaterThan(0));
 
-    // Jump the selection straight to a lane the view has never warmed before (laneC only) —
+    // Jump the selection straight to a lane the view has never warmed before (laneC only) -
     // exercising the exact "warm cache hasn't caught up yet" gap bug 1 targets.
     workspace.setMultitaskPaneSelection(["lane-30-1"]);
 
@@ -261,7 +260,7 @@ describe("TerminalWorkspace: active pane highlight (bug 4)", () => {
       const active = visible.filter((el) => el.classList.contains("is-active-pane"));
       expect(active).toHaveLength(1);
       expect(active[0].querySelector("section")?.getAttribute("aria-label")).toContain("claude-code");
-      // Ring classes should only land on the active pane.
+
       const inactive = visible.filter((el) => !el.classList.contains("is-active-pane"));
       expect(inactive).toHaveLength(2);
       for (const el of inactive) {
@@ -291,12 +290,8 @@ describe("TerminalWorkspace: active pane highlight (bug 4)", () => {
   });
 });
 
-/// jsdom performs no real layout: `getBoundingClientRect()` reports zero for every element
-/// regardless of CSS. To honestly test the geometric claims in the bug report ("composer has
-/// nonzero visible height", "no two panes overlap") we model exactly what the *fixed* CSS
-/// guarantees — a three-column grid where every row grows to the measured 24-row xterm screen
-/// height plus its header — and stub each element's rect from that model. This proves the
-/// arithmetic behind the fix is sound; it does not substitute for the real-browser evidence.
+/// These stubbed rectangles check the layout model’s arithmetic; jsdom supplies no geometry, so
+/// they do not replace browser validation.
 describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3)", () => {
   const ROW_MIN_PX = 424; // 24 × 16.5px rendered rows + the 28px pane header.
   const HEADER_PX = 28; // h-7, TerminalPane.tsx's header bar.
@@ -341,7 +336,7 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
     });
 
     // Bug 3: the composer's container must have real, positive, in-bounds height under the
-    // measured terminal-row floor — not clipped by an under-sized grid row.
+    // measured terminal-row floor - not clipped by an under-sized grid row.
     for (const pane of panes) {
       const host = pane.querySelector<HTMLElement>(".terminal-host")!;
       const paneRect = pane.getBoundingClientRect();
@@ -353,7 +348,6 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
       expect(hostRect.right).toBeLessThanOrEqual(paneRect.right);
     }
 
-    // Bug 2: no two panes' own rects may overlap.
     for (let i = 0; i < rects.length; i += 1) {
       for (let j = i + 1; j < rects.length; j += 1) {
         const a = rects[i];

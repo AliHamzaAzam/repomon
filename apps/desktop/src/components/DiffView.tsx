@@ -47,14 +47,8 @@ const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 const DIFF_GIT_RE = /^diff --git a\/(.*) b\/(.*)$/;
 const BINARY_FILES_RE = /^Binary files (.+) and (.+) differ$/;
 
-/// Parses a raw unified diff (as returned by `lane.diff`'s `patch` field, i.e. `git diff HEAD` -
-/// see `diff_patch()` in crates/repomon-core/src/git/diff.rs) into structured per-file records.
-///
-/// This is a best-effort line-by-line scanner, not a strict grammar: `patch` is capped by
-/// character count server-side (`cap_chars`, not line- or hunk-aware), so the tail of a large
-/// diff can be cut mid-line or mid-hunk. The parser never throws on malformed input - a line it
-/// doesn't recognize inside a hunk is dropped, and a chopped-off final hunk simply renders
-/// whatever lines it captured before the cut.
+/// Parses unified diffs best-effort, retaining complete lines from malformed or character-capped
+/// final hunks.
 export function parseDiff(raw: string): DiffFile[] {
   const files: DiffFile[] = [];
   let current: DiffFile | null = null;
@@ -441,18 +435,13 @@ export interface DiffViewProps {
   /// opening the diff view without a specific file in mind.
   focusPath?: string;
   onClose?: () => void;
-  /// Item 6: replaces the default "Diff" title bar with custom content — GitExplorerPanel's
-  /// commit-detail header (author, relative+absolute date, full message body, close button) for
-  /// the commit view, so that view owns its own title/close chrome instead of stacking a second
-  /// header row above this one's default.
+  /// Replaces the default diff header so commit details own a single title and close control.
   header?: JSX.Element;
-  /// F4: Opens the file in the center editor at the given line number.
+  /// Opens the file in the center editor at the given line number.
   onOpenInEditor?: (path: string, line?: number) => void;
 }
 
-/// Lightweight unified-diff viewer for the Git explorer's right rail. Pure presentation: the
-/// daemon computes the diff (`lane.diff` with `include_patch: true`), this only parses and
-/// renders the text it's given - no diffing library, per C4's brief.
+/// Renders the daemon-provided unified diff in the Git explorer rail.
 export default function DiffView(props: DiffViewProps) {
   const files = createMemo(() => parseDiff(props.patch));
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());

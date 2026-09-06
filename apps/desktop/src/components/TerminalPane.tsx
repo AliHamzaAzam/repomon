@@ -85,15 +85,13 @@ export function devicePixelAlignedInsets(
   };
 }
 
-// A warm terminal can become visible before CSS Grid has assigned its cell geometry. Live tmux
-// evidence showed that some panes never received the fit attempted on that first frame; keep
-// sampling for roughly half a second at 60 Hz so the first measurable frame cannot be missed,
-// while still bounding work if the pane stays collapsed.
+// Retry until CSS assigns visible cell geometry, with a frame limit for panes that remain
+// collapsed.
 const VISIBLE_LAYOUT_RETRY_FRAMES = 30;
 
 function terminalTheme(element: HTMLElement, appearance?: TerminalAppearance) {
   // The theme vars hold modern color syntax (space-separated hsl()) that xterm's color
-  // parser rejects — it then silently falls back to its defaults (pure-black background,
+  // parser rejects - it then silently falls back to its defaults (pure-black background,
   // visibly darker than the app's). Resolve each var through the browser to plain rgb().
   const resolve = (value: string) => {
     const probe = document.createElement("span");
@@ -172,10 +170,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let syncInFlight = false;
   let pendingSync = false;
   let retryWatch: (() => void) | undefined;
-  // Bumped on every fresh watch-open attempt (mount, auto-retry, manual Retry click). A stale
-  // attempt checks this before touching `stopWatch` or component state, so an auto-retry that was
-  // sleeping through its backoff delay when a manual Retry fired can't win a race and orphan a
-  // second, unstopped watch subscription.
+  // Generation checks prevent a delayed retry from replacing or orphaning a newer watch.
   let watchRun = 0;
   const [transportError, setTransportError] = createSignal<string | null>(null);
   const [retrying, setRetrying] = createSignal(false);
@@ -224,14 +219,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
     const chromeHeight = Math.max(0, hostRect.top - paneRect.top)
       + Math.max(0, paneRect.bottom - hostRect.bottom);
 
-    // The floor must come from the renderer's per-row cell height, never from how many rows the
-    // terminal happens to be showing right now: reporting `terminal.rows * cellHeight` is what
-    // fed Multitasking's row-height ratchet (a pane transiently rendered with a stale, tall grid
-    // reported a large minimum, which grew every row, which let every pane fit more rows, which
-    // raised the reported minimum again, see the brief this fix implements). `_core` reaches
-    // xterm's private render internals, not its public API, so this path is guarded with optional
-    // chaining and a typed cast and falls back to averaging the rendered screen height over the
-    // current row count when that private shape is unreachable.
+    // Derive the floor from cell height, not the current grid, to avoid feedback-driven row growth;
+    // guard private xterm metrics and fall back to measured screen height per row.
     const core = (terminal as unknown as {
       _core?: { _renderService?: { dimensions?: { css?: { cell?: { height?: number } } } } };
     })._core;
@@ -516,10 +505,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
       });
       terminal.onData((data) => input?.push(data));
 
-      // The last grid the backend actually confirmed (the watch ack, or an arbitrated fit). xterm
-      // must never be left sitting on a size the pane does not share: a column mismatch moves where
-      // lines wrap, so an agent's relative-cursor redraw (cursor-up, carriage return, erase-line)
-      // lands in the wrong columns and weaves fresh text through stale text.
+      // Use the backend-confirmed grid because width mismatches corrupt cursor-relative repaint
+      // sequences.
       let confirmedGrid: { cols: number; rows: number } | null = null;
       const bufferedWrites: (string | Uint8Array)[] = [];
 
@@ -545,14 +532,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
         }
       }
 
-      // Multitasking's row-height floor is now derived from cell metrics (see
-      // `reportMinimumHeight`), not from whatever grid gets applied here, so an oversized fit
-      // answer must never leak into the layout. When arbitration is won by another viewer (the
-      // TUI, a second desktop) and the daemon hands back a grid taller than this pane's cell
-      // actually has room for, that grid is still applied to xterm (a column/row mismatch would
-      // otherwise corrupt cursor-relative redraws), but the extra rows simply clip: the pane's
-      // `overflow-hidden` root already bounds the canvas to its box, and `followTailIfNeeded()`
-      // keeps the live prompt inside that visible clip instead of letting it scroll out of view.
+      // Apply the authoritative grid even when another viewer owns a taller size; clip locally and
+      // follow the prompt instead of changing the layout floor.
       function applyGrid(cols?: number | null, rows?: number | null) {
         if (disposed || !terminal || !cols || !rows) return;
         alignTerminalHostToDevicePixels();
@@ -816,15 +797,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
       };
       window.addEventListener("repomon:terminal-appearance-changed", onAppearanceChanged);
 
-      // A freshly spawned agent's pane can still be settling (boot-screen animation, first
-      // daemon capture) when the watch opens; a transient failure here does not mean the pane is
-      // actually broken. Retry a couple of times with backoff before surfacing the error banner.
-      //
-      // Single entry point for every open attempt (initial mount, auto-retry, manual Retry
-      // click), guarded by `watchRun`: a stale attempt — one whose backoff delay was still
-      // sleeping when a newer attempt started — checks its captured `run` before touching
-      // `stopWatch` or component state, so two attempts can never both "win" and leave one
-      // watch subscription orphaned without ever being stopped.
+      // Retry transient boot failures, using a generation guard so stale attempts cannot replace or
+      // orphan the current watch.
       const openWatch = async () => {
         const run = ++watchRun;
         const previousStop = stopWatch;
@@ -946,14 +920,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
       style={{ "background-color": paneBg() || undefined }}
       aria-label={props.label}
     >
-      {/* `overflow-hidden` here (in addition to the section's own) gives xterm's canvas a clip
-          boundary at exactly `top-7` — the header's own edge — instead of only the section's
-          full-pane bounds. The section-level clip alone still lets an oversized/mis-sized canvas
-          (a resize race during a burst of live output, or a WebGL layer-promotion quirk) paint
-          upward into the header's reserved strip, since that's still "inside" the section as far
-          as that clip is concerned. `isolate` on the section above pins the header's z-10 (and
-          this container's implicit stacking) to a stacking context scoped to this pane, so it
-          can't be beaten by paint-order quirks from a sibling pane's own canvas either. */}
+      {/* Clip the canvas below the header and isolate pane stacking so oversized or promoted canvases
+ * cannot paint over this or another pane’s controls. */}
       <div
         ref={container}
         class={`terminal-host absolute inset-x-2 bottom-0 top-7 overflow-hidden ${view() === "live" ? "" : "invisible pointer-events-none"}`}

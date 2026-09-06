@@ -5,14 +5,8 @@ import type { FleetStore } from "../stores/fleet";
 import { createEditorStore, MIN_TREE_WIDTH_PX } from "../stores/editor";
 import EditorWorkspace from "./EditorWorkspace";
 
-// jsdom has no layout engine, so element.scrollWidth/clientWidth/getBoundingClientRect
-// are always zero here - they can't tell us whether the header actually overflows.
-// Instead we assert the structural contract that keeps it from overflowing:
-//   - the icon action group never shrinks below its buttons' tap targets (shrink-0)
-//   - the mode switcher is the element allowed to shrink (min-w-0)
-//   - the header can wrap onto a second row rather than clip (flex-wrap)
-//   - at width dips below the threshold, the switcher drops its text labels but
-//     every action stays present and reachable via its accessible name
+// jsdom cannot measure overflow, so verify wrapping, shrinkable labels, fixed action targets, and
+// accessible names structurally.
 
 vi.mock("../ipc/rpc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../ipc/rpc")>();

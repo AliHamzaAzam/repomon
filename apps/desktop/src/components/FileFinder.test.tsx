@@ -170,9 +170,9 @@ describe("FileFinder component", () => {
     });
 
     const input = screen.getByPlaceholderText("Search files by name...");
-    // Press ArrowDown to select file_b.txt
+
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    // Press Enter to open file_b.txt
+
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onClose).toHaveBeenCalled();

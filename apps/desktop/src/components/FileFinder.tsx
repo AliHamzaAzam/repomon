@@ -123,7 +123,6 @@ export default function FileFinder(props: FileFinderProps) {
     return filterAndRankPaths(paths(), query(), 50);
   });
 
-  // Reset selected index when matches change
   createEffect(() => {
     matches();
     setSelectedIndex(0);
@@ -210,7 +209,7 @@ export default function FileFinder(props: FileFinderProps) {
           class="flex max-h-[70vh] w-[600px] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
           onKeyDown={handleKeyDown}
         >
-          {/* Header input bar */}
+
           <div class="relative flex items-center border-b border-line px-3 py-2.5">
             <Show
               when={loading()}
@@ -255,7 +254,6 @@ export default function FileFinder(props: FileFinderProps) {
             </div>
           </div>
 
-          {/* Results list */}
           <div
             ref={listRef}
             id={resultsId}
@@ -332,7 +330,6 @@ export default function FileFinder(props: FileFinderProps) {
             </Show>
           </div>
 
-          {/* Footer status */}
           <div class="flex items-center justify-between border-t border-line bg-surface/80 px-3 py-1 text-[11px] text-muted">
             <span>
               {matches().length} of {paths().length} files

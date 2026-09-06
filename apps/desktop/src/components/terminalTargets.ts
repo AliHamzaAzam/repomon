@@ -36,13 +36,8 @@ export function dedupe(targets: PaneTarget[]): PaneTarget[] {
   });
 }
 
-/// Pick the panes to show in a multi-pane layout (split = 2, grid = 6), in a stable order.
-///
-/// The order is always the incoming (fleet) order — never "selected lane first". Selection has
-/// to move focus and highlight only: deriving the arrangement from the selection made every grid
-/// cell jump around each time the user clicked an agent, which made split/grid view unusable.
-/// The one concession: when the newly selected pane is not visible at all (beyond the cap), it
-/// swaps into the last slot so focusing an agent never silently shows you panes that exclude it.
+/// Keeps visible panes in fleet order, replacing only the final slot when necessary to include the
+/// selected pane.
 export function stableVisibleTargets(
   all: PaneTarget[],
   activeWindow: string | null,
@@ -57,10 +52,7 @@ export function stableVisibleTargets(
   return stable;
 }
 
-/// Keep visible windows hot, retain recently viewed windows, then proactively warm unvisited
-/// live windows up to `capacity`. Visible windows are ordered first so CSS can place them in the
-/// active layout while the remaining panes stay mounted off-layout with their xterm state and
-/// byte watches intact.
+/// Keeps visible and recent windows mounted, then warms unvisited live windows within capacity.
 export function warmTargetWindows(
   previous: string[],
   visible: PaneTarget[],
@@ -78,12 +70,8 @@ export function warmTargetWindows(
   return next.slice(0, Math.max(0, capacity));
 }
 
-/// Reconcile a freshly-built target list against a per-window cache, reusing the previous
-/// object reference for any window that still exists. Solid's `<For>` is reference-keyed, so
-/// returning stable references keeps each terminal pane mounted across the 1s fleet poll
-/// instead of tearing it down and rebuilding it (which would restart the byte watch every
-/// second). Mutable fields are copied onto the retained object so a window's pane survives a
-/// label change; windows that disappear are pruned from the cache.
+/// Reuses cached per-window object references so Solid’s reference-keyed For retains terminal
+/// mounts across polls and label changes.
 export function stabilizeTargets(
   cache: Map<string, PaneTarget>,
   fresh: PaneTarget[],

@@ -75,7 +75,6 @@ function basename(path: string): string {
   return path.split("/").pop() || path;
 }
 
-
 function getFileIcon(path: string, kind?: string): Component<IconProps> {
   if (kind === "image") return IconFileImage;
   if (kind === "binary") return IconFileBinary;
@@ -205,7 +204,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   const [pdfState, setPdfState] = createSignal<PdfViewerState | null>(null);
   const [imageState, setImageState] = createSignal<ImageViewerState | null>(null);
 
-  // Compute line and column from doc length and head
   function updateCursorPos(head: number) {
     const file = activeFile();
     if (!file) {
@@ -263,16 +261,12 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
   const [treeMode, setTreeMode] = createSignal<"files" | "search">("files");
 
-  // Below this tree column width, the header's mode-switcher labels ("Files" /
-  // "Search") collapse to icon-only so the switcher and the icon button group
-  // beside it both fit on one row without clipping. Reuses the resize signal
-  // the column already tracks rather than a container query.
+  // Collapse tree mode labels below this width so the header controls fit without clipping.
   const TREE_HEADER_LABEL_MIN_WIDTH_PX = 300;
   const compactTreeHeader = createMemo(
     () => props.editor.treeColumnWidth() < TREE_HEADER_LABEL_MIN_WIDTH_PX
   );
 
-  // Context Menu State
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
     y: number;
@@ -302,7 +296,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     });
   });
 
-  // Inline Create State
   const [inlineCreate, setInlineCreate] = createSignal<{
     parentDir: string;
     isDir: boolean;
@@ -310,7 +303,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   } | null>(null);
   const [inlineCreateInFlight, setInlineCreateInFlight] = createSignal(false);
 
-  // Inline Rename State
   const [inlineRename, setInlineRename] = createSignal<{
     path: string;
     isDir: boolean;
@@ -318,13 +310,11 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
   } | null>(null);
   const [inlineRenameInFlight, setInlineRenameInFlight] = createSignal(false);
 
-  // Delete Target State
   const [deleteTarget, setDeleteTarget] = createSignal<{
     path: string;
     isDir: boolean;
   } | null>(null);
 
-  // Replace in active file
   const [replaceRequest, setReplaceRequest] = createSignal<CodeEditorReplaceRequest | null>(null);
   let replaceToken = 0;
 
@@ -492,7 +482,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     void navigator.clipboard.writeText(path);
   }
 
-  // Detect indent unit text
   const currentIndentUnit = createMemo(() => {
     const f = activeFile();
     if (!f) return "Spaces: 2";
@@ -568,7 +557,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
       if (item && item.isDir && expandedDirs().has(item.path)) {
         props.editor.collapseDir(item.path);
       } else {
-        // Move to parent
+
         const parentPath = item?.path.split("/").slice(0, -1).join("/");
         const parentIdx = items.findIndex((i) => i.path === parentPath);
         if (parentIdx >= 0) setFocusedTreeIndex(parentIdx);
@@ -578,15 +567,14 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
 
   return (
     <div class="flex h-full w-full select-none overflow-hidden bg-background">
-      {/* Resizable Tree Column */}
+
       <div
         class="flex flex-col border-r border-line bg-surface"
         style={{ width: `${props.editor.treeColumnWidth()}px`, "min-width": "180px" }}
       >
-        {/* Tree Column Header */}
+
         <div class="flex min-h-9 flex-wrap items-center justify-between gap-1 border-b border-line px-2 py-1">
-          {/* Mode Switcher: Files vs Search. Shrinks first, and drops its
-              labels to icon-only, so the icon button group never clips. */}
+          {/* Let mode labels shrink before fixed-size action targets. */}
           <div class="flex min-w-0 items-center gap-0.5 rounded border border-line bg-background p-0.5">
             <button
               type="button"
@@ -622,8 +610,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             </button>
           </div>
 
-          {/* Icon actions never shrink below their tap target; the row wraps
-              onto a second line rather than clipping this group. */}
+          {/* Wrap the actions rather than shrinking their tap targets. */}
           <div class="flex shrink-0 items-center gap-0.5">
             <Show when={treeMode() === "files"}>
               <button
@@ -687,7 +674,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             />
           }
         >
-          {/* Filter input */}
+
           <div class="border-b border-line p-2">
             <div class="relative flex items-center">
               <IconSearch size={12} class="pointer-events-none absolute left-2 text-muted" />
@@ -710,13 +697,12 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
             </div>
           </div>
 
-          {/* Tree List View */}
           <div
             class="flex-1 overflow-y-auto p-1 outline-none"
             tabIndex={0}
             onKeyDown={handleTreeKeyDown}
           >
-            {/* Root level inline create */}
+
             <Show when={inlineCreate()?.parentDir === ""}>
               <div
                 class="flex w-full items-center gap-1.5 px-1.5 py-0.5"
@@ -844,7 +830,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         <span class="truncate font-mono text-[11px]">{item.name}</span>
                       </button>
 
-                      {/* Row kebab menu trigger */}
                       <button
                         type="button"
                         class="focus-ring mr-1 flex size-5 shrink-0 items-center justify-center rounded text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-raised hover:text-foreground"
@@ -871,7 +856,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
               }}
             </For>
 
-            {/* Nested inline create */}
             <Show when={inlineCreate() && inlineCreate()?.parentDir !== ""}>
               <div
                 class="flex w-full items-center gap-1.5 px-1.5 py-0.5"
@@ -905,7 +889,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         </Show>
       </div>
 
-      {/* Draggable Divider */}
       <div
         class={`relative flex w-1 cursor-col-resize items-center justify-center transition-colors hover:bg-accent/40 ${
           isResizing() ? "bg-accent" : "bg-transparent"
@@ -914,9 +897,8 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         aria-hidden="true"
       />
 
-      {/* Right Column: Tab strip, Editor view, and Status line */}
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
-        {/* Tab strip */}
+
         <div class="flex h-9 shrink-0 items-center overflow-x-auto border-b border-line bg-surface/90 px-1">
           <For each={openFiles()}>
             {(file) => {
@@ -963,7 +945,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
           </For>
         </div>
 
-        {/* Center Editor Container */}
         <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
           <Show
             when={activeFile()}
@@ -1014,11 +995,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                   >
                     <Switch>
                       <Match when={file().kind === "image"}>
-                        {/* Same row-direction container as PdfViewer below - ImageViewer claims
-                            the full tab itself (h-full w-full min-h-0 min-w-0) for the same
-                            reason: a lone flex child only gets its intrinsic content width
-                            otherwise, which was the v1 bug (a narrow image column with a dead
-                            pane beside it). */}
+                        {/* The lone viewer must claim the row’s full width instead of its intrinsic content width. */}
                         <ImageViewer
                           worktreeRoot={lane()?.worktree.path ?? ""}
                           laneId={lane()?.id ?? 0}
@@ -1031,12 +1008,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                         <BinaryViewer path={file().path} size={file().size} />
                       </Match>
                       <Match when={file().kind === "pdf"}>
-                        {/* `editorContainerRef` above lays its children out in a row (it also
-                            hosts the markdown split view further down), so a lone child only
-                            gets its intrinsic content width unless it claims the full row itself
-                            - PdfViewer's root does that (h-full w-full), which is the fix for the
-                            v1 bug where the PDF iframe rendered in a narrow, content-sized column
-                            instead of filling the tab. */}
+                        {/* The PDF viewer must claim the full row width, which is also shared with split previews. */}
                         <PdfViewer
                           worktreeRoot={lane()?.worktree.path ?? ""}
                           path={file().path}
@@ -1112,13 +1084,12 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
           </Show>
         </div>
 
-        {/* Status Line */}
         <div class="flex min-h-6 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-line bg-surface/95 px-3 font-mono text-[11px] text-muted select-none">
           <Switch
             fallback={
               <>
           <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-            {/* Language override button */}
+
             <div class="relative">
               <button
                 type="button"
@@ -1271,7 +1242,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         </div>
       </div>
 
-      {/* Discard confirmation modal */}
       <Show when={closeConfirmPath()} keyed>
         {(path) => (
           <ConfirmDialog
@@ -1290,7 +1260,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         )}
       </Show>
 
-      {/* Context Menu floating popup */}
       <Show when={contextMenu()} keyed>
         {(menu) => (
           <>
@@ -1376,7 +1345,6 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
         )}
       </Show>
 
-      {/* Delete Confirmation Dialog */}
       <Show when={deleteTarget()} keyed>
         {(target) => (
           <ConfirmDialog

@@ -58,20 +58,14 @@ type FitMode = "width" | "page" | "custom";
 
 interface TextLayoutItem {
   str: string;
-  // All four fields are in "100%-zoom" CSS pixels - the viewport at scale 1 - so a page's layout
-  // is computed once per load and every zoom level is just that layout multiplied by the current
-  // scale (see PageViewport.transform: it scales linearly in `scale` for an unrotated,
-  // zero-offset viewport, which is the only kind this viewer ever asks pdf.js for).
+  // Store geometry at scale one so zoom multiplies a stable page layout.
   left: number;
   top: number;
   width: number;
   fontHeight: number;
 }
 
-// The subset of pdf.js's TextItem shape this file reads. Kept local (rather than importing
-// pdfjs-dist's own type) so the geometry helpers below have no dependency on pdf.js beyond the
-// document/page objects themselves - `content.items` also includes TextMarkedContent entries
-// with no `str`, which this shape happily types as `str: undefined` for the callers to skip.
+// Marked-content entries lack str and must be skipped when building text geometry.
 interface PdfTextItem {
   str?: string;
   transform: number[];
@@ -100,7 +94,6 @@ const VIRTUALIZE_MARGIN = "100% 0px 100% 0px";
 // calculations so a fit-width/fit-page page doesn't butt up against the pane edges.
 const PAGE_GUTTER = 32;
 
-
 function basename(path: string): string {
   return path.split("/").pop() || path;
 }
@@ -115,10 +108,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
-// pdf.js's own combine-transforms formula (viewport transform x item transform), reimplemented
-// locally so this file only depends on pdfjs-dist for document/page access - the text layer and
-// find-highlight geometry below are computed from plain data, which keeps them cheap to exercise
-// against a fake document in tests.
+// Compose viewport and text-item transforms using pdf.js’s matrix convention.
 function combineTransforms(m1: number[], m2: number[]): number[] {
   return [
     m1[0] * m2[0] + m1[2] * m2[1],
@@ -178,10 +168,7 @@ interface PdfPageSlotProps {
   matches: () => Array<PageMatch & { active: boolean }>;
 }
 
-// One page of the document. Owns its own visibility (via IntersectionObserver against the
-// scroll container) and only holds a live canvas + text layer while it is on screen or just off
-// it - everything else is a plain sized placeholder so scroll position and the scrollbar's length
-// stay correct regardless of how much of the document has actually been painted.
+// Keep offscreen pages as sized placeholders so virtualization preserves scroll geometry.
 function PdfPageSlot(props: PdfPageSlotProps): JSX.Element {
   let containerEl: HTMLDivElement | undefined;
   let canvasEl: HTMLCanvasElement | undefined;
@@ -344,11 +331,8 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
   const [status, setStatus] = createSignal<Status>("granting");
   const [errorMessage, setErrorMessage] = createSignal<string>("");
   const [numPages, setNumPages] = createSignal(0);
-  // `loadToken` is write-only reactive state - it exists purely so `pageNumbers` below can
-  // force a full remount of the page slots on a new document. The async-result guard checks
-  // compare against `loadGeneration`, a plain counter: reading a signal and then writing it
-  // back from within this same tracked effect (load() runs from createEffect's initial pass)
-  // would make the effect depend on its own write and re-trigger itself forever.
+  // Use a plain generation counter for async guards; reading and writing a tracked signal here
+  // would make loading retrigger itself.
   let loadGeneration = 0;
   const [loadToken, setLoadToken] = createSignal(0);
   const [scale, setScale] = createSignal(1);
@@ -718,7 +702,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
       class="flex h-full w-full min-h-0 min-w-0 flex-col bg-background select-none focus:outline-none"
       onKeyDown={onRootKeyDown}
     >
-      {/* Toolbar */}
+
       <div class="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface/95 px-3 py-1.5">
         <div class="flex min-w-0 max-w-full items-center gap-2 font-mono text-[11px] text-muted">
           <span class="min-w-0 max-w-[220px] truncate font-medium text-foreground" title={props.path}>{basename(props.path)}</span>
@@ -869,7 +853,6 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
         </button>
       </div>
 
-      {/* Page stack */}
       <div class="relative min-h-0 min-w-0 flex-1 overflow-hidden">
         <Show when={status() === "granting" || status() === "loading"}>
           <div class="flex h-full items-center justify-center overflow-auto p-4">

@@ -46,7 +46,6 @@ const TOO_LARGE_BYTES = 50 * 1024 * 1024;
 const STAGE_GUTTER = 32;
 const RESIZE_DEBOUNCE_MS = 100;
 
-
 function basename(path: string): string {
   return path.split("/").pop() || path;
 }
@@ -132,11 +131,8 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
     setStageSize({ width: stageEl.clientWidth, height: stageEl.clientHeight });
   }
 
-  // Binds fresh onload/onerror handlers straight onto the persistent <img> element rather than
-  // through JSX props: assigning `.src` supersedes any in-flight request for the previous src
-  // (the browser never fires load/error against an element for a resource it no longer points
-  // at), and closing over `token` here - captured at the moment this exact src was set - is what
-  // lets a handler tell whether it is still the current load when it eventually fires.
+  // Bind handlers for this load generation so stale asynchronous results cannot replace the current
+  // image.
   function bindImageHandlers(token: number, url: string) {
     const img = imgEl;
     if (!img) return;
@@ -361,7 +357,7 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
       class="flex h-full w-full min-h-0 min-w-0 flex-col bg-background select-none focus:outline-none"
       onKeyDown={onRootKeyDown}
     >
-      {/* Toolbar */}
+
       <div class="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface/95 px-3 py-1.5">
         <div class="flex min-w-0 max-w-full items-center gap-2 font-mono text-[11px] text-muted">
           <span class="min-w-0 max-w-[220px] truncate font-medium text-foreground" title={props.path}>{basename(props.path)}</span>
@@ -459,7 +455,6 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
         </button>
       </div>
 
-      {/* Stage */}
       <div class="relative min-h-0 min-w-0 flex-1 overflow-hidden">
         <Show when={status() === "granting" || status() === "loading"}>
           <div class="flex h-full items-center justify-center overflow-auto p-4">
@@ -483,10 +478,7 @@ export default function ImageViewer(props: ImageViewerProps): JSX.Element {
           </div>
         </Show>
 
-        {/* The image element stays mounted across every non-terminal status so its onload/onerror
-            handlers (bound imperatively in bindImageHandlers, not via JSX props - see the request
-            token guard there) can fire the loading -> loaded transition; it is only made visible
-            once loaded. */}
+        {/* Keep the image mounted during loading so its completion handlers can transition it to visible. */}
         <div
           ref={stageEl}
           data-testid="image-stage"

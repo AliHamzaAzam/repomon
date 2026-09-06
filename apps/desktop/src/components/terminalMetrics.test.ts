@@ -17,10 +17,7 @@ describe("multitaskRowFloor", () => {
     const cellHeight = 16.5;
     const floor = multitaskRowFloor({ chromeHeight, cellHeight });
 
-    // `multitaskRowFloor`'s input shape has no `rows` field at all, so it cannot see how many rows
-    // the terminal happens to be rendering. Calling it repeatedly for the same pane, whether it
-    // was just showing 5 rows or a stale 60-row grid, is guaranteed to keep returning the same
-    // floor: nothing about "how many rows are currently rendered" ever reaches this function.
+    // The same cell metrics must yield the same floor regardless of a pane’s rendered row count.
     for (let call = 0; call < 5; call += 1) {
       expect(multitaskRowFloor({ chromeHeight, cellHeight })).toBe(floor);
     }

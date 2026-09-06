@@ -370,7 +370,7 @@ describe("multitaskRowMinimumFromHeights", () => {
 
   it("drops a pane's contribution to the max once it leaves visibleTargets", () => {
     const heights = { "lane-10-1": 1000, "lane-10-2": 300 };
-    // Both panes visible: the tall one wins.
+
     expect(multitaskRowMinimumFromHeights(FALLBACK, heights, ["lane-10-1", "lane-10-2"])).toBe(1000);
     // lane-10-1 leaves the visible set (still present in `heights`, stale); its 1000px minimum
     // must no longer be able to elevate the row minimum.
