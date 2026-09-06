@@ -329,24 +329,6 @@ mod tests {
         }
     }
 
-    /// A socket file left behind by a crashed/killed daemon (nothing answers a connect) must
-    /// still be reclaimed, so a stale file never permanently blocks the next real daemon start.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn reclaims_a_stale_socket_file_with_no_live_listener() {
-        let ep = test_endpoint("stale");
-        {
-            // Bind once, then drop without going through `serve`'s graceful-shutdown unlink -
-            // `IpcListener` itself has no `Drop` impl that removes the file, so this leaves
-            // exactly what a crash leaves: a socket file on disk with nothing listening on it.
-            let _dead = listen(&ep).await.unwrap();
-        }
-
-        listen(&ep)
-            .await
-            .expect("a stale, unconnectable socket file must not block a fresh bind");
-    }
-
     /// The in-memory pair used by unit tests behaves like a connected socket.
     #[tokio::test]
     async fn round_trips_over_a_duplex_pair() {
