@@ -22,13 +22,13 @@ import WindowChromeHeader from "./WindowChrome";
 import Switch from "./controls/Switch";
 import {
   AgentIcon,
-  IconBrain,
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
   IconCommand,
   IconCpu,
   IconGitBranch,
+  IconSparkles,
   IconPlus,
   IconRadar,
   IconTerminal,
@@ -718,7 +718,7 @@ function DoneStep(props: {
           </p>
         </li>
         <li class="flex gap-3 rounded-lg border border-line bg-surface/50 p-3">
-          <span class="mt-0.5 shrink-0 text-signal"><IconBrain size={14} /></span>
+          <span class="mt-0.5 shrink-0 text-signal"><IconSparkles size={14} /></span>
           <p class="text-[11px] leading-relaxed text-muted">
             <span class="text-xs font-medium text-foreground">Start Repomind.</span>{" "}
             Its row sits at the top of the sidebar. Start it once and it keeps notes for every lane

@@ -1,7 +1,7 @@
 import { Show, onCleanup, onMount } from "solid-js";
 
 import { stateIndicator, type ControllerSummary } from "../stores/fleet";
-import { IconBrain, IconLayers, IconPlay, IconSparkles, IconStop } from "./icons";
+import { IconLayers, IconPlay, IconSparkles, IconStop } from "./icons";
 
 export interface RepomindRowProps {
   controller: ControllerSummary;
@@ -174,7 +174,7 @@ export default function RepomindRow(props: RepomindRowProps) {
         <span
           class={`flex size-3 shrink-0 items-center justify-center ${running() ? "text-signal" : "text-muted/60"}`}
         >
-          <IconBrain size={12} />
+          <IconSparkles size={12} />
         </span>
         <span
           class={`min-w-0 flex-1 truncate text-left text-xs ${

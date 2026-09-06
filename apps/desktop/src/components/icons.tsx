@@ -370,27 +370,6 @@ export function IconSparkles(props: IconProps): JSX.Element {
 
 /// The repomind home's mark: two mirrored lobes over a stem, drawn in the same single-stroke
 /// grammar as the rest of the set so it sits beside the lane icons without shouting.
-export function IconBrain(props: IconProps): JSX.Element {
-  const s = () => props.size ?? 14;
-  return (
-    <svg
-      width={s()}
-      height={s()}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width={props.strokeWidth ?? 1.75}
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      class={props.class}
-      aria-hidden="true"
-    >
-      <path d="M12 5.5a3 3 0 0 0-5.7-1.3A2.8 2.8 0 0 0 4 7a2.9 2.9 0 0 0 .6 1.8A3 3 0 0 0 5 14.4 3 3 0 0 0 9.6 18 2.6 2.6 0 0 0 12 19.5z" />
-      <path d="M12 5.5a3 3 0 0 1 5.7-1.3A2.8 2.8 0 0 1 20 7a2.9 2.9 0 0 1-.6 1.8A3 3 0 0 1 19 14.4 3 3 0 0 1 14.4 18 2.6 2.6 0 0 1 12 19.5z" />
-      <path d="M12 5.5v14" />
-    </svg>
-  );
-}
 
 export function IconCommand(props: IconProps): JSX.Element {
   const s = () => props.size ?? 13;
