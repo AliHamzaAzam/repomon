@@ -5202,9 +5202,17 @@ pub async fn dispatch(
             // lane after this one ended (the operator's Spawn, or a later Start) can leave the
             // record naming a dead window while an earlier session is still the live controller.
             let window = match lane_id {
-                Some(id) => crate::repomind::primary_window(ctx, id)
-                    .await
-                    .map_err(internal)?,
+                Some(id) => match crate::repomind::primary_window(ctx, id).await {
+                    Ok(window) => window,
+                    // A booted home is still readable before the session backend is installed.
+                    Err(repomon_core::Error::Io(error))
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        tracing::warn!(%error, "repomind status: session backend unavailable");
+                        None
+                    }
+                    Err(error) => return Err(internal(error)),
+                },
                 None => None,
             };
             let exists = {

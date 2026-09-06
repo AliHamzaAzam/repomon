@@ -84,7 +84,12 @@ async fn repomind_boot_regenerates_the_document_and_status_reports_it() {
     assert!(body.contains("## Fleet snapshot"), "{body}");
 
     let status = call(&mut stream, 2, "repomind.status", None).await;
-    let boot = &status.result.unwrap()["boot"];
+    let status_result = status
+        .result
+        .unwrap_or_else(|| panic!("repomind.status failed: {:?}", status.error));
+    assert_eq!(status_result["window"], Value::Null);
+    assert!(status_result["lane_id"].is_number(), "{status_result}");
+    let boot = &status_result["boot"];
     assert_eq!(boot["tokens_estimate"], result["tokens_estimate"]);
     assert_eq!(boot["trimmed"], json!([]));
     assert!(boot["generated_at"].is_string(), "{boot}");
@@ -114,7 +119,9 @@ async fn status_reports_no_boot_state_before_the_first_regeneration() {
     let mut stream = connect_retry(&sock).await;
 
     let status = call(&mut stream, 1, "repomind.status", None).await;
-    let result = status.result.unwrap();
+    let result = status
+        .result
+        .unwrap_or_else(|| panic!("repomind.status failed: {:?}", status.error));
     assert_eq!(result["exists"], json!(false));
     assert_eq!(result["boot"]["generated_at"], Value::Null);
     assert_eq!(result["boot"]["tokens_estimate"], json!(0));
@@ -166,4 +173,26 @@ async fn a_tiny_budget_trims_the_document_and_the_result_names_what_went() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
+}
+
+/// Run in a separate process so masking tmux cannot race other tests' environment lookups.
+#[cfg(unix)]
+#[test]
+fn booted_home_status_is_readable_without_tmux() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "repomind_boot_regenerates_the_document_and_status_reports_it",
+            "--nocapture",
+        ])
+        .env("REPOMON_TMUX", dir.path().join("missing-tmux"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "boot/status without tmux failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
