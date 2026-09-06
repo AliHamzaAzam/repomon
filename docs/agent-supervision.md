@@ -1,13 +1,44 @@
 # Agent supervision
 
+Open **Settings > Policies > Supervision**, then opt in one lane. Supervision applies bounded, audited policy to permission dialogs and stalls; it is off by default.
+
+**You are here:** supervised-lane setup and audit reference. Both the global switch and the lane switch must be on.
+
+## Find your next task
+
+| Task | Go to |
+|---|---|
+| Overview | [Open section](#overview) |
+| The dialog taxonomy | [Open section](#the-dialog-taxonomy) |
+| The master switch and per-lane opt-in | [Open section](#the-master-switch-and-per-lane-opt-in) |
+| Wake-on-mail | [Open section](#wake-on-mail) |
+| Stall nudges and escalation | [Open section](#stall-nudges-and-escalation) |
+| Safety guarantees | [Open section](#safety-guarantees) |
+| Learned approval rules under supervision | [Open section](#learned-approval-rules-under-supervision) |
+| The supervision_log audit trail | [Open section](#the-supervision_log-audit-trail) |
+| The RPC surface | [Open section](#the-rpc-surface) |
+| The read-only MCP worker tools | [Open section](#the-read-only-mcp-worker-tools) |
+| Live recipes | [Open section](#live-recipes) |
+
+<details>
+<summary>Why this guide exists</summary>
+
 Agent supervision lets repomon act as a bounded, audited proxy between you and an agent's
-permission dialogs, mail, and stalls: within a conservative, class-based policy, the daemon
-can answer a routine "Do you want to proceed?" itself, wake an agent when mail arrives for it,
-and nudge (then escalate) a stalled one, all through the same single, re-verified injection
-path the rest of repomon already uses. Supervision is off by default at every level, and
-nothing about it changes what an unsupervised lane does today.
+permission dialogs and stalls: within a conservative, class-based policy, the daemon can
+answer a routine "Do you want to proceed?" itself and nudge (then escalate) a stalled one, all through the same single, re-verified injection path the
+rest of repomon already uses.
+
+Supervision is off by default at every level, and nothing about it changes what an unsupervised
+lane does today.
+
+</details>
 
 ## Overview
+
+Enable one lane first, then inspect its activity log.
+
+<details>
+<summary>Details</summary>
 
 Supervision has three moving parts:
 
@@ -15,41 +46,48 @@ Supervision has three moving parts:
   semantic categories and evaluated against a policy to produce a decision: auto-approve,
   auto-deny, or hold.
 - **The daemon watch loop** (`repomon-daemon`): a 2-second tick answers classified dialogs,
-  wakes supervised lanes on queued mail, and nudges/escalates stalled ones, all through one
+  nudges/escalates stalled ones, all through one
   verified-send module that re-checks pane state immediately before typing anything.
 - **Surfaces**: a JSON-RPC `supervision.*` namespace, a read-only MCP tool pair for the agent
   itself, and desktop UI for both global defaults and per-lane overrides.
 
 Every attempted action, sent, skipped, failed, or held, writes exactly one row to a durable
-audit log. Nothing supervision does is silent.
+audit log.
+
+Nothing supervision does is silent.
+
+</details>
 
 ## The dialog taxonomy
 
+Look up the first matching class before changing an approval policy.
+
+<details>
+<summary>Details</summary>
+
 `classify_dialog` (`crates/repomon-core/src/agent/supervision.rs`) reads a pending dialog's
 title, question, body, and context and matches it, in a fixed priority order, into one of nine
-`DialogClass` values. Classification also determines whether the action is **repo-scoped**:
-provably confined to the lane's worktree/repo root, with no `..` traversal, no `~`-prefixed
-path, and (for commands) every segment of a compound command matching an allowlisted binary
-whose path arguments stay in scope.
+`DialogClass` values.
+
+Classification also determines whether the action is **repo-scoped**: provably confined to the
+lane's worktree/repo root, with no `..` traversal, no `~`-prefixed path, and (for commands)
+every segment of a compound command matching an allowlisted binary whose path arguments stay in
+scope.
 
 Priority order (a dialog is classified as the first class whose markers match; later classes
 never re-match text already claimed by an earlier one):
 
-1. `credential_access`: `token`, `api key`/`api_key`, `secret`, `.env`, `~/.aws`, `credential`,
-   `keychain`, `password`, `ssh key`, `id_rsa`, `.pem`.
-2. `push_remote`: `git push`, `gh pr`, `gh release`, `git remote`, or `git fetch`/`git pull`
-   when a URL is present.
-3. `install`: `npm install`/`npm i`, `pnpm add`, `bun add`, `cargo install`, `brew install`,
-   `pip install`, `apt install`/`apt-get install`, `gem install`.
-4. `device_access`: `osascript`, `camera`, `microphone`, `screen recording`, `screencapture`,
-   `system_profiler`, `defaults write`.
-5. `network_access`: `curl`, `wget`, `nc`, `ssh`, `http://`/`https://`.
-6. `deletion`: `rm`, `unlink`, `git clean`, or a title/question containing "delete file".
-7. `file_write`: a title/question containing "edit file", "create file", "apply patch",
-   "multiedit", "write", "make this edit", or "do you want to create".
-8. `command_exec`: a "Bash command" title, or text containing "run command", "run tool",
-   "requesting permission", or "wants to run".
-9. `unknown`: anything that matches none of the above.
+| Priority | Class and matching markers |
+|---|---|
+| 1 | `credential_access`: `token`, `api key`/`api_key`, `secret`, `.env`, `~/.aws`, `credential`, `keychain`, `password`, `ssh key`, `id_rsa`, `.pem`. |
+| 2 | `push_remote`: `git push`, `gh pr`, `gh release`, `git remote`, or `git fetch`/`git pull` when a URL is present. |
+| 3 | `install`: `npm install`/`npm i`, `pnpm add`, `bun add`, `cargo install`, `brew install`, `pip install`, `apt install`/`apt-get install`, `gem install`. |
+| 4 | `device_access`: `osascript`, `camera`, `microphone`, `screen recording`, `screencapture`, `system_profiler`, `defaults write`. |
+| 5 | `network_access`: `curl`, `wget`, `nc`, `ssh`, `http://`/`https://`. |
+| 6 | `deletion`: `rm`, `unlink`, `git clean`, or a title/question containing "delete file". |
+| 7 | `file_write`: a title/question containing "edit file", "create file", "apply patch", "multiedit", "write", "make this edit", or "do you want to create". |
+| 8 | `command_exec`: a "Bash command" title, or text containing "run command", "run tool", "requesting permission", or "wants to run". |
+| 9 | `unknown`: anything that matches none of the above. |
 
 Scoping rules per class:
 
@@ -66,10 +104,11 @@ Scoping rules per class:
 - **`credential_access`**, **`push_remote`**, **`install`**, **`device_access`**, and
   **`unknown`** are never repo-scoped.
 
+</details>
+
 ### Shipping defaults
 
-`SupervisionConfig::default()`, the conservative baseline shipped in `config.toml` and used by
-every lane that has not set its own class override:
+Keep the shipped hold rules unless you have reviewed the authority you are granting.
 
 | Class | Default action |
 |---|---|
@@ -83,29 +122,38 @@ every lane that has not set its own class override:
 | `device_access` | Hold |
 | `unknown` | Hold |
 
-Nothing auto-denies out of the box. `command_exec` and `file_write` are the only classes that
-auto-approve by default, and only when the action is provably repo-scoped: an out-of-scope
-command or edit falls back to a hold even if its class says auto-approve (see
-[Safety guarantees](#safety-guarantees)).
+<details>
+<summary>Details</summary>
+
+`SupervisionConfig::default()`, the conservative baseline shipped in `config.toml` and used by
+every lane that has not set its own class override:
+
+Nothing auto-denies out of the box.
+
+`command_exec` and `file_write` are the only classes that auto-approve by default, and only when
+the action is provably repo-scoped: an out-of-scope command or edit falls back to a hold even if
+its class says auto-approve (see [Safety guarantees](#safety-guarantees)).
+
+</details>
 
 ## The master switch and per-lane opt-in
 
-Supervision is a two-key lock: it only actually acts on a lane when **both** the global master
-switch (`config.toml`'s `[supervision] enabled = true`, editable from the desktop app's
-Settings > Policies > Supervision sub-tab) **and** that lane's own opt-in (a `lane_policies`
-row with `enabled = true`, editable from the lane's own Supervision panel) are on. Flipping the
-master switch off holds every lane's actions regardless of its own `enabled` flag; a lane with
-no stored `lane_policies` row at all is treated as not enabled. This is enforced twice: once at
-the type level in `resolve()` (`enabled = defaults.enabled && lane.is_some_and(|l| l.enabled)`),
-and again in `supervise_dialog`'s routing check.
+Turn on the global master switch and the selected lane’s own switch.
 
-`config.toml` layout:
+**Time: 1 minute.**
+
+1. Open **Settings > Policies > Supervision** and enable supervision.
+2. Open the lane’s Supervision panel and enable **Supervise this lane**.
+3. Review its class rules before leaving the agent to work.
+
+**You know it worked when:** both switches are on and the lane shows its effective policy.
+
+The configuration below shows the shipped defaults, with supervision off.
 
 ```toml
 [supervision]
 enabled = false
 nudge_text = "Check your repomail and act on it."
-mail_mode = "nudge"
 stall_mins = 20
 nudge_retries = 2
 
@@ -115,61 +163,110 @@ file_write = "auto_approve"
 network_access = "hold"
 ```
 
+<details>
+<summary>Details</summary>
+
+Supervision is a two-key lock: it only actually acts on a lane when **both** the global master
+switch (`config.toml`'s `[supervision] enabled = true`, editable from the desktop app's Settings
+> Policies > Supervision sub-tab) **and** that lane's own opt-in (a `lane_policies` row with
+`enabled = true`, editable from the lane's own Supervision panel) are on.
+
+Flipping the master switch off holds every lane's actions regardless of its own `enabled` flag;
+a lane with no stored `lane_policies` row at all is treated as not enabled.
+
+This is enforced twice: once at the type level in `resolve()` (`enabled = defaults.enabled &&
+lane.is_some_and(|l| l.enabled)`), and again in `supervise_dialog`'s routing check.
+
 A lane override only needs to list the fields it changes: `resolve()` merges lane
-`classes`/`mail_mode`/`nudge_text`/`stall_mins`/`nudge_retries` on top of the global defaults
+`classes`/`nudge_text`/`stall_mins`/`nudge_retries` on top of the global defaults
 field by field, and a class the lane doesn't mention keeps the global default's action for that
-class. Overrides are stored in SQLite (the `lane_policies` table), not in `config.toml`.
+class.
+
+Overrides are stored in SQLite (the `lane_policies` table), not in `config.toml`.
 
 The two GUI paths:
 
 - **Global defaults**: Settings > Policies > Supervision sub-tab
   (`apps/desktop/src/components/PolicySettings.tsx`). The master switch, the same nine-row
-  class grid, default nudge text, default mail mode, default stall minutes, and default nudge
+  class grid, default nudge text, default stall minutes, and default nudge
   retries. Writes go through `config.set { supervision: <full object> }` (read-modify-write on
   the whole nested struct). A footnote points at the per-lane panel for overrides.
 - **Per-lane overrides**: the lane's own Supervision panel
   (`apps/desktop/src/components/SupervisionPanel.tsx`). A per-lane enable switch (disabled while
   the master switch is off, with a banner linking back to Settings), the same class grid scoped
   to this lane (each overridden row shows a dot and a "Reset" link back to the global default),
-  mail mode, nudge text, stall minutes, nudge retries, an "expect this lane to act on mail"
+  nudge text, stall minutes, nudge retries, an "expect this lane to act on mail"
   switch, and a live activity log fed by `event.supervision.acted`. Writes go through
   `supervision.set { lane_id, ... }`, sending only the changed field(s).
 
+</details>
+
 ## Wake-on-mail
 
-When a supervised lane has fleet mail queued for it and its session is idle enough to accept
-injection (`mail::injection_eligible`, the same busy/dialog/rate-limit/stall gate normal mail
-delivery uses), the watch loop's mail phase delivers according to `mail_mode`:
+Send to the exact agent address, then check Repomail for delivery.
 
-- **`nudge`** (the default): sends the lane's `nudge_text` as one line (e.g. "Check your
-  repomail and act on it.") rather than the mail body itself; the agent is expected to pull
-  its own inbox (via the `message_inbox` MCP tool) once nudged. Every currently-queued message
-  for that session is covered by the single nudge.
-- **`full_body`**: injects each queued message's full compact line directly (the same
-  `[REPOMAIL id=... from=...] <body> [END REPOMAIL]` format unsupervised delivery uses)
-  and marks it delivered on a confirmed send.
+**Time: about 1 minute once the recipient is idle.**
 
-Delivery to a supervised lane is retried **once**: the first attempt backs off 30 seconds
-before a single retry; if that retry also fails to send (skipped or failed, for any reason,
-whether the dialog appeared, a capture timeout, or a backend error), the group is marked
-delivery-failed, latched so it is never retried or re-notified, and a `needs_you` notification
-is raised once. This retry-once-then-attention state machine is the pure function `decide_mail`.
+1. Find the agent's address in Repomail or the fleet list.
 
-**Unsupervised lanes are unaffected**: `mail.rs::try_deliver` explicitly skips any lane under
-active supervision (the supervision loop owns delivery there instead), and every lane that is
-*not* supervised keeps receiving the legacy full-body injection exactly as before. Opting a
-lane into supervision is what switches its own mail delivery from full-body to (by default)
-nudge-only.
+   ```sh
+   repomon lane list
+   ```
+
+2. Replace `lane-2/1` with that address and send a message.
+
+   ```sh
+   repomon msg send lane-2/1 "Please check your assigned task."
+   ```
+
+3. Check the durable message record.
+
+   ```sh
+   repomon msg list
+   ```
+
+**You know it worked when:** the record reports delivery and the recipient sees a compact `[REPOMAIL ...]` line.
+
+<details>
+<summary>Details: delivery is independent of supervision</summary>
+
+The dedicated mail worker delivers full message bodies to supervised and unsupervised lanes alike.
+
+It wakes on eligibility changes and has a one-second fallback sweep.
+
+It resolves the exact recipient window, requires an eligible idle pane without a dialog or rate-limit screen, and re-verifies the pane before submission.
+
+A confirmed send marks the message delivered; a busy or unresolved recipient stays queued.
+
+Backend failures record a delivery error and raise attention after two failures, once per tracked failure episode.
+
+Only one message is attempted per window per sweep, so a second message cannot interrupt generation started by the first.
+
+The former supervision `mail_mode` setting, lane-wide inbox nudge and 30-second retry-once policy are obsolete. Mail policy now uses `message_inject_agents` and `message_inject_operator`; see [Delivery](messaging.md#delivery).
+
+The supervision audit still records mail sends with `trigger: "mail"` and `decision: "full_body"`.
+
+</details>
 
 ## Stall nudges and escalation
 
-Independently of mail, the watch loop's stall phase watches every eligible session (non-external,
-windowed, no dialog on screen, and either `Waiting`/`Idle` or `Running` with `ended_turn`) in a
-supervised lane. A session counts as having **outstanding work** if the lane has unread fleet
-mail or the lane's `expect_work` flag is set. Once a session has outstanding work, its pane has
-independently sat unchanged for at least `stall_mins` (evidence-of-freeze, not just "assigned
-work minus activity time": a `None` pane-seen record never counts as quiet), and its own idle
-time has crossed `stall_mins`, the pure `decide_stall` function drives:
+Set a stall threshold and inspect the audit when outstanding work stops progressing.
+
+<details>
+<summary>Details</summary>
+
+Independently of mail, the watch loop's stall phase watches every eligible session
+(non-external, windowed, no dialog on screen, and either `Waiting`/`Idle` or `Running` with
+`ended_turn`) in a supervised lane.
+
+A session counts as having **outstanding work** only when the lane's `expect_work` flag is set.
+
+Queued mail is handled separately and never becomes a lane-wide stall nudge.
+
+Once a session has outstanding work, its pane has independently sat unchanged for at least
+`stall_mins` (evidence-of-freeze, not just "assigned work minus activity time": a `None`
+pane-seen record never counts as quiet), and its own idle time has crossed `stall_mins`, the
+pure `decide_stall` function drives:
 
 1. **First nudge**: sent immediately once the threshold is crossed.
 2. **Further nudges**: spaced at least 5 minutes apart, up to `nudge_retries` nudges total.
@@ -180,7 +277,14 @@ time has crossed `stall_mins`, the pure `decide_stall` function drives:
 An episode's bookkeeping resets, so a future stall on the same window starts fresh, the moment
 the session's activity moves past the last nudge, or outstanding work clears.
 
+</details>
+
 ## Safety guarantees
+
+Check these invariants when reviewing any path that sends keys to an agent.
+
+<details>
+<summary>Details</summary>
 
 Supervision is built to fail toward asking you, never toward acting past what it can verify:
 
@@ -224,19 +328,28 @@ Supervision is built to fail toward asking you, never toward acting past what it
   this legacy path entirely (the supervision loop's own `extra_allow` input covers the same
   learned rule instead), so the two paths never race.
 
+</details>
+
 ## Learned approval rules under supervision
+
+Review learned rules per repository; a rule cannot override a denial or a destructive-action veto.
+
+<details>
+<summary>Details</summary>
 
 The pre-existing per-repo "learned rule" mechanism (a confirmed `(repo, command_pattern)` pair)
 still applies once a lane is supervised, but narrowly: it can only lift a `Hold` to
 `AutoApprove`, and only for `command_exec` dialogs that are already repo-scoped and did not
-already trip the always-escalate veto. It never touches `file_write`, `deletion`, or any other
-class, and it never overrides an explicit `auto_deny` mapping.
+already trip the always-escalate veto.
+
+It never touches `file_write`, `deletion`, or any other class, and it never overrides an
+explicit `auto_deny` mapping.
+
+</details>
 
 ## The supervision_log audit trail
 
-Every action `verified_send` (or the `record_hold` helper for a pure hold) takes, and every
-action it *declines* to take, writes exactly one row to `supervision_log`
-(`crates/repomon-core/migrations/0018_supervision.sql`):
+Open the lane’s activity log to inspect sent, skipped, failed and held actions.
 
 ```sql
 CREATE TABLE supervision_log (
@@ -259,25 +372,43 @@ CREATE TABLE supervision_log (
 );
 ```
 
+<details>
+<summary>Details</summary>
+
+Every action `verified_send` (or the `record_hold` helper for a pure hold) takes, and every
+action it *declines* to take, writes exactly one row to `supervision_log`
+(`crates/repomon-core/migrations/0018_supervision.sql`):
+
 The "every action and skip is journaled" guarantee is structural, not incidental:
 `verified_send`'s internal `finish()` helper is the single exit point for every branch
-(latch-held, capture-timeout, capture-failed, state-changed, dialog-present, usage-limit-menu,
-a successful send, or a backend send failure), and it always writes the row and broadcasts
-`event.supervision.acted` before returning. `record_hold` does the same for the "policy says
-Hold, nothing was attempted" case. There is no supervision code path, including the legacy
-learned-rule fallback, that reaches a pane without going through this module.
+(latch-held, capture-timeout, capture-failed, state-changed, dialog-present, usage-limit-menu, a
+successful send, or a backend send failure), and it always writes the row and broadcasts
+`event.supervision.acted` before returning.
+
+`record_hold` does the same for the "policy says Hold, nothing was attempted" case.
+
+There is no supervision code path, including the legacy learned-rule fallback, that reaches a
+pane without going through this module.
+
+</details>
 
 ## The RPC surface
 
-All methods live under `supervision.*` on the local daemon socket (`crates/repomon-daemon/src/rpc.rs`):
+Use local `supervision.set` for policy changes; use the read methods to inspect state.
 
 | Method | Parameters | Result |
 |---|---|---|
 | `supervision.get` | `{ lane_id? }` | `{ defaults, lane, effective }`: global `SupervisionConfig`, the lane's raw `SupervisionOverrides` row (or `null`), and the fully resolved `SupervisionPolicy` for that lane (all `null`/absent without `lane_id`) |
-| `supervision.set` | `{ lane_id, enabled?, classes?, mail_mode?, nudge_text?, stall_mins?, nudge_retries?, expect_work? }` | `{ effective }`: read-modify-write on the lane's stored row; refreshes the in-memory policy snapshot and broadcasts `event.supervision.changed` |
+| `supervision.set` | `{ lane_id, enabled?, classes?, nudge_text?, stall_mins?, nudge_retries?, expect_work? }` | `{ effective }`: read-modify-write on the lane's stored row; refreshes the in-memory policy snapshot and broadcasts `event.supervision.changed` |
 | `supervision.audit` | `{ lane_id?, limit?, before_id?, identity_token? }` | `{ entries }`: recent `supervision_log` rows, newest first, capped at 200 |
 | `supervision.status` | `{ identity_token? }` | `{ master, lanes: [{ lane_id, enabled, last }] }`: the master switch and, per actively-supervised lane, its last logged entry |
 | `supervision.nudge` | `{ lane_id, window?, text? }` | `{ outcome, entry_id, keys? }`: a manual, audited nudge through the same `verified_send` path (defaults to the lane's configured nudge text) |
+
+<details>
+<summary>Details</summary>
+
+All methods live under `supervision.*` on the local daemon socket
+(`crates/repomon-daemon/src/rpc.rs`):
 
 An `identity_token` on `supervision.audit`/`supervision.status` (used by the restricted worker
 MCP server) forces the lane filter to that identity's own lane and rejects a mismatched explicit
@@ -290,7 +421,14 @@ stronger than the already-allowed `agent.send_input`), but omits `supervision.se
 posture `config.set` gets: granting standing auto-approval authority is a local-only decision,
 never one a paired phone can make remotely.
 
+</details>
+
 ## The read-only MCP worker tools
+
+Call `supervision_status` or `supervision_audit` from the worker to inspect its own lane.
+
+<details>
+<summary>Details</summary>
 
 The restricted `repomond mcp` server given to managed agents (`crates/repomon-mcp/src/agent.rs`)
 adds two supervision tools alongside its existing `fleet_status`/`message_*` tools:
@@ -305,17 +443,31 @@ adds two supervision tools alongside its existing `fleet_status`/`message_*` too
 
 There is **no approval power over MCP**: the catalog has no `supervision_set` or
 `supervision_nudge` tool, and `AgentServer::call`'s dispatch has no arm for either name (or any
-spelling of them); an attempt falls through to "unknown tool". An agent can observe its own
-supervision state; it cannot grant itself standing permission or nudge itself (or anyone else)
-through this surface.
+spelling of them); an attempt falls through to "unknown tool".
+
+An agent can observe its own supervision state; it cannot grant itself standing permission or
+nudge itself (or anyone else) through this surface.
+
+</details>
 
 ## Live recipes
 
+Run one recipe at a time in a disposable test lane.
+
+<details>
+<summary>Details</summary>
+
 Four short walkthroughs, each exercising a distinct part of the feature end to end.
+
+</details>
 
 ### 1. Turn on supervision and watch a repo-scoped command auto-approve
 
-1. Settings > Policies > Supervision → **Enable supervision**.
+Enable a disposable lane, then compare an in-scope command with a held request.
+
+**Time: about 5 minutes; waiting or build time is additional.**
+
+1. Settings > Policies > Supervision to **Enable supervision**.
 2. Open a lane's own Supervision panel and toggle **Supervise this lane**. Leave
    `command_exec` and `file_write` on their default `Auto-approve`.
 3. Ask the agent to run something in-worktree, e.g. `cargo test -p repomon-core`. The dialog is
@@ -327,32 +479,43 @@ Four short walkthroughs, each exercising a distinct part of the feature end to e
    second because it trips the always-escalate veto regardless of policy, and you still see the
    normal permission dialog in the terminal.
 
+**You know it worked when:** each expected result in the steps is visible.
+
 ### 2. Wake a supervised lane on incoming mail
 
-1. With the lane supervised (as above) and `mail_mode` left at `Nudge`, send it mail, from
-   another lane, from repomind, or with `repomon msg send lane-<id> "ping"`.
-2. Once the lane's pane is idle (no dialog, not mid-generation), the mail phase injects the
-   lane's nudge text as one line, not the mail body itself, within one tick.
-3. The agent reads its own inbox (its MCP `message_inbox` tool) to see the actual message. The
-   activity log shows a `trigger: "mail"`, `decision: "nudge"` row.
-4. Switch `mail_mode` to `Full body` and send another message: this time the compact
-   `[REPOMAIL ...]` line lands directly, and the message is marked delivered on a
-   confirmed send.
+Follow [Wake-on-mail](#wake-on-mail), then inspect the lane's activity log.
+
+**Time: 1 minute once the recipient is idle.**
+
+1. Leave the lane supervised and send a message to its exact agent address.
+2. Wait for the recipient to become idle without a dialog.
+3. Read the injected body or use `message_inbox`; inspect the mail audit row.
+
+**You know it worked when:** the message is delivered and the audit shows `trigger: "mail"`, `decision: "full_body"`.
 
 ### 3. Stall past the threshold and see it escalate
 
-1. Set the lane's `stall_mins` low (e.g. 1) and turn on **Expect this lane to act on mail**
-   (or leave it unread mail from step 2).
+Set an explicit work expectation, then wait through one stall episode.
+
+**Time: about 12 minutes with a 1-minute threshold and 2 nudges.**
+
+1. Set the lane's `stall_mins` to 1 and enable **Expect this lane to act on mail** (`expect_work`). Despite the label, unread mail alone does not trigger stall nudges.
 2. Let the agent sit idle past the threshold with its pane genuinely unchanged. A `trigger:
    "stall"`, `decision: "nudge"` row appears once the threshold and the independent pane-quiet
    check both agree.
-3. Keep it idle past `nudge_retries` more nudges (5 minutes apart). The episode escalates: a
+3. Keep it idle through `nudge_retries` total nudges, then another 5 minutes. The episode escalates: a
    `held` row is journaled with a reason like "escalated after 2 nudges", and a `needs_you`
    notification fires once, not on every subsequent tick.
 4. Send the agent any input (attach and type, or resolve the mail); the next tick's activity
    check clears the episode, so a future stall starts fresh.
 
+**You know it worked when:** each expected result in the steps is visible.
+
 ### 4. Read the audit trail two ways, and confirm what each surface can and can't do
+
+Compare the desktop audit with the worker’s read-only view.
+
+**Time: about 5 minutes; waiting or build time is additional.**
 
 1. From the desktop app, open the lane's Supervision panel's activity log and expand a row to
    see its `pane_excerpt` and the exact `keys` sent.
@@ -365,3 +528,5 @@ Four short walkthroughs, each exercising a distinct part of the feature end to e
 4. Turn the master switch off. Every lane's policy resolves to `enabled: false` immediately
    (`supervision.get` reflects it fleet-wide), and the watch loop's next tick stops acting on
    any lane, regardless of that lane's own `enabled` flag.
+
+**You know it worked when:** each expected result in the steps is visible.
