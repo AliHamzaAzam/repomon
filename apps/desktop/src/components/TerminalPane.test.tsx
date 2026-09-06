@@ -404,7 +404,13 @@ describe("TerminalPane header containment (bug 5: header can disappear under hig
 });
 
 describe("TerminalPane clickable path links", () => {
-  it("registers link provider that verifies against file.index and opens in editor on Cmd-click", async () => {
+  it.each([
+    { platform: "MacIntel", modifier: "Cmd", metaKey: true, ctrlKey: false },
+    { platform: "Linux x86_64", modifier: "Ctrl", metaKey: false, ctrlKey: true },
+    { platform: "Win32", modifier: "Ctrl", metaKey: false, ctrlKey: true },
+  ])("verifies path links against file.index and opens on $modifier-click on $platform", async ({ platform, metaKey, ctrlKey }) => {
+    // jsdom's default user agent follows the host OS; exercise every modifier explicitly.
+    vi.stubGlobal("navigator", { platform });
     watchTerminalMock.mockResolvedValue({
       ack: { cols: 80, rows: 24, generation: 1, sequence: 1 },
       stop: vi.fn().mockResolvedValue(undefined),
@@ -474,9 +480,14 @@ describe("TerminalPane clickable path links", () => {
     expect(openAt).not.toHaveBeenCalled();
     expect(onEnsureEditorOpen).not.toHaveBeenCalled();
 
-    const cmdClickEvent = { metaKey: true, ctrlKey: false } as MouseEvent;
-    providedLinks![0].activate(cmdClickEvent, "src/foo.rs:12:4");
-    expect(onEnsureEditorOpen).toHaveBeenCalled();
+    const wrongModifierEvent = { metaKey: !metaKey, ctrlKey: !ctrlKey } as MouseEvent;
+    providedLinks![0].activate(wrongModifierEvent, "src/foo.rs:12:4");
+    expect(openAt).not.toHaveBeenCalled();
+    expect(onEnsureEditorOpen).not.toHaveBeenCalled();
+
+    const modifierClickEvent = { metaKey, ctrlKey } as MouseEvent;
+    providedLinks![0].activate(modifierClickEvent, "src/foo.rs:12:4");
+    expect(onEnsureEditorOpen).toHaveBeenCalledTimes(1);
     expect(openAt).toHaveBeenCalledWith("src/foo.rs", 12, 4);
   });
 });
