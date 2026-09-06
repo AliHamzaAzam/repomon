@@ -24,3 +24,8 @@ apps/desktop/src-tauri/gen/
 /qa/
 /.briefs/
 docs/design-audit-*.md
+
+# Design sources, plans and specs are not part of the shipped app or its documentation
+/docs/brand/
+/docs/superpowers/
+/design/

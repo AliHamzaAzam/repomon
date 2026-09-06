@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Repomon branching R icon">
-  <g fill="none" stroke="#F46B35" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M62 200V56h83c68 0 68 80 0 80H62m62 0 66 64"/>
-  </g>
-  <g fill="#F46B35"><circle cx="62" cy="200" r="22"/><circle cx="62" cy="56" r="22"/><circle cx="190" cy="200" r="22"/></g>
-</svg>
