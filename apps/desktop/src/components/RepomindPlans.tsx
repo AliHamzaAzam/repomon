@@ -13,11 +13,7 @@ import {
 } from "./RepomindSection";
 import { donePlanDocument, planSlug, readPlanSummary, type PlanSummary } from "./repomindDocs";
 
-/// The plans board: one row per file in `plans/active`, and the two things an operator does with
-/// a goal that a file browser cannot do for them - start one, and close one out.
-///
-/// The home is an ordinary lane, so every read and write here goes through the same `file.*` RPCs
-/// the editor uses. Nothing about a plan lives anywhere but the file.
+/// Configures file-backed active goals and their creation and completion actions.
 export interface RepomindPlansProps {
   /// The controller lane. Null means the home has no lane yet and the board is not rendered.
   laneId: number;
@@ -96,12 +92,8 @@ export default function RepomindPlans(props: RepomindPlansProps) {
     setOutcome("");
   }
 
-  /// Tell the primary controller about the goal, then write the file with the owner that answer
-  /// decided - `repomind` when told, `unassigned` otherwise - so it is written once, already
-  /// correct. Only the title is required: an operator who has no next step yet still gets a goal
-  /// file, its "Next step" line the title itself rather than empty or a typed-in placeholder. A
-  /// home with no controller running still gets its file, and Add goal says so rather than
-  /// failing the whole action.
+  /// Notify first to determine ownership, then write once; an unavailable controller must not
+  /// prevent saving an unassigned goal.
   async function addGoal() {
     const name = title().trim();
     if (!name) return;

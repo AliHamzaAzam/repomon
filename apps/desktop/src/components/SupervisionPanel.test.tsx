@@ -266,7 +266,6 @@ describe("SupervisionPanel", () => {
       ).toBeInTheDocument();
     });
 
-    // Lane switch should be disabled
     const switchButton = screen.getByRole("switch", { name: /supervise this lane/i });
     expect(switchButton).toBeDisabled();
 
@@ -275,7 +274,6 @@ describe("SupervisionPanel", () => {
     fireEvent.click(openSettingsBtn);
     expect(openSettingsTab).toHaveBeenCalledWith("policies", "supervision");
 
-    // No supervision.set should have been called
     const setCalls = calls.list.filter((c) => c.method === "supervision.set");
     expect(setCalls).toHaveLength(0);
   });
@@ -299,13 +297,10 @@ describe("SupervisionPanel", () => {
       expect(screen.getByText("No supervision activity yet.")).toBeInTheDocument();
     });
 
-    // Injected event for a DIFFERENT lane (lane_id = 99)
     emitDaemonEvent("event.supervision.acted", sampleAuditEntry(99, 99, { reason: "Ignored other lane action" }));
 
-    // Should NOT appear
     expect(screen.queryByText(/Ignored other lane action/)).not.toBeInTheDocument();
 
-    // Injected event for the SELECTED lane (lane_id = 7)
     emitDaemonEvent(
       "event.supervision.acted",
       sampleAuditEntry(101, 7, {
@@ -315,12 +310,10 @@ describe("SupervisionPanel", () => {
       }),
     );
 
-    // Should appear in audit log
     await waitFor(() => {
       expect(screen.getByText(/Live acted event for selected lane/)).toBeInTheDocument();
     });
 
-    // Indicator should be active
     const indicator = screen.getByLabelText("Supervision status indicator");
     expect(indicator.getAttribute("title")).toContain("Last action: approve (sent)");
   });

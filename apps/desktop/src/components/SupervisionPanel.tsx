@@ -327,7 +327,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
 
   return (
     <div class="flex h-full flex-col bg-surface">
-      {/* 1. Header row */}
+
       <div class="panel-header">
         <div class="panel-header-lead">
           <div class="flex items-center gap-1.5">
@@ -377,7 +377,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
         </button>
       </div>
 
-      {/* Error display */}
       <Show when={error()} keyed>
         {(err) => (
           <div
@@ -399,7 +398,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
         )}
       </Show>
 
-      {/* Main content or empty state */}
       <Show
         when={lane()}
         fallback={
@@ -412,7 +410,7 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
         }
       >
         <div class="min-h-0 flex-1 space-y-5 overflow-y-auto p-3.5">
-          {/* 2. Master-off notice */}
+
           <Show when={isMasterOff()}>
             <div
               role="note"
@@ -438,7 +436,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
             </div>
           </Show>
 
-          {/* 3. Lane toggle */}
           <section>
             <Switch
               label="Supervise this lane"
@@ -448,7 +445,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
             />
           </section>
 
-          {/* 4. Policy grid */}
           <section class="space-y-2">
             <div>
               <p class="section-label">Permission policies</p>
@@ -503,7 +499,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
             </div>
           </section>
 
-          {/* 5. Delivery + thresholds */}
           <section class="space-y-3">
             <div>
               <p class="section-label">Delivery and thresholds</p>
@@ -565,7 +560,6 @@ export default function SupervisionPanel(props: SupervisionPanelProps): JSX.Elem
             </div>
           </section>
 
-          {/* 6. Activity log */}
           <section class="space-y-2">
             <p class="section-label">Activity log</p>
 

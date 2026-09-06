@@ -9,12 +9,7 @@ import { IconChevronDown, IconChevronRight } from "./icons";
 import { Section, SectionButton, SectionNote, sinceLabel } from "./RepomindSection";
 import { journalDays, journalEntries, journalPathFor, type JournalDay } from "./repomindDocs";
 
-/// Memory health: whether the context repomind boots with is current, whether the daemon's export
-/// into the home is keeping up, and what actually got written down.
-///
-/// One section rather than three, because the three answer one question - is the memory in good
-/// order - and splitting them put the journal, the only part with real content in it, three
-/// headings away from the two lines that say whether it is being written at all.
+/// Configures the combined boot-context, export-health, and journal view.
 export interface RepomindMemoryProps {
   laneId: number;
   repomind?: RepomindStore;
@@ -39,7 +34,7 @@ export default function RepomindMemory(props: RepomindMemoryProps) {
   const [selected, setSelected] = createSignal<string | null>(null);
   const [entries, setEntries] = createSignal<string[]>([]);
   const [error, setError] = createSignal<string | null>(null);
-  // The daemon's own record of what it did, which used to live behind Settings > Automation.
+
   const [showActivity, setShowActivity] = createSignal(false);
   const [activity, setActivity] = createSignal<JournalEntry[]>([]);
   const [activityError, setActivityError] = createSignal<string | null>(null);

@@ -6,10 +6,7 @@ import { agentLabel } from "./agentLabel";
 import { AgentIcon } from "./icons";
 import { Section, SectionButton, SectionNote } from "./RepomindSection";
 
-/// Who is running in the home lane, in what state, and how to get to them.
-///
-/// The panel is the control room, not the conversation: a controller's own words are in its pane
-/// in the terminal bay, so every row here ends in the one control that takes you there.
+/// Configures controller state rows and navigation to their terminal panes.
 export interface RepomindControllersProps {
   sessions: AgentSession[];
   /// Puts this controller's pane in front in the terminal bay.

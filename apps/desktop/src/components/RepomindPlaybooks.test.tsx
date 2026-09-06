@@ -60,7 +60,7 @@ describe("the playbooks section", () => {
     await waitFor(() => expect(screen.getByText("fleet-sweep")).toBeInTheDocument());
     expect(screen.getByText("nightly")).toBeInTheDocument();
     expect(screen.getByText("1 waiting on you")).toBeInTheDocument();
-    // Only the draft carries the approve/reject pair.
+
     expect(screen.getAllByText("Approve")).toHaveLength(1);
     expect(screen.getAllByText("Reject")).toHaveLength(1);
     expect(screen.getAllByText("Open")).toHaveLength(1);

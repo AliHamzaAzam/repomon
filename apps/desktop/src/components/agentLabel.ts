@@ -10,12 +10,7 @@ export function slotOf(window: string | null | undefined): number | null {
   return match[1] ? Number(match[1]) : 1;
 }
 
-/// The display label for one agent session.
-///
-/// Precedence:
-/// 1. User's explicit custom label (`session.custom_label`) if set.
-/// 2. Auto-generated concise slug from local LLM (`session.generated_label`) if available.
-/// 3. Stable identifier based on agent kind and window slot (e.g. `claude-code 1`, `antigravity 2`).
+/// Chooses the custom label, generated label, then a stable agent-kind and slot label.
 export function agentLabel(session: AgentSession): string {
   if (session.custom_label) return session.custom_label;
   if (session.generated_label) return session.generated_label;

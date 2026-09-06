@@ -1,13 +1,5 @@
 import { Show, onMount, type JSX } from "solid-js";
 
-/// The furniture every section of the Repomind control room is built from: one heading, one
-/// count, its controls, and its body.
-///
-/// Sections are separated by rules rather than boxed into cards. The panel is one column of
-/// readings about one subject, and a stack of bordered cards would claim they are unrelated
-/// tiles. It also keeps the panel legible at rail width, where a card's own padding is most of
-/// the available line.
-
 /// How long ago something happened, or "never" for something that has not. Coarse on purpose:
 /// the question these lines answer is "is this keeping up?", never "what time exactly".
 export function sinceLabel(iso: string | null | undefined, now = Date.now()): string {

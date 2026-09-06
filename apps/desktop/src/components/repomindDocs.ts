@@ -73,10 +73,7 @@ function nextStepFrom(text: string): string | null {
   return null;
 }
 
-/// `true` for a "next step" value that says nothing: empty, or the bare "." an operator once had
-/// to type as filler when the Add-goal form required non-empty text (it no longer does, but old
-/// files - and anything hand-written the same way - still carry it). Both read the same as "the
-/// plan does not say", so the card hides the line instead of printing a lone period.
+/// Treat empty or period-only next steps as absent instead of displaying filler.
 function isBlankNextStep(value: string): boolean {
   const trimmed = value.trim();
   return trimmed === "" || trimmed === ".";
@@ -101,10 +98,8 @@ export function journalPathFor(date: Date): string {
   return `journal/${year}-${month}-${day}.md`;
 }
 
-/// The last entries of a journal digest, newest last, as the panel shows them.
-///
-/// The export writes one section per journal row, each starting at a heading. Anything before the
-/// first heading is the file's own preamble and is not an entry.
+/// Returns the final journal sections in chronological order, excluding the preamble before the
+/// first heading.
 export function journalTail(content: string, limit = 5): string[] {
   const entries: string[] = [];
   let current: string[] | null = null;
@@ -193,12 +188,8 @@ function dayStamp(date: Date): string {
 /// about it, `"unassigned"` when Add goal found no controller running to tell.
 export type NewPlanOwner = "repomind" | "unassigned";
 
-/// A new goal file for `plans/active/<slug>.md`: the home's frontmatter conventions, the title as
-/// the document's heading, and the operator's intent as the next step - falling back to the title
-/// itself when they gave none, so the file never carries an empty (or placeholder ".") next step.
-///
-/// The shape is the one the daemon's boot assembly reads back (`title`, `status`, `owner`, and a
-/// "Next step:" line), so a goal added here appears in the very next boot document.
+/// Builds an active goal document in the boot reader’s format, using the title as the next step
+/// when no intent is supplied.
 export function newPlanDocument(
   title: string,
   intent: string,
@@ -259,10 +250,7 @@ export interface JournalDay {
   archived: boolean;
 }
 
-/// Split a `journal/` listing into the recent days and the archived months, each newest first.
-///
-/// The export names day files `YYYY-MM-DD.md` and rolls anything older than 90 days into
-/// `journal/archive/YYYY-MM.md`, so sorting the names in reverse is sorting by date.
+/// Separates current days and archived months, sorting ISO-formatted filenames newest-first.
 export function journalDays(paths: string[]): { days: JournalDay[]; archive: JournalDay[] } {
   const days: JournalDay[] = [];
   const archive: JournalDay[] = [];

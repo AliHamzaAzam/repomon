@@ -15,14 +15,8 @@ import RepomindPlaybooks from "./RepomindPlaybooks";
 
 export { sinceLabel } from "./RepomindSection";
 
-/// The Repomind panel: the control room for the fleet's memory and duties.
-///
-/// It is deliberately not a second chat. The controller's conversation happens in its pane in the
-/// terminal bay, which is a real terminal with scrollback, dialogs and colour; a composer and a
-/// transcript in the rail could only ever be a worse copy of it. What the pane cannot show is the
-/// state that conversation is about, and that is what this panel is: the goals in flight, the
-/// playbooks waiting on a human, the duties that run without one, and whether the memory feeding
-/// all of it is current. Every row that names a controller ends in a way back to its pane.
+/// Configures fleet goals, playbooks, duties, and memory health, with controller interactions
+/// routed to its terminal pane.
 export interface RepomindPanelProps {
   fullscreen?: boolean;
   onToggleFullscreen?: () => void;
@@ -116,9 +110,7 @@ export default function RepomindPanel(props: RepomindPanelProps) {
             </span>
           </Show>
         </div>
-        {/* Icon buttons only, so the group has one fixed width the leading group can plan around;
-            each carries its name for the keyboard, the screen reader, and the tooltip. The
-            lifecycle button keeps its word: Start and Stop are the row's one primary action. */}
+
         <div class="panel-header-actions">
           <Show when={props.onToggleFullscreen}>
             <button
@@ -171,8 +163,6 @@ export default function RepomindPanel(props: RepomindPanelProps) {
         </div>
       </div>
 
-      {/* Where the home is, in the fleet's terms and on disk. The row above says how it is doing;
-          this one says what it is, and it is the only place either is stated. */}
       <div class="flex h-7 shrink-0 items-center gap-1.5 border-b border-line bg-surface/60 px-3.5">
         <span class="shrink-0 font-mono text-[10px] text-muted/70">
           {controller().lane?.worktree.name ?? "no lane"}

@@ -13,11 +13,7 @@ import {
   untilLabel,
 } from "./RepomindSection";
 
-/// Standing duties: the schedules that run repomind without anyone starting it.
-///
-/// Adding one happens here, in the same section that lists them, rather than in Settings: a duty
-/// is three short fields, and sending the operator to a modal to write them meant leaving the
-/// readings that prompted the duty in the first place.
+/// Configures the standing-duty list and inline schedule creation.
 export interface RepomindDutiesProps {
   /// Bumped by the panel so the list re-reads when the home changes under us.
   revision?: number;

@@ -5,9 +5,7 @@ import RepomindPlans from "./RepomindPlans";
 
 const daemonCall = vi.fn();
 
-// The board pulls in `stores/repomind.ts` for its Add-goal write path, which also references
-// `subscribeDaemon` at module scope (for the status poller this component does not use) - the
-// mock must provide it too, or importing the module fails outright.
+// Provide subscribeDaemon because importing the shared store initializes its status subscription.
 vi.mock("../ipc/rpc", () => ({
   daemonCall: (...args: unknown[]) => daemonCall(...args),
   subscribeDaemon: vi.fn(async () => () => {}),
@@ -20,8 +18,7 @@ afterEach(() => {
 
 const SHIP_R6 = "---\ntitle: Ship R6\nowner: lane-7/1\n---\n\nNext step: land the board\n";
 
-/// Every RPC the board reads, with the plan directory the tests share. Writes fall through to a
-/// resolved null unless a case overrides them.
+/// Stubs board reads against a shared plan directory and resolves unhandled writes to null.
 function mockDaemon(overrides: Record<string, unknown> = {}) {
   daemonCall.mockImplementation((method: string, params?: { path?: string }) => {
     if (method in overrides) {

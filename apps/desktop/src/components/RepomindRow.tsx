@@ -115,10 +115,8 @@ const DOT_TONE = {
   muted: "bg-muted/50",
 } as const;
 
-/// The Repomind toolbar button's state dot, the counterpart to Repomail's unread badge: a signal
-/// dot while a controller runs, the attention (or fault) color when one wants the operator, and
-/// nothing at all when the home is off. It says only "look here"; the word for what is happening
-/// lives on the pinned sidebar row and in the panel header.
+/// Shows controller activity or attention as a toolbar dot, leaving detailed state labels to the
+/// row and panel.
 export function RepomindStateDot(props: { controller: ControllerSummary }) {
   const indicator = () => stateIndicator(props.controller.agents ? props.controller.state : null);
   return (
@@ -133,12 +131,8 @@ export function RepomindStateDot(props: { controller: ControllerSummary }) {
   );
 }
 
-/// The pinned Repomind row: one lane row's worth of the fleet's own grammar, standing in for the
-/// repo group the home would otherwise get. Line 1 names it and states it in the same one-word
-/// vocabulary every lane pill uses; line 2 says where the home is and what it holds.
-///
-/// Clicking it selects the controller lane, which is what puts its agents in the terminal bay -
-/// exactly what clicking a lane row does, because this is a lane row for a lane the groups hide.
+/// Renders the pinned controller lane and selects it through the same fleet interaction as ordinary
+/// lanes.
 export default function RepomindRow(props: RepomindRowProps) {
   const indicator = () => stateIndicator(props.controller.agents ? props.controller.state : null);
   const running = () => props.controller.agents > 0;
@@ -175,8 +169,7 @@ export default function RepomindRow(props: RepomindRowProps) {
       aria-current={props.selected ? "true" : undefined}
       title={rowTitle()}
     >
-      {/* Line 1: the mark, the name, the needs-you pip, and the state pill - the same order and
-          the same widths a lane row uses, so the two read as one column. */}
+
       <div class="flex min-w-0 items-center gap-1.5">
         <span
           class={`flex size-3 shrink-0 items-center justify-center ${running() ? "text-signal" : "text-muted/60"}`}
@@ -202,7 +195,6 @@ export default function RepomindRow(props: RepomindRowProps) {
         <span class={`lane-status is-${indicator().tone}`}>{indicator().label}</span>
       </div>
 
-      {/* Line 2: where the home lives, then what it holds. */}
       <div class="flex min-w-0 items-center gap-1.5">
         <span class="size-3 shrink-0" aria-hidden="true" />
         <span class="truncate-tail min-w-0 flex-1 font-mono text-[10px] text-muted/70" title={props.home ?? undefined}>

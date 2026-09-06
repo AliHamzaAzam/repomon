@@ -93,8 +93,7 @@ describe("agentLabel", () => {
     expect(agentLabel(agent({ agent: "unknown", tmux_window: "lane-7-3" }))).toBe("agent 3");
   });
 
-  // The regression: the daemon hands sessions over newest-transcript-first, so the array reorders
-  // itself whenever the lane's agents take turns. A label must depend only on the session.
+  // Labels must remain stable when polling reorders sessions by activity.
   it("gives a window the same label regardless of array order", () => {
     const first = agent({ session_id: "a", tmux_window: "lane-7" });
     const second = agent({ session_id: "b", tmux_window: "lane-7-2" });

@@ -125,7 +125,7 @@ describe("the Repomind control room", () => {
     expect(screen.queryByLabelText("Message repomind")).toBeNull();
     expect(screen.queryByLabelText("Repomind live pane")).toBeNull();
     expect(screen.queryByRole("tab")).toBeNull();
-    // And none of the hidden-window era's polling behind them.
+
     await waitFor(() => expect(screen.getByText("Ship R6")).toBeInTheDocument());
     const methods = daemonCall.mock.calls.map((call) => call[0] as string);
     expect(methods.some((method) => method.startsWith("orchestrator."))).toBe(false);
@@ -264,10 +264,8 @@ describe("the Repomind control room", () => {
 });
 
 describe("Repomind panel header at a narrow rail", () => {
-  // The screenshot that started this: at a narrow rail the Expand button was painted over the
-  // status pill. jsdom cannot measure, so this asserts the structure that makes overlap
-  // impossible: the leading group is the one shrinkable child (and the pill inside it may
-  // truncate), the actions never shrink, and Expand is an icon with its name in aria-label.
+  // Check the shrinkable status group and fixed accessible actions structurally because jsdom
+  // cannot measure overlap.
   it("keeps the status pill fluid, the actions fixed, and Expand icon-only with a name", () => {
     mockDaemon();
     const onToggleFullscreen = vi.fn();

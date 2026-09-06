@@ -4,12 +4,7 @@ import type { Playbook } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
 import { RowShell, Section, SectionButton, SectionNote, sinceLabel } from "./RepomindSection";
 
-/// The approval gate, as a surface rather than a promise: what repomind has written and is
-/// waiting on, and what it is allowed to follow.
-///
-/// The two lists are deliberately not one list with a status column. A draft is a decision the
-/// operator owes; an approved playbook is settled. Sorting them together would bury the first
-/// under the second the moment the home has more than a few.
+/// Configures separate pending and approved playbook lists so decisions remain visible.
 export interface RepomindPlaybooksProps {
   /// Opens a home-relative path in the editor on the home lane.
   onOpen: (path: string) => void;
