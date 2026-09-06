@@ -1,8 +1,5 @@
-//! The repomon data model.
-//!
-//! The unit of state is `(repo, worktree)`; a [`Lane`] is the materialized join, optionally
-//! carrying live [`AgentSession`]s. All timestamps are stored UTC and converted to local
-//! only at render time. Git object ids travel as lowercase hex strings on the wire.
+//! Models repository/worktree lanes with optional live sessions, UTC timestamps, and lowercase
+//! hexadecimal Git object IDs.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -155,8 +152,8 @@ pub struct Repo {
     /// way back; each client decides what to do with them.
     #[serde(default)]
     pub hidden: bool,
-    /// Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
-    /// in the legacy name order; listings sort positioned repos first, then the rest by name.
+    /// Places explicitly positioned repositories first in manual order, then unpositioned
+    /// repositories by name.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub position: Option<i64>,
@@ -166,10 +163,8 @@ pub struct Repo {
     pub label: Option<String>,
 }
 
-/// A paired remote-access device: one named, individually-revocable bearer token minted at
-/// pairing. `token` is stored plaintext (same threat model as the legacy config-file token) and
-/// never crosses the remote bridge or `remote.devices` output. `role` is `"full"` today (the
-/// bridge's default-deny allowlist is the real authority); the column exists for future scoping.
+/// Stores a named revocable device token locally, excluding plaintext tokens from device listings
+/// and remote responses while the bridge allowlist enforces authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -197,7 +192,7 @@ pub struct Worktree {
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub head: gix::ObjectId,
     pub is_main: bool,
-    /// Last path component — what the UI shows.
+    /// Last path component - what the UI shows.
     pub name: String,
 }
 
@@ -220,7 +215,7 @@ impl DirtyState {
     }
 }
 
-/// The live git state of a worktree — the part that changes as work happens.
+/// The live git state of a worktree - the part that changes as work happens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -240,16 +235,12 @@ pub struct WorktreeState {
     pub locked: bool,
     #[serde(default)]
     pub prunable: bool,
-    /// Newest mtime among the worktree's changed/untracked files — repomon's "file activity"
-    /// signal. Lets the daemon surface a worktree that's being actively edited by an agent that
-    /// leaves no transcript or process of its own (e.g. a Claude Code worktree-isolated subagent).
-    /// `None` when the worktree is clean. Computed live; not persisted.
+    /// Carries the newest changed-file mtime as a live, unpersisted activity signal, absent for
+    /// clean worktrees.
     #[serde(default)]
     pub last_change_at: Option<DateTime<Utc>>,
-    /// True when every commit on this branch is already contained in the repository's default
-    /// branch, so the worktree is finished work waiting to be cleaned up. `false` for the default
-    /// branch itself, for a detached head, and when no default branch can be resolved. Computed
-    /// live; not persisted, and omitted from the wire when false.
+    /// Marks non-default attached branches already contained in the default branch, computed live
+    /// and omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merged: bool,
 }
@@ -368,7 +359,7 @@ pub struct Schedule {
     pub id: i64,
     pub spec: String,
     pub prompt: String,
-    /// The run's action cap — deliberately lower than an attended session's.
+    /// The run's action cap - deliberately lower than an attended session's.
     pub max_actions: u32,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
@@ -526,7 +517,7 @@ impl AgentKind {
         }
     }
 
-    /// Parse from the wire/storage string (infallible — unknown kinds become `Other`).
+    /// Parse from the wire/storage string (infallible - unknown kinds become `Other`).
     pub fn from_kind_str(s: &str) -> Self {
         match s {
             "claude-code" | "claude" => AgentKind::ClaudeCode,
@@ -567,7 +558,7 @@ impl<'de> Deserialize<'de> for AgentKind {
 #[serde(rename_all = "kebab-case")]
 pub enum AgentStatus {
     Running,
-    /// Waiting for user input — this is what drives the `⏸` "needs you" flag.
+    /// Waiting for user input - this is what drives the `pause` "needs you" flag.
     Waiting,
     /// Paused on a usage limit; repomon auto-continues it at the reset time (so it does *not*
     /// count as "needs you" while auto-continue is armed).
@@ -615,11 +606,11 @@ pub struct AgentSession {
     /// Live status, overlaid by the daemon (not persisted).
     #[serde(default)]
     pub status: AgentStatus,
-    /// True when detected from a transcript but NOT managed by repomon — i.e. running in
+    /// True when detected from a transcript but NOT managed by repomon - i.e. running in
     /// another terminal. Overlaid at list time; adopt it to interact from within repomon.
     #[serde(default)]
     pub external: bool,
-    /// The agent's session id (Claude transcript id), when known — lets adopt resume this
+    /// The agent's session id (Claude transcript id), when known - lets adopt resume this
     /// exact session even when several run in the same worktree.
     #[serde(default)]
     pub session_id: Option<String>,
@@ -627,10 +618,8 @@ pub struct AgentSession {
     /// `RateLimited` status; `None` when the reset time couldn't be parsed (periodic retry).
     #[serde(default)]
     pub resume_at: Option<DateTime<Utc>>,
-    /// True when this session was *inferred* from raw worktree file activity rather than detected
-    /// from a transcript or live process — i.e. repomon can see the worktree is being worked on
-    /// but can't identify the specific agent (Claude Code worktree-isolated subagents). The UI
-    /// renders these with a softer "active" indicator and they don't drive "needs you" alerts.
+    /// Marks sessions inferred from worktree file activity rather than an identified transcript or
+    /// process, excluding them from needs-you alerts.
     #[serde(default)]
     pub inferred: bool,
     /// The managed tmux window this session runs in, when repomon manages it. Several agents
@@ -638,22 +627,22 @@ pub struct AgentSession {
     /// this window. `None` for external and inferred sessions.
     #[serde(default)]
     pub tmux_window: Option<String>,
-    /// The agent's most recent message text (truncated) — what it said or asked when it last
+    /// The agent's most recent message text (truncated) - what it said or asked when it last
     /// ended a turn. Gives needs-you notifications their "why".
     #[serde(default)]
     pub last_message: Option<String>,
     /// Set only when the pane is sitting on an interactive dialog (permission prompt, plan
     /// approval, option question): the dialog's summary. Clients show approve/menu controls
-    /// exactly when this is present — a plain end-of-turn `Waiting` has none.
+    /// exactly when this is present - a plain end-of-turn `Waiting` has none.
     #[serde(default)]
     pub pending_prompt: Option<String>,
-    /// The full parsed dialog behind `pending_prompt` — question, body, options, cursor — so
+    /// The full parsed dialog behind `pending_prompt` - question, body, options, cursor - so
     /// clients can render answer controls without capturing the pane themselves. Overlaid at
     /// list time alongside `pending_prompt`; not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_dialog: Option<crate::agent::prompt::PendingDialog>,
     /// Overlaid when the agent looks stuck: its window/process is alive, no dialog is up, it
-    /// did not end its turn — and neither the pane nor the transcript has moved for the stall
+    /// did not end its turn - and neither the pane nor the transcript has moved for the stall
     /// window. A watchdog signal, not a status: `status` still reads Running/Idle underneath.
     #[serde(default)]
     pub stale: bool,
@@ -665,23 +654,15 @@ pub struct AgentSession {
     /// Overlaid at list time; not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_running: Option<String>,
-    /// One short phrase explaining why `status` reads the way it does: "permission dialog: Bash",
-    /// "subagent running", "spinner on screen", "no transcript activity for 6m". Overlaid at list
-    /// time and never persisted. Clients put it in a tooltip so a wrong status is reportable
-    /// rather than merely disbelieved.
+    /// A live, unpersisted explanation of the session status for tooltips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<String>,
-    /// What this session wants from a human, in the shared attention taxonomy
-    /// (`crate::agent::attention::Attention::as_str`): "none", "end_of_turn", "permission",
-    /// "decision". Overlaid at list time and never persisted.
-    ///
-    /// It exists so a client can tell the two halves of `Waiting` apart without re-deriving
-    /// them: an agent that merely ended its turn wants nothing in particular, while one sitting
-    /// on a dialog or an explicit question wants the operator now.
+    /// Exposes the shared attention kind at list time, distinguishing a completed turn from a
+    /// prompt that needs the operator without persisting the overlay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_kind: Option<String>,
-    /// Whether the transcript's last entry is the agent speaking with no tool call — i.e. it
-    /// finished its turn — independent of the Idle time-decay that hides this in `status`.
+    /// Whether the transcript's last entry is the agent speaking with no tool call - i.e. it
+    /// finished its turn - independent of the Idle time-decay that hides this in `status`.
     /// Daemon-internal (feeds the stall detector); never serialized.
     #[serde(skip)]
     #[cfg_attr(feature = "ts", ts(skip))]
@@ -707,7 +688,7 @@ pub struct AgentSession {
     pub generated_label: Option<String>,
 }
 
-/// The materialized `(repo, worktree, agent?)` join — the UI's primary unit.
+/// The materialized `(repo, worktree, agent?)` join - the UI's primary unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -795,7 +776,7 @@ pub enum SessionKind {
     Parallel,
 }
 
-/// A detected window of activity (Phase 3).
+/// Describes a detected window of activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -905,7 +886,7 @@ pub struct BrowseResult {
     pub entries: Vec<BrowseEntry>,
 }
 
-/// One entry in a `file.list` directory listing (one worktree level — not a recursive tree, the
+/// One entry in a `file.list` directory listing (one worktree level - not a recursive tree, the
 /// desktop's file tree expands lazily). `size` is `None` for directories.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -919,7 +900,7 @@ pub struct FileEntry {
     pub size: Option<u64>,
     /// From a batched `git check-ignore --stdin` over the whole listing (see
     /// `repomon-daemon/src/files.rs`), not a per-entry shell-out. `.git` itself is never listed
-    /// at all (independent of gitignore — see `file.list`'s handler).
+    /// at all (independent of gitignore - see `file.list`'s handler).
     pub ignored: bool,
 }
 
@@ -944,11 +925,8 @@ pub struct FileReadResult {
     pub mtime_ms: u64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub size: u64,
-    /// Always `false`: unlike display RPCs (e.g. `lane.diff`'s patch, which caps-and-flags),
-    /// `file.read` REJECTS a file over its size cap outright rather than truncating it - a
-    /// truncated read here risks the editor saving the truncated copy back over the real file.
-    /// Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
-    /// frontend should not expect this to ever be `true` today.
+    /// Always false because file.read rejects oversized files instead of returning truncated
+    /// content that an editor could save over the original.
     pub truncated: bool,
     pub kind: String,
     /// `true` when the file size exceeds 2 MiB (large file mode).
@@ -1181,13 +1159,8 @@ pub enum TmuxDoctorSource {
     Bundled,
 }
 
-/// Machine health and probe info for `tmux`.
-///
-/// tmux is not a Windows dependency: Windows agents run through the bundled ConPTY
-/// `repomon-agent-host.exe` instead ([`AgentHostDoctorInfo`]). The field stays for wire
-/// compatibility, but on Windows [`Self::not_applicable`] is set and the probed values
-/// underneath it are meaningless — clients must not show a tmux row or count it toward an
-/// "all good" summary there.
+/// Carries tmux probe results for wire compatibility; when not_applicable is true on Windows,
+/// clients must omit tmux from dependency rows and health summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -1309,7 +1282,7 @@ mod tests {
             let s = k.as_str().to_string();
             assert_eq!(AgentKind::from_kind_str(&s), k);
         }
-        // "claude" is accepted as an alias for claude-code.
+
         assert_eq!(AgentKind::from_kind_str("claude"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::from_kind_str("hermes-agent"), AgentKind::Hermes);
         assert_eq!(AgentKind::Hermes.command(), "hermes");

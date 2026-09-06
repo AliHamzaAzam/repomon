@@ -1,8 +1,5 @@
-//! Supervision classification for interactive agent permission dialogs.
-//!
-//! Classifies [`PendingDialog`] instances into semantic [`DialogClass`] categories,
-//! extracts subject entities (commands, file paths, hosts), and conservatively evaluates
-//! whether an action is provably scoped to the repo worktree.
+//! Classifies permission dialogs, extracts subjects, and conservatively checks whether an action is
+//! scoped to the worktree.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -194,7 +191,6 @@ pub fn evaluate(
     kind: AgentKind,
     extra_allow: bool,
 ) -> Decision {
-    // 1. Always escalate check on subject
     if c.subject
         .as_deref()
         .is_some_and(approval::is_always_escalate)
@@ -217,7 +213,6 @@ pub fn evaluate(
         };
     }
 
-    // 3. Look up policy action for dialog class
     let map_action = policy
         .classes
         .get(&c.class)
@@ -247,7 +242,6 @@ pub fn evaluate(
         source = PolicySource::ApprovalRule;
     }
 
-    // 5. Option index mapping & outcome construction
     match action {
         PolicyAction::AutoApprove => {
             if let Some(idx) = approve_option(d, kind) {
@@ -327,7 +321,7 @@ pub struct Classification {
 /// Classify a pending interactive dialog into a [`DialogClass`] and determine whether
 /// the requested operation is provably contained within the repository worktree.
 pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) -> Classification {
-    let _ = kind; // Accepted for future per-kind quirks
+    let _ = kind;
 
     let mut parts: Vec<&str> = Vec::new();
     if let Some(ref t) = d.title {
@@ -464,7 +458,6 @@ pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) 
         };
     }
 
-    // 5. NetworkAccess: curl, wget, nc , ssh , http://, https://
     let mut net_evidence = Vec::new();
     for &m in &["curl", "wget", "http://", "https://"] {
         if full_text_lower.contains(m) {
@@ -514,7 +507,6 @@ pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) 
         };
     }
 
-    // 7. FileWrite: title/question containing edit file, create file, write, apply patch, multiedit
     let mut write_evidence = Vec::new();
     for &m in &["edit file", "create file", "apply patch", "multiedit"] {
         if title_lower.contains(m) || question_lower.contains(m) {
@@ -547,10 +539,7 @@ pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) 
         };
     }
 
-    // 8. CommandExec: title starting bash, a boxless "Bash command" header line (Claude Code
-    // v2.1.235+ draws its Bash approval dialog with no box, so the header lands in body/context
-    // instead of `title` — see the live fixture in the tests below), or run command, run tool,
-    // requesting permission, wants to run, requires approval
+    // A boxless Bash header can appear in context or body rather than the dialog title.
     let mut cmd_evidence = Vec::new();
     if title_lower.starts_with("bash") {
         cmd_evidence.push("bash".to_string());
@@ -585,7 +574,6 @@ pub fn classify_dialog(d: &PendingDialog, kind: AgentKind, scope: &DialogScope) 
         };
     }
 
-    // 9. Unknown: anything else
     let subject = extract_subject(d, DialogClass::Unknown);
     Classification {
         class: DialogClass::Unknown,
@@ -639,10 +627,8 @@ fn is_path_in_scope(token: &str, scope: &DialogScope) -> bool {
     if clean.starts_with('~') {
         return false;
     }
-    // Rooted paths must start with worktree or repo_root. `has_root()` is
-    // intentionally broader than `is_absolute()`: on Windows, `/etc/passwd`
-    // is rooted but has no drive prefix, so `is_absolute()` would treat it as
-    // a repo-relative path.
+    // Use has_root on Windows because drive-less rooted paths are not absolute but must not count
+    // as repository-relative.
     let p = Path::new(clean);
     if p.has_root() {
         if p.starts_with(&scope.worktree) || p.starts_with(&scope.repo_root) {
@@ -951,8 +937,8 @@ fn is_header_or_label_line(line: &str) -> bool {
         || l.starts_with("───")
 }
 
-/// Agent transcript narration glyphs (Claude Code's `⏺`/`⎿`/`✻`, others' `●`) that prefix
-/// log/status lines — never a dialog subject even when they land in `context` alongside a
+/// Agent transcript narration glyphs (Claude Code's `U+23FA`/`⎿`/`U+273B`, others' `●`) that prefix
+/// log/status lines - never a dialog subject even when they land in `context` alongside a
 /// recognized header.
 const TRANSCRIPT_GLYPHS: [char; 4] = ['⏺', '⎿', '✻', '●'];
 
@@ -964,10 +950,8 @@ fn is_transcript_line(line: &str) -> bool {
         .is_some_and(|c| TRANSCRIPT_GLYPHS.contains(&c))
 }
 
-/// For a boxless dialog whose "Bash command" header line landed in `context` or `body` (no `╭`
-/// border for [`crate::agent::prompt::detect_dialog`]'s `describe` to anchor a `title` on), find
-/// the first real content line after that header — skipping further marker/heading lines and
-/// transcript narration — and use it as the subject. Strips a leading `$ ` if present.
+/// Find content after a boxless Bash header, skipping headings and narration and stripping a shell
+/// prompt prefix.
 fn subject_after_bash_header(lines: &[String]) -> Option<String> {
     let header_idx = lines
         .iter()
@@ -1024,10 +1008,6 @@ fn extract_command_from_question(question: &str) -> Option<String> {
     }
     None
 }
-
-// ---------------------------------------------------------------------------
-// Option Mapping (approve_option / deny_option)
-// ---------------------------------------------------------------------------
 
 /// Substrings that permanently disqualify an option from single-shot approval.
 const APPROVE_BLACKLIST: &[&str] = &[
@@ -1329,7 +1309,6 @@ Do you want to proceed?
     fn repo_scope_evaluation_tests() {
         let scope = test_scope();
 
-        // 1. cargo test -p repomon-core command => repo_scoped true
         let d1 = test_dialog(Some("Bash command"), &["cargo test -p repomon-core"], &[]);
         let c1 = classify_dialog(&d1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c1.class, DialogClass::CommandExec);
@@ -1341,13 +1320,11 @@ Do you want to proceed?
         assert_eq!(c2.class, DialogClass::CredentialAccess);
         assert!(!c2.repo_scoped);
 
-        // 3. cd /etc && cat passwd => not repo_scoped
         let d3 = test_dialog(Some("Bash command"), &["cd /etc && cat passwd"], &[]);
         let c3 = classify_dialog(&d3, AgentKind::ClaudeCode, &scope);
         assert_eq!(c3.class, DialogClass::CommandExec);
         assert!(!c3.repo_scoped);
 
-        // 4. path with .. escaping worktree => not repo_scoped
         let d4 = test_dialog(Some("Bash command"), &["cargo test -p ../escaping"], &[]);
         let c4 = classify_dialog(&d4, AgentKind::ClaudeCode, &scope);
         assert_eq!(c4.class, DialogClass::CommandExec);
@@ -1358,7 +1335,6 @@ Do you want to proceed?
     fn fixture_table_all_nine_classes() {
         let scope = test_scope();
 
-        // 1. CredentialAccess (at least 2 fixtures)
         let d_cred_1 = test_dialog(Some("Bash command"), &["cat .env"], &[]);
         let c_cred_1 = classify_dialog(&d_cred_1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c_cred_1.class, DialogClass::CredentialAccess);
@@ -1374,7 +1350,6 @@ Do you want to proceed?
         assert_eq!(c_cred_3.class, DialogClass::CredentialAccess);
         assert!(!c_cred_3.repo_scoped);
 
-        // 2. PushRemote (at least 2 fixtures)
         let d_push_1 = test_dialog(
             Some("Bash command"),
             &["git push origin feat/supervision"],
@@ -1402,7 +1377,6 @@ Do you want to proceed?
         assert_eq!(c_push_3.class, DialogClass::PushRemote);
         assert!(!c_push_3.repo_scoped);
 
-        // 3. Install (at least 2 fixtures)
         let d_inst_1 = test_dialog(Some("Bash command"), &["cargo install ripgrep"], &[]);
         let c_inst_1 = classify_dialog(&d_inst_1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c_inst_1.class, DialogClass::Install);
@@ -1418,7 +1392,6 @@ Do you want to proceed?
         assert_eq!(c_inst_3.class, DialogClass::Install);
         assert!(!c_inst_3.repo_scoped);
 
-        // 4. DeviceAccess (at least 2 fixtures)
         let d_dev_1 = test_dialog(
             Some("Bash command"),
             &["osascript -e 'display dialog \"hi\"'"],
@@ -1433,7 +1406,6 @@ Do you want to proceed?
         assert_eq!(c_dev_2.class, DialogClass::DeviceAccess);
         assert!(!c_dev_2.repo_scoped);
 
-        // 5. NetworkAccess (at least 2 fixtures)
         let d_net_1 = test_dialog(
             Some("Bash command"),
             &["curl https://crates.io/api/v1/crates"],
@@ -1453,7 +1425,6 @@ Do you want to proceed?
         assert_eq!(c_net_3.class, DialogClass::NetworkAccess);
         assert!(!c_net_3.repo_scoped);
 
-        // 6. Deletion (at least 2 fixtures)
         let d_del_1 = test_dialog(Some("Bash command"), &["rm src/temp.txt"], &[]);
         let c_del_1 = classify_dialog(&d_del_1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c_del_1.class, DialogClass::Deletion);
@@ -1469,7 +1440,6 @@ Do you want to proceed?
         assert_eq!(c_del_3.class, DialogClass::Deletion);
         assert!(!c_del_3.repo_scoped);
 
-        // 7. FileWrite (at least 2 fixtures)
         let d_write_1 = test_dialog(Some("Edit file"), &["src/agent/prompt.rs"], &[]);
         let c_write_1 = classify_dialog(&d_write_1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c_write_1.class, DialogClass::FileWrite);
@@ -1486,7 +1456,6 @@ Do you want to proceed?
         assert_eq!(c_write_3.class, DialogClass::FileWrite);
         assert!(c_write_3.repo_scoped);
 
-        // 8. CommandExec (at least 2 fixtures)
         let d_cmd_1 = test_dialog(Some("Bash command"), &["cargo test -p repomon-core"], &[]);
         let c_cmd_1 = classify_dialog(&d_cmd_1, AgentKind::ClaudeCode, &scope);
         assert_eq!(c_cmd_1.class, DialogClass::CommandExec);
@@ -1502,7 +1471,6 @@ Do you want to proceed?
         assert_eq!(c_cmd_3.class, DialogClass::CommandExec);
         assert!(!c_cmd_3.repo_scoped);
 
-        // 9. Unknown (at least 2 fixtures)
         let mut d_unk_1 = test_dialog(None, &[], &[]);
         d_unk_1.question = "Which auth method should we use?".to_string();
         let c_unk_1 = classify_dialog(&d_unk_1, AgentKind::ClaudeCode, &scope);
@@ -1577,10 +1545,7 @@ Do you want to proceed?\n\
 
     const FIXTURE_CLAUDE_TRUST: &str = " Security guide\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel";
 
-    /// Ground-truth pane capture from Claude Code v2.1.235, which draws its Bash approval
-    /// dialog BOXLESS (no ╭/│ glyphs). See `.briefs/live-fixture-claude-bash-approval.txt`.
-    /// Includes the unrelated preceding agent-transcript lines (mail check, acceptance-test
-    /// reply) that used to get mis-picked as the subject.
+    /// Boxless Bash approval must ignore preceding transcript text when choosing the subject.
     const FIXTURE_LIVE_CLAUDE_BOXLESS_BASH: &str = " ⚠ 4 MCP servers need authentication · run /mcp\n\n❯ Check your repomail and act on it.\n\n⏺ I'll check your repomon messages and handle any pending items.\n\n  Called repomon\n\n⏺ You have one acceptance test message. I'll mark it read and respond.\n\n  Called repomon 2 times\n\n⏺ Done. Checked your inbox and replied to acceptance test A1 with \"DONE-A1\". The message is queued for delivery to the operator.\n\n✻ Crunched for 14s\n\n❯ Run this exact shell command now: cargo --version\n\n  Checking cargo version\n  ⎿  $ cargo --version\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n Bash command\n\n   cargo --version\n   Check cargo version\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don\u{2019}t ask again for: cargo *\n   3. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain";
 
     #[test]
@@ -1631,7 +1596,7 @@ Do you want to proceed?\n\
     fn live_claude_boxless_bash_approval_dialog() {
         let d = detect_dialog(FIXTURE_LIVE_CLAUDE_BOXLESS_BASH)
             .expect("live boxless Claude bash dialog");
-        // Boxless: no ╭ border, so no title and no body — the header landed in `context`.
+        // Boxless: no ╭ border, so no title and no body - the header landed in `context`.
         assert_eq!(d.title, None);
         assert!(d.body.is_empty());
 
@@ -1662,13 +1627,11 @@ Do you want to proceed?\n\
         assert_eq!(approve_option(&d_black, AgentKind::Codex), None);
         assert_eq!(deny_option(&d_black, AgentKind::Codex), Some(2));
 
-        // 6c: Dialog with two identical Yes rows returns None
         let pane_identical_yes = "Do you want to proceed?\n❯ 1. Yes\n  2. Yes\n  3. No";
         let d_id = detect_dialog(pane_identical_yes).expect("identical yes dialog");
         assert_eq!(approve_option(&d_id, AgentKind::ClaudeCode), None);
         assert_eq!(deny_option(&d_id, AgentKind::ClaudeCode), Some(2));
 
-        // 6d: Decision-class prompt with non-affirmative options
         let pane_decision = "Which auth method should we use?\n❯ 1. OAuth\n  2. API keys";
         let d_dec = detect_dialog(pane_decision).expect("decision dialog");
         assert_eq!(approve_option(&d_dec, AgentKind::ClaudeCode), None);
@@ -1677,7 +1640,6 @@ Do you want to proceed?\n\
 
     #[test]
     fn test_7_round_trip_dialog_select_keys_for_fixtures_1_to_4() {
-        // Fixture 1: Claude Bash
         let d1 = detect_dialog(FIXTURE_CLAUDE_BASH).unwrap();
         let app1 = approve_option(&d1, AgentKind::ClaudeCode).unwrap();
         assert_eq!(dialog_select_keys(&d1, app1), vec!["Enter".to_string()]);
@@ -1687,7 +1649,6 @@ Do you want to proceed?\n\
             vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]
         );
 
-        // Fixture 2: Claude Edit
         let d2 = detect_dialog(FIXTURE_CLAUDE_EDIT).unwrap();
         let app2 = approve_option(&d2, AgentKind::ClaudeCode).unwrap();
         assert_eq!(dialog_select_keys(&d2, app2), vec!["Enter".to_string()]);
@@ -1697,7 +1658,6 @@ Do you want to proceed?\n\
             vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]
         );
 
-        // Fixture 3: Codex MCP
         let d3 = detect_dialog(FIXTURE_CODEX_MCP).unwrap();
         let app3 = approve_option(&d3, AgentKind::Codex).unwrap();
         assert_eq!(dialog_select_keys(&d3, app3), vec!["Enter".to_string()]);
@@ -1712,7 +1672,6 @@ Do you want to proceed?\n\
             ]
         );
 
-        // Fixture 4: Antigravity
         let d4 = detect_dialog(FIXTURE_ANTIGRAVITY).unwrap();
         let app4 = approve_option(&d4, AgentKind::Antigravity).unwrap();
         assert_eq!(dialog_select_keys(&d4, app4), vec!["Enter".to_string()]);
@@ -1860,8 +1819,7 @@ Do you want to proceed?\n\
         assert_eq!(dec1.choice, Some(0));
         assert_eq!(dec1.source, PolicySource::ApprovalRule);
 
-        // Sub-assert 2: does NOT lift non-repo-scoped CommandExec
-        let policy_auto = resolve(&SupervisionConfig::default(), None); // CommandExec is AutoApprove by default
+        let policy_auto = resolve(&SupervisionConfig::default(), None);
         let c2 = Classification {
             class: DialogClass::CommandExec,
             repo_scoped: false,
@@ -1873,7 +1831,6 @@ Do you want to proceed?\n\
         assert_eq!(dec2.choice, None);
         assert_eq!(dec2.source, PolicySource::NotRepoScoped);
 
-        // Sub-assert 3: does NOT lift FileWrite
         let mut policy_edit = resolve(&SupervisionConfig::default(), None);
         policy_edit
             .classes

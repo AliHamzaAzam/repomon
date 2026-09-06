@@ -97,7 +97,6 @@ fn discover_walk(root: &Path, max_depth: usize) -> Vec<PathBuf> {
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         if dir.join(".git").exists() {
-            // It's a repo — record it and don't descend further.
             found.push(dir.canonicalize().unwrap_or(dir));
             continue;
         }
@@ -163,7 +162,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("a/b/c/d/.git")).unwrap();
-        // Depth 2 is too shallow to reach a/b/c/d.
+
         assert!(discover_walk(root, 2).is_empty());
         assert_eq!(discover_walk(root, 5).len(), 1);
     }

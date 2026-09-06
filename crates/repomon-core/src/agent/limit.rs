@@ -1,10 +1,5 @@
-//! Detecting Claude Code's usage-limit pause from pane text, and parsing the reset time.
-//!
-//! Claude's transcript JSONL does **not** record usage-limit info, so the daemon detects the
-//! pause by reading the agent's tmux pane. This module is the pure, fixture-tested heart: given
-//! the recent pane text it decides whether the agent is *blocked* on the usage limit and, if so,
-//! when it resets. It is deliberately lenient about phrasing and never matches the non-blocking
-//! "approaching usage limit" warning.
+//! Detects blocking Claude usage limits and reset times from pane text, excluding non-blocking
+//! approach warnings.
 
 use chrono::{DateTime, Local, Utc};
 
@@ -16,10 +11,8 @@ pub struct UsageLimit {
     /// When the limit resets (UTC), if a clock time could be parsed from the message. `None`
     /// means the caller should retry periodically rather than wait for a precise moment.
     pub reset_at: Option<DateTime<Utc>>,
-    /// Claude's interactive "What do you want to do?" menu, parsed from the pane when on
-    /// screen. The caller must select the "stop and wait for limit to reset" option — which is
-    /// NOT always option 1 nor always pre-selected (the options move around between
-    /// occurrences) — see [`menu_select_keys`].
+    /// Carries the visible limit menu whose wait option must be selected by parsed identity rather
+    /// than assuming a fixed position.
     pub menu: Option<LimitMenu>,
 }
 
@@ -27,7 +20,7 @@ pub struct UsageLimit {
 /// "stop and wait" option actually sits, so the caller selects by position, not by faith.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitMenu {
-    /// 0-based row of the selection cursor (`❯`), if visible.
+    /// 0-based row of the selection cursor (`U+276F`), if visible.
     pub selected: Option<usize>,
     /// 0-based row of the "stop and wait for limit to reset" option.
     pub wait_idx: usize,
@@ -57,11 +50,8 @@ fn is_wait_option(lower_text: &str) -> bool {
     lower_text.contains("stop and wait") || lower_text.contains("wait for limit")
 }
 
-/// Parse one menu-option-shaped line: optional selection cursor (`❯` as Claude draws it, `›` as
-/// Codex does, `>` as Antigravity does), optional `N.` number, then text. Returns
-/// `(has_cursor, number, text)`; `None`
-/// when the line isn't option-shaped. (Shared with the pending-prompt detector in
-/// [`super::prompt`].)
+/// Parses a menu option into cursor presence, optional number, and text, returning `None` for
+/// non-option lines.
 pub(crate) fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String)> {
     let clean = strip_ansi(line);
     let mut rest = clean.trim_start();
@@ -80,7 +70,7 @@ pub(crate) fn parse_option_line(line: &str) -> Option<(bool, Option<u32>, String
     } else {
         None
     };
-    // An option row needs at least one of the markers (cursor or number) plus some text —
+    // An option row needs at least one of the markers (cursor or number) plus some text -
     // otherwise every ordinary output line would qualify.
     if (!cursor && number.is_none()) || rest.is_empty() {
         return None;
@@ -99,7 +89,7 @@ fn parse_menu(pane: &str) -> Option<LimitMenu> {
         p.as_ref()
             .is_some_and(|(_, _, text)| is_wait_option(&text.to_lowercase()))
     })?;
-    // Expand to the contiguous option block around the anchor.
+
     let mut start = anchor;
     while start > 0 && parsed[start - 1].is_some() {
         start -= 1;
@@ -117,10 +107,7 @@ fn parse_menu(pane: &str) -> Option<LimitMenu> {
     })
 }
 
-/// The keystrokes (tmux `send-keys` names) that select the menu's wait option: arrow from the
-/// visible cursor to the option's row, then Enter. Without a visible cursor, fall back to the
-/// option's printed number (digit selection confirms immediately; the trailing Enter then lands
-/// harmlessly on the empty input box).
+/// Returns keys to select the parsed wait option from its cursor position or printed number.
 pub fn menu_select_keys(menu: &LimitMenu) -> Vec<String> {
     match menu.selected {
         Some(cur) => {
@@ -137,10 +124,7 @@ pub fn menu_select_keys(menu: &LimitMenu) -> Vec<String> {
     }
 }
 
-/// Whether the pane shows a *blocking* limit. Covers Claude's several phrasings: the classic
-/// "usage limit reached … resets at X", the "You've hit your session limit · resets 3am" notice,
-/// and any screen offering "/upgrade to increase your usage limit". The "approaching … limit"
-/// heads-up is a warning, not a block, so it's explicitly excluded.
+/// Recognize blocking quota notices while excluding approaching-limit warnings.
 fn is_blocked(lower: &str) -> bool {
     if lower.contains("approaching") {
         return false;
@@ -233,7 +217,7 @@ mod tests {
 
     #[test]
     fn menu_parses_reordered_options() {
-        // The options move around between occurrences — the wait choice here is option 2 and
+        // The options move around between occurrences - the wait choice here is option 2 and
         // the cursor sits on option 1. A blind Enter would pick "Upgrade your plan".
         let pane = "What do you want to do?\n\
             ❯ 1. Upgrade your plan\n\
@@ -283,24 +267,24 @@ mod tests {
             wait_idx,
             wait_number,
         };
-        // Cursor already on the wait option → just confirm (the old behavior, now verified).
+
         assert_eq!(menu_select_keys(&menu(Some(0), 0, Some(1))), vec!["Enter"]);
-        // Below the cursor → walk down.
+
         assert_eq!(
             menu_select_keys(&menu(Some(0), 2, Some(3))),
             vec!["Down", "Down", "Enter"]
         );
-        // Above the cursor → walk up.
+
         assert_eq!(
             menu_select_keys(&menu(Some(2), 0, Some(1))),
             vec!["Up", "Up", "Enter"]
         );
-        // No visible cursor → select by printed number.
+
         assert_eq!(
             menu_select_keys(&menu(None, 1, Some(2))),
             vec!["2", "Enter"]
         );
-        // No cursor and no number: Enter is the only signal left.
+
         assert_eq!(menu_select_keys(&menu(None, 0, None)), vec!["Enter"]);
     }
 
@@ -321,27 +305,26 @@ mod tests {
         let at_3pm = parse_reset_at("resets at 3:00 pm", now)
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(at_3pm.day(), 1); // today
+        assert_eq!(at_3pm.day(), 1);
         assert_eq!(at_3pm.hour(), 15);
 
         // Well in the past (cross-midnight "3am" seen at 6pm = 15h) → tomorrow.
         let at_3am = parse_reset_at("resets at 3am", now)
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(at_3am.day(), 2); // tomorrow
+        assert_eq!(at_3am.day(), 2);
         assert_eq!(at_3am.hour(), 3);
 
-        // Still upcoming today.
         let at_11pm = parse_reset_at("resets at 11:00 pm", now)
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(at_11pm.day(), 1); // still today
+        assert_eq!(at_11pm.day(), 1);
         assert_eq!(at_11pm.hour(), 23);
     }
 
     #[test]
     fn detects_session_limit_notice() {
-        // Claude's "session limit" phrasing — no "limit reached", no menu, but a reset time and
+        // Claude's "session limit" phrasing - no "limit reached", no menu, but a reset time and
         // an upgrade cue. (The reported real-world miss.)
         let pane = "You've hit your session limit · resets 3am (Asia/Karachi)\n\
             /upgrade to increase your usage limit.";

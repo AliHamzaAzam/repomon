@@ -1,13 +1,5 @@
-//! The usage ledger: token counts per agent turn, attributed to the fleet and priced at query
-//! time.
-//!
-//! The ledger stores tokens, never dollars. Every query re-prices its rows through a
-//! [`crate::pricing::PriceTable`], so correcting a rate corrects history too, and a model with no
-//! published price still contributes its tokens and is named in `unpriced_models` rather than
-//! silently costing nothing.
-//!
-//! Everything in this module is a pure function over rows. Reading the sources lives in [`scan`],
-//! persistence lives in [`crate::store`], and scheduling lives in the daemon.
+//! Prices recorded token usage at query time. Unknown models retain their token counts and are
+//! reported as unpriced.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,12 +14,8 @@ pub mod scan;
 
 pub use scan::{HEADLINE_VERSION, UNTITLED_SESSION};
 
-/// Which revision of the readers produced a source's stored events.
-///
-/// Bumping this makes ingest re-read every source from the start and replace what it wrote last
-/// time, a bounded batch per pass, so a correction to a reader corrects the history it already
-/// recorded rather than only what arrives next. Version 1 is the first to count a multi-block
-/// Claude message once and to read the subagent transcripts nested under a session.
+/// Identifies the reader revision, whose change schedules bounded source replay and replacement of
+/// previously stored events.
 pub const INGEST_VERSION: u32 = 1;
 
 /// One stored ledger row.
@@ -220,12 +208,8 @@ pub enum Range {
 }
 
 impl Range {
-    /// The `[from, to]` window this range covers as of `now`.
-    ///
-    /// Day-aligned ranges start at local midnight, not UTC midnight: "today" is the operator's
-    /// day, and it is the same day the agent CLIs report their own totals over, so the two agree.
-    /// The daemon runs on the operator's machine, so its local zone is theirs; a client in another
-    /// zone sends explicit bounds instead of a name.
+    /// Returns inclusive range bounds using the daemon’s local midnight for day-aligned names;
+    /// clients in another zone must send explicit bounds.
     pub fn window(self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
         let back = match self {
             Range::Today => 0,
@@ -947,11 +931,8 @@ pub struct UsageStatus {
     pub stale_sources: u64,
 }
 
-/// Price session rows through `table`, charging each row's totals at its dominant model's rate.
-///
-/// A session that switched models mid-run is priced as if it had stayed on the model it spent the
-/// most tokens on. Splitting the cost exactly would mean keeping per-model totals per session,
-/// which is what `usage.summary` grouped by model already answers.
+/// Prices each session’s aggregate tokens at its dominant model’s rate, approximating sessions that
+/// switched models.
 pub fn price_sessions(rows: &mut [UsageSessionRow], table: &PriceTable) {
     for row in rows.iter_mut() {
         let at = row.ended_at.or(row.started_at).unwrap_or_else(Utc::now);
@@ -1056,9 +1037,9 @@ mod tests {
         let s = summarize(&events, GroupBy::Kind, &PriceTable::builtin());
         assert_eq!(s.totals.input_tokens, 200);
         assert_eq!(s.totals.cache_read_tokens, 300);
-        // 300 cached against 200 uncached input across both rows.
+
         assert!((s.cache_hit_rate - 0.6).abs() < 1e-9);
-        // 100 of 550 counted tokens came from an estimate.
+
         assert!((s.estimated_share - 100.0 / 550.0).abs() < 1e-9);
         assert_eq!(s.groups.len(), 2);
     }

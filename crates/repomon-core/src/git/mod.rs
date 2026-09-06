@@ -22,10 +22,7 @@ pub const WINDOWS_STANDARD_GIT_DIRS: [&str; 2] = [
     r"C:\Program Files (x86)\Git\cmd",
 ];
 
-/// Pure `git.exe` resolution: PATH first, then (when given) a list of standard install
-/// directories to check for `git.exe` directly. Takes the PATH value and candidate directories
-/// as parameters, so the Windows fallback is unit-testable on every OS without touching real
-/// environment state.
+/// Resolves git from PATH before checking supplied standard installation directories.
 pub fn find_git_from(
     path_var: Option<&std::ffi::OsStr>,
     standard_dirs: &[PathBuf],
@@ -164,7 +161,7 @@ mod tests {
         };
         let commits = read_commits_in_range(p, 7, range).unwrap();
         assert_eq!(commits.len(), 2);
-        // Newest first.
+
         assert_eq!(commits[0].summary, "feat: add a");
         assert_eq!(commits[1].summary, "feat: initial commit");
         assert_eq!(commits[0].repo_id, 7);

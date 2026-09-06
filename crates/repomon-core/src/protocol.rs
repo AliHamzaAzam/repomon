@@ -1,8 +1,5 @@
-//! The JSON-RPC 2.0 wire protocol shared by the daemon and its clients.
-//!
-//! Messages are length-prefixed: a 4-byte little-endian `u32` length, then that many bytes
-//! of JSON. Requests carry an `id`; server-pushed events are notifications (no `id`) with a
-//! method of the form `event.<topic>`.
+//! Frames JSON-RPC envelopes with a four-byte little-endian length prefix; requests carry IDs and
+//! event notifications omit them.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -138,7 +135,7 @@ where
     write_frame(w, &bytes).await
 }
 
-/// Read one length-prefixed frame. Returns `None` on clean EOF.
+/// Reads one length-prefixed frame, returning None on clean EOF.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {

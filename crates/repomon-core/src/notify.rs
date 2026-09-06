@@ -1,12 +1,5 @@
-//! Agent state-change notifications: the pure, client-agnostic heart.
-//!
-//! Both the TUI (local popups) and the daemon (remote `event.notification` broadcasts + push)
-//! watch per-session agent statuses across refreshes and alert on meaningful transitions.
-//! Everything shared lives here: session keying, the status diff, transition classification,
-//! and the `(title, body)` text composition, plus the local desktop delivery
-//! ([`send_native`]) shared by the TUI and the daemon — the daemon fires it as a fallback when
-//! the local TUI is parked (attached to a pane) or closed. Remote delivery (APNs) and the TUI's
-//! in-app banner stay with their clients.
+//! Tracks per-session notification transitions and provides local delivery when the desktop is
+//! absent or parked. Clients remain responsible for remote push and in-app presentation.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,7 +20,7 @@ pub enum NotifKind {
     Resumed,
     /// Agent went idle or its session ended.
     Idle,
-    /// Agent looks stuck: process alive, no dialog up, turn not ended — and neither the pane
+    /// Agent looks stuck: process alive, no dialog up, turn not ended - and neither the pane
     /// nor the transcript has moved for the stall window. Gated by the needs-you toggle (a
     /// stall is a needs-you-class event, not a new setting).
     Stalled,
@@ -74,14 +67,8 @@ impl NotifKind {
     }
 }
 
-/// Identifies one real agent session within a lane across refreshes.
-///
-/// Transcript-backed sessions key on the Claude session id (the transcript filename stem),
-/// which is stable across polls. `claude --resume` may continue the same logical work in a new
-/// transcript; that reads as one session vanishing and another appearing — acceptable noise. A
-/// lane has at most one real session *without* a transcript id per snapshot (the managed
-/// no-transcript placeholder or the generic process monitor — mutually exclusive branches in
-/// the daemon's `overlay_agents`), so a single `Fallback` sentinel covers it.
+/// Identifies a transcript-backed session by ID, with a lane-local fallback key for sessions
+/// lacking an ID.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessKey {
     Transcript(String),
@@ -89,18 +76,12 @@ pub enum SessKey {
 }
 
 /// A session's notification-relevant state in one snapshot: its status plus the stall flag.
-/// The pair is what the edge detectors diff across polls — a stall flip alerts even though
+/// The pair is what the edge detectors diff across polls - a stall flip alerts even though
 /// the status underneath (Running/Idle) never changes.
 pub type SessState = (AgentStatus, bool);
 
-/// Key/state pairs for one lane's *real* agent sessions, used to drive notifications.
-///
-/// `inferred` "file-activity" sessions are worktree-isolated subagents (a Claude Code subagent
-/// runs inside its parent's process and leaves no transcript or process of its own). They are
-/// dropped unless `include_subagents` is set — the `notify_subagents` toggle, off by default, so
-/// the user is alerted only when the *main* agent finishes, not each subagent it spawns. On a
-/// (theoretically impossible) duplicate key, the higher-priority status wins — the same order the
-/// old per-lane rollup used — and the stall flag is OR-merged.
+/// Builds per-session notification state, optionally including inferred subagents and merging
+/// duplicate keys by status priority and stall state.
 pub fn session_statuses(
     lane_id: LaneId,
     sessions: &[AgentSession],
@@ -137,14 +118,8 @@ pub fn status_priority(s: AgentStatus) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// Diff the previous and current per-session status maps into the notifications to fire.
-///
-/// Sessions present in `now` are edge-detected against their previous status. Sessions that
-/// vanished fire as a transition to `None` (→ Idle if they were active), except when their
-/// whole lane is gone (deleting a lane isn't an agent going quiet) or when a lane's `Fallback`
-/// key was handed off to a transcript-backed key (`lanes_with_managed`): the managed
-/// no-transcript placeholder disappears the moment the agent's transcript becomes parseable,
-/// and firing Idle there would alert on every spawn.
+/// Diffs session states into notifications, suppressing disappearance alerts for deleted lanes and
+/// fallback-to-transcript handoffs.
 pub fn diff_session_transitions(
     prev: &HashMap<(LaneId, SessKey), SessState>,
     now: &HashMap<(LaneId, SessKey), SessState>,
@@ -158,7 +133,7 @@ pub fn diff_session_transitions(
             continue;
         }
         // The stall flag flipping on is its own alert, independent of the status underneath
-        // (which typically never changes — that's what makes a stall invisible otherwise).
+        // (which typically never changes - that's what makes a stall invisible otherwise).
         // Un-stalling stays quiet: output resuming is the good case.
         if stale && !was.is_some_and(|(_, st)| st) {
             out.push((key.clone(), NotifKind::Stalled));
@@ -221,61 +196,34 @@ pub fn slot_by_key(lane: &Lane, key: &SessKey, include_subagents: bool) -> Optio
 pub fn transition_kind(prev: Option<AgentStatus>, now: Option<AgentStatus>) -> Option<NotifKind> {
     use AgentStatus::*;
     match (prev, now) {
-        // Hit a usage limit.
         (p, Some(RateLimited)) if p != Some(RateLimited) => Some(NotifKind::RateLimited),
-        // Auto-resumed after a limit.
+
         (Some(RateLimited), Some(Running)) => Some(NotifKind::Resumed),
-        // Finished its turn / needs you.
+
         (p, Some(Waiting)) if p != Some(Waiting) => Some(NotifKind::NeedsYou),
-        // The session actually ended — its tmux window/process is gone (`None`) or the transcript
-        // closed (`Ended`). Fires regardless of the status it last held (it may have decayed to
-        // Idle first), so a real stop is reported promptly. A still-present session merely *decaying*
-        // to `Idle` after IDLE_AFTER is intentionally NOT alerted: that popup is ~10 minutes stale by
-        // construction (the decay is a 10-min-old event), which produced bursts of stale "went idle"
-        // alerts. The status still decays for the UI; only the notification is suppressed.
+        // Only an actual disappearance or closed transcript triggers Idle; age-based decay is stale
+        // evidence for a notification.
         (Some(_), None) => Some(NotifKind::Idle),
         (Some(p), Some(Ended)) if p != Ended => Some(NotifKind::Idle),
         _ => None,
     }
 }
 
-/// Whether an alert for a session may fire again, anchored on the session's transcript activity
-/// rather than on elapsed time.
-///
-/// The status signal a notification is derived from flaps: a frozen-but-waiting transcript decays
-/// `Waiting → Idle` at the 10-minute mark and flips back on the next byte; the `lsof` live-process
-/// probe undercounts and drops then re-includes a session; the pane sniff (and usage-limit sniff)
-/// are screen-scrapes that read `Some → None → Some`. Every such round-trip re-detects a transition
-/// and, since the only other guard is a 30s time-debounce, re-fires the *same* alert minutes or
-/// hours later. [`AgentSession::last_activity_at`](crate::model::AgentSession::last_activity_at) —
-/// the latest transcript *message* timestamp (not the raw file mtime — Claude bumps that by
-/// rewriting trailer metadata) — advances **only on real agent output**, never on those flaps, so
-/// it is the right thing to gate a repeat on: re-fire only when the agent has actually done new
-/// work since it last alerted (the user replied and it ran, then waited again), not when detection
-/// merely wobbled. Caller keeps a per-`(lane, session, kind)` record of the activity timestamp at
-/// the last fire and passes it as `prev_fired_at`.
-///
-/// Used for `NeedsYou` / `RateLimited` / `Resumed`, whose session is present in the snapshot when
-/// they fire (so `current_activity` is `Some`). `Idle` fires on disappearance — no activity anchor
-/// — and stays on the time-debounce.
+/// Allows a repeat alert only after new transcript activity, preventing detection flaps from
+/// re-alerting; disappearance alerts use time debounce because no activity anchor remains.
 pub fn activity_allows_refire(
     prev_fired_at: Option<DateTime<Utc>>,
     current_activity: Option<DateTime<Utc>>,
 ) -> bool {
     match (prev_fired_at, current_activity) {
-        (None, _) => true, // never fired this (lane, session, kind) — let it through
+        (None, _) => true, // never fired this (lane, session, kind) - let it through
         (Some(_), None) => false, // fired before and no fresh anchor to justify a repeat
-        (Some(p), Some(c)) => c > p, // only when the transcript advanced since the last fire
+        (Some(p), Some(c)) => c > p,
     }
 }
 
-/// Build the `(title, body)` for a notification about one of `lane`'s sessions. The body
-/// carries the detail that makes the alert actionable: branch, which of the lane's
-/// side-by-side agents fired (`slot` = (index, count), tagged only when several run), the
-/// *why* — the agent's actual last message when `show_why` is on (falling back to what you
-/// originally asked) — tool count, and any reset time. `sess` is `None` when the session
-/// vanished from the snapshot (its disappearance was the trigger) — the text degrades to a
-/// generic "agent" line rather than borrowing another session's name and title.
+/// Builds notification text for the triggering session, using generic agent text when that session
+/// has vanished rather than borrowing another session’s identity.
 pub fn compose(
     kind: NotifKind,
     lane: &Lane,
@@ -291,10 +239,8 @@ pub fn compose(
     } else {
         agent
     };
-    // A NeedsYou names what the agent actually wants — permission, an answer, the review of
-    // finished work, or just the next instruction — so the reader can triage from the
-    // notification alone. Falls back to the generic verb when the session vanished (or isn't
-    // in a waiting state after all).
+    // Fall back to a generic attention message when the session providing its detail has
+    // disappeared.
     let verb = match (kind, sess) {
         (NotifKind::NeedsYou, Some(s)) => {
             use crate::agent::attention::{Attention, agent_attention_in};
@@ -353,7 +299,7 @@ pub fn compose(
 }
 
 /// One popup for a burst of simultaneous alerts: the title counts them (with the kind's glyph
-/// and verb when the whole burst is one kind, a generic ⚑ otherwise), the body lists the first
+/// and verb when the whole burst is one kind, a generic unread otherwise), the body lists the first
 /// few lanes. `fires` pairs each alert's `repo/worktree` label with its kind.
 pub fn compose_burst(fires: &[(String, NotifKind)]) -> (String, String) {
     let n = fires.len();
@@ -384,9 +330,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-// ---- local desktop delivery (shared by the TUI and the daemon) ----
-
-/// Play the notification chime once, off-thread — a preview used when enabling sound in Settings.
+/// Play the notification chime once, off-thread - a preview used when enabling sound in Settings.
 pub fn play_chime() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
@@ -400,18 +344,8 @@ pub fn play_chime() {
     std::thread::spawn(play_sound_blocking);
 }
 
-/// Fire a native desktop notification, best-effort and without blocking the caller (the actual
-/// `osascript`/`notify-send`/WinRT-toast delivery runs on a detached thread). `click_focus` makes
-/// the popup click-to-focus the terminal when `terminal-notifier` is installed (macOS only — on
-/// Whether the daemon may post its own OS-level popup for an alert right now.
-///
-/// Two conditions, and both matter. `tui_active` means a TUI is on screen firing its own popups,
-/// so the daemon staying quiet is what stops double-notifying. `desktop_fallback` is the user's
-/// switch: on macOS the daemon's popup goes out through `osascript`, so it is delivered by Script
-/// Editor and wears its icon, and someone running only Mission Control (which posts its own,
-/// under the app's identity) wants that second popup gone.
-///
-/// Shared by every daemon popup site so the switch cannot half-apply.
+/// Allows daemon popups only when desktop fallback is enabled and no TUI is already delivering
+/// notifications.
 pub fn daemon_popup_allowed(tui_active: bool, desktop_fallback: bool) -> bool {
     !tui_active && desktop_fallback
 }
@@ -431,10 +365,7 @@ const NOTIFY_SOUND_FILE: &str = "/System/Library/Sounds/Glass.aiff";
 
 #[cfg(target_os = "macos")]
 fn run_native(title: &str, body: &str, sound: bool, click_focus: bool) {
-    // Prefer the clickable popup; fall back to osascript when terminal-notifier isn't installed
-    // (or click-to-focus is off). We deliberately do NOT use osascript's own `sound name`: on
-    // recent macOS the notification is attributed to "Script Editor", whose notification sound is
-    // usually off, so the chime is silently dropped. Play it with `afplay` instead.
+    // Use afplay on macOS because osascript notifications inherit Script Editor’s sound settings.
     let clickable = click_focus && notify_clickable(title, body);
     if !clickable {
         let script = format!(
@@ -491,7 +422,7 @@ fn terminal_notifier() -> Option<&'static str> {
     FOUND.get_or_init(locate).as_deref()
 }
 
-/// The macOS bundle id behind a `$TERM_PROGRAM` value — what a clicked notification focuses.
+/// The macOS bundle id behind a `$TERM_PROGRAM` value - what a clicked notification focuses.
 /// Unknown terminals (including `tmux`, which masks the real one) get no `-activate`.
 #[cfg(target_os = "macos")]
 fn terminal_bundle_id(term_program: &str) -> Option<&'static str> {
@@ -507,7 +438,7 @@ fn terminal_bundle_id(term_program: &str) -> Option<&'static str> {
 }
 
 /// Deliver as a WinRT toast. Sound rides on the toast itself (`audible` → the default toast
-/// audio) — the Windows counterpart of the afplay/paplay chime, with no separate player process.
+/// audio) - the Windows counterpart of the afplay/paplay chime, with no separate player process.
 #[cfg(windows)]
 fn run_native(title: &str, body: &str, sound: bool, _click_focus: bool) {
     show_toast(toast_spec(title, body, sound));
@@ -563,7 +494,7 @@ pub fn notify_send_args(title: &str, body: &str, sound: bool) -> Vec<String> {
 pub struct ToastSpec {
     pub title: String,
     pub body: String,
-    /// Play the default toast sound with the popup — this *is* the Windows sound path (the
+    /// Play the default toast sound with the popup - this *is* the Windows sound path (the
     /// afplay/paplay equivalent): toast audio, not a separate player process.
     pub audible: bool,
 }
@@ -577,8 +508,8 @@ pub fn toast_spec(title: &str, body: &str, sound: bool) -> ToastSpec {
     }
 }
 
-/// The toast behind [`play_chime`]'s Windows arm. WinRT has no bare play-a-sound API — toast
-/// audio only plays attached to a toast — so the Settings sound preview posts a minimal,
+/// The toast behind [`play_chime`]'s Windows arm. WinRT has no bare play-a-sound API - toast
+/// audio only plays attached to a toast - so the Settings sound preview posts a minimal,
 /// always-audible toast instead (which also *shows* what an audible alert will look like).
 pub fn chime_toast_spec() -> ToastSpec {
     toast_spec("repomon", "Notification sound", true)
@@ -664,7 +595,7 @@ mod tests {
         assert!(!t.body.is_empty());
     }
 
-    /// A snapshot state with the stall flag off — the common case in transition tests.
+    /// A snapshot state with the stall flag off - the common case in transition tests.
     fn st(s: AgentStatus) -> SessState {
         (s, false)
     }
@@ -751,7 +682,7 @@ mod tests {
     #[test]
     fn notification_transitions() {
         use AgentStatus::*;
-        // The headline alerts.
+
         assert_eq!(
             transition_kind(Some(Running), Some(Waiting)),
             Some(NotifKind::NeedsYou)
@@ -768,18 +699,17 @@ mod tests {
             transition_kind(Some(RateLimited), Some(Running)),
             Some(NotifKind::Resumed)
         );
-        // Gave up on the limit and now needs you.
+
         assert_eq!(
             transition_kind(Some(RateLimited), Some(Waiting)),
             Some(NotifKind::NeedsYou)
         );
-        // Ended: the session went away (window/process gone) — a real stop, alerted promptly,
+        // Ended: the session went away (window/process gone) - a real stop, alerted promptly,
         // whatever it was doing just before (including after it had decayed to Idle).
         assert_eq!(transition_kind(Some(Waiting), None), Some(NotifKind::Idle));
         assert_eq!(transition_kind(Some(Running), None), Some(NotifKind::Idle));
         assert_eq!(transition_kind(Some(Idle), None), Some(NotifKind::Idle));
-        // The bare 10-minute inactivity decay (still present, just `Idle` now) is NOT an alert —
-        // it would be ~10 min stale. This is the fix for the bursts of old "went idle" popups.
+        // Age-based decay alone must not fire a stale inactivity alert.
         assert_eq!(transition_kind(Some(Running), Some(Idle)), None);
         assert_eq!(transition_kind(Some(Waiting), Some(Idle)), None);
         // Non-events: you replied, work simply started, or nothing changed.
@@ -795,7 +725,7 @@ mod tests {
         let sessions = vec![
             sess(Some("a"), Waiting, false),
             sess(Some("b"), RateLimited, false),
-            sess(None, Running, true), // inferred file-activity placeholder — excluded
+            sess(None, Running, true),
             sess(None, Running, false),
         ];
         let got = session_statuses(7, &sessions, false);
@@ -821,7 +751,7 @@ mod tests {
         // shape `overlay_agents` produces for a Claude Code subagent.
         let sessions = vec![sess(None, Running, true)];
 
-        // Default: subagents never drive notifications — the inferred session is dropped, so it
+        // Default: subagents never drive notifications - the inferred session is dropped, so it
         // can't fire an Idle when it finishes.
         assert!(session_statuses(7, &sessions, false).is_empty());
 
@@ -849,9 +779,7 @@ mod tests {
         let live: HashSet<LaneId> = [1].into();
         let managed = HashSet::new();
 
-        // One agent finishes its turn while its lane-mate is still rate-limited. The old
-        // per-lane rollup saw "RateLimited" before and after and fired nothing — the masking
-        // this change exists to fix.
+        // One session’s rate limit must not mask another session’s completed turn.
         let prev: HashMap<_, _> = [(k("a"), st(Running)), (k("b"), st(RateLimited))].into();
         let now: HashMap<_, _> = [(k("a"), st(Waiting)), (k("b"), st(RateLimited))].into();
         assert_eq!(
@@ -859,7 +787,6 @@ mod tests {
             vec![(k("a"), NotifKind::NeedsYou)]
         );
 
-        // And the rate-limited lane-mate resumes independently.
         let now2: HashMap<_, _> = [(k("a"), st(Waiting)), (k("b"), st(Running))].into();
         assert_eq!(
             diff_session_transitions(&now, &now2, &live, &managed),
@@ -935,7 +862,7 @@ mod tests {
         let gone: Vec<AgentSession> = vec![];
 
         // Default (subagents excluded): the subagent never enters the tracked set, so its finish
-        // is invisible — no Idle.
+        // is invisible - no Idle.
         let prev: HashMap<_, _> = session_statuses(7, &running, false).into_iter().collect();
         let now: HashMap<_, _> = session_statuses(7, &gone, false).into_iter().collect();
         assert!(prev.is_empty());
@@ -964,12 +891,12 @@ mod tests {
             diff_session_transitions(&prev, &now, &live, &managed),
             vec![(k.clone(), NotifKind::Stalled)]
         );
-        // Still stale on the next poll: no re-fire.
+
         assert!(diff_session_transitions(&now, &now, &live, &managed).is_empty());
         // The Running→Idle decay while the stall persists must not alert either.
         let idle: HashMap<_, _> = [(k.clone(), (Idle, true))].into();
         assert!(diff_session_transitions(&now, &idle, &live, &managed).is_empty());
-        // Un-stalling quietly (output resumed): no alert.
+
         let back: HashMap<_, _> = [(k.clone(), (Running, false))].into();
         assert!(diff_session_transitions(&idle, &back, &live, &managed).is_empty());
         // A session first seen already-stale alerts (it stalled between polls).
@@ -1019,7 +946,7 @@ mod tests {
         // First time this (lane, session, kind) is seen: always fires.
         assert!(activity_allows_refire(None, Some(t0)));
 
-        // Already fired and the transcript hasn't advanced — the flap cases the latch exists to
+        // Already fired and the transcript hasn't advanced - the flap cases the latch exists to
         // kill: an idle-decayed Waiting returning to Waiting, an lsof undercount dropping then
         // re-adding the session, a sniff reading Some→None→Some. All share the same last_activity.
         assert!(!activity_allows_refire(Some(t0), Some(t0)));
@@ -1069,11 +996,10 @@ mod tests {
         let (title, _) = compose(NotifKind::NeedsYou, &lane(), Some(&s), None, true);
         assert!(title.contains("finished its turn"), "{title}");
 
-        // The session vanished from the snapshot — fall back to the generic wording.
+        // The session vanished from the snapshot - fall back to the generic wording.
         let (title, _) = compose(NotifKind::NeedsYou, &lane(), None, None, true);
         assert!(title.contains("needs you"), "{title}");
 
-        // Other kinds keep their own verbs regardless of the session.
         let (title, _) = compose(NotifKind::RateLimited, &lane(), Some(&s), None, true);
         assert!(title.contains("hit a usage limit"), "{title}");
     }
@@ -1093,7 +1019,7 @@ mod tests {
         let mut l = lane();
         l.agent_sessions = vec![
             sess(Some("a"), AgentStatus::Running, false),
-            sess(None, AgentStatus::Running, true), // inferred — not a slot
+            sess(None, AgentStatus::Running, true),
             sess(Some("b"), AgentStatus::Waiting, false),
         ];
         assert_eq!(

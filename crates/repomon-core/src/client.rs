@@ -1,24 +1,4 @@
-//! Async client for the daemon's framed JSON-RPC socket.
-//!
-//! A reader task demultiplexes incoming frames: responses (with an `id`) resolve the
-//! matching pending call; notifications (`event.*`) fan out on a broadcast channel.
-//!
-//! This is the single shared client used by every out-of-process consumer of the daemon —
-//! the TUI, the headless CLI, and the MCP server (`repomond mcp`) that backs the repomind
-//! orchestrator. Keeping one implementation means the wire framing, timeout, and event
-//! demuxing behave identically everywhere.
-//!
-//! ## Self-healing connection
-//!
-//! The daemon reaps idle client connections after 120s (`repomon-daemon` socket.rs). A naive
-//! one-shot connection therefore goes permanently dead the first time it's left idle, and every
-//! subsequent RPC fails with "daemon connection closed" — which is exactly how the MCP bridge's
-//! action tools (`read_agent`, `send_to_agent`, …) silently bricked while subscription-fed reads
-//! kept working. To prevent that, this client:
-//!   * marks itself disconnected (and fails in-flight calls fast) when the reader sees the socket
-//!     close, then transparently **reconnects + retries once** on the next `call`, and
-//!   * sends a lightweight keepalive `ping` well under the 120s reaper so a healthy idle client is
-//!     never dropped in the first place.
+//! Multiplexes daemon responses by request ID and broadcasts subscription events to listeners.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,7 +42,7 @@ struct Inner {
     /// Serializes reconnects so a burst of concurrent calls opens exactly one new socket.
     reconnecting: tokio::sync::Mutex<()>,
     /// Params of the last successful `subscribe` call, if any. `reconnect` replays it on the new
-    /// connection — the daemon only forwards events to connections that asked for them.
+    /// connection - the daemon only forwards events to connections that asked for them.
     subscribe_params: Mutex<Option<Option<Value>>>,
     /// Active `agent.watch_bytes` params keyed by window. Watches are per connection and die with
     /// the socket, so reconnect replays every open desktop tile. The TUI normally keeps one entry;
@@ -128,7 +108,6 @@ impl DaemonClient {
             // Clone the sender out of the lock so we never hold a sync mutex across `.await`.
             let out = self.inner.out_tx.lock().unwrap().clone();
             if out.send(bytes).await.is_err() {
-                // Writer task is gone -> connection is dead.
                 self.inner.pending.lock().unwrap().remove(&id);
                 self.inner.connected.store(false, Ordering::SeqCst);
                 continue; // attempt == 1 falls through to the error below
@@ -212,7 +191,6 @@ impl Inner {
         // whether it's still the current connection by the time its loop exits.
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Writer: drains queued frames to the socket.
         tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
                 if write_frame(&mut wr, &frame).await.is_err() {
@@ -226,10 +204,7 @@ impl Inner {
         let inner = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(frame)) = read_frame(&mut rd).await {
-                // Parse each frame once. Notifications (no `id`) vastly outnumber responses on
-                // a busy stream, and every `event.agent.bytes` chunk carries a large base64
-                // payload — the old parse-as-Response-then-reparse-as-Notification walked that
-                // payload twice per chunk.
+                // Parse once because frequent byte notifications carry large base64 payloads.
                 let Ok(value) = serde_json::from_slice::<Value>(&frame) else {
                     continue;
                 };
@@ -268,12 +243,8 @@ impl Inner {
             .with_context(|| format!("reconnecting to daemon at {}", self.path.display()))?;
         self.spawn_io(stream);
 
-        // Re-establish the event subscription, if any: the daemon only forwards events on
-        // connections that sent `subscribe`, and the new socket never has. Push the replayed
-        // request straight onto the new connection's outbound channel rather than going through
-        // `self.call()` — the `reconnecting` lock above is still held, and `call()` can recurse
-        // back into `reconnect()` on failure, which would deadlock. The response comes back with
-        // an id nobody is waiting on; the reader already drops unmatched ids, so that's harmless.
+        // Replay subscriptions directly on the new channel: calling self.call while holding the
+        // reconnect lock could recursively reconnect and deadlock.
         let recorded = self.subscribe_params.lock().unwrap().clone();
         if let Some(params) = recorded {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -284,10 +255,7 @@ impl Inner {
             }
         }
 
-        // Re-assert the active byte watch the same way: the daemon's watch was per-connection and
-        // died with the old socket, so without this the Focus emulator's stream stays dead until the
-        // user leaves and re-enters Focus. Same fire-and-forget path as the subscribe replay (the
-        // ack lands on an id nobody awaits and is harmlessly dropped by the reader).
+        // Replay byte watches on the new connection, whose server-side subscriptions start empty.
         let watches: Vec<Value> = self
             .active_watches
             .lock()
@@ -375,9 +343,7 @@ mod tests {
         );
     }
 
-    /// A transparent reconnect must replay the subscription and every active byte watch. We record
-    /// the methods the latest server-side connection sees; after forcing a reconnect, the fresh
-    /// connection must receive `subscribe` and both watches before the triggering call.
+    /// Reconnect must replay subscriptions and active byte watches before the triggering call.
     #[tokio::test]
     async fn reconnect_replays_subscribe_and_all_active_watches() {
         let dir = tempfile::tempdir().unwrap();
@@ -432,12 +398,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Force a reconnect: mark the connection dead so the next call opens a fresh socket, which
-        // must replay subscribe + the active watch before the ping.
+        // Mark the connection dead to exercise replay before the next call.
         client.inner.connected.store(false, Ordering::SeqCst);
         client.call("ping", None).await.unwrap();
 
-        // Wait for the new connection's replay frames to land.
         let mut ok = false;
         for _ in 0..100 {
             {
@@ -501,7 +465,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // Stop it — the active-watch slot must clear.
+
         client
             .call(
                 "agent.watch_bytes",
@@ -522,10 +486,7 @@ mod tests {
         );
     }
 
-    /// A reader task belonging to a since-superseded connection must not run disconnect cleanup
-    /// on top of a healthy newer one. Drives `Inner::spawn_io` directly (bypassing `reconnect`'s
-    /// serialization) to simulate the old reader noticing EOF only after the new connection is
-    /// already live.
+    /// A superseded reader’s delayed EOF must not disconnect the replacement connection.
     #[tokio::test]
     async fn stale_reader_does_not_clobber_new_connection() {
         let (a_client, a_server) = IpcStream::pair();

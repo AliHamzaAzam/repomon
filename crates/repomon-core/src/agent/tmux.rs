@@ -1,10 +1,5 @@
-//! tmux-backed agent runtime.
-//!
-//! Each lane's agent runs in its own window (`lane-<id>`) of a managed tmux session. The
-//! daemon reads output with `capture-pane` and sends input with `send-keys`. Because tmux
-//! owns the processes, agents survive the daemon and the TUI — reattach and they're still
-//! there with full scrollback. All methods are synchronous; the daemon calls them from
-//! `spawn_blocking`.
+//! Owns durable agent windows through tmux so agents outlive the daemon and clients; synchronous
+//! operations belong on blocking threads.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -50,21 +45,8 @@ pub struct WindowMeta {
     pub agent_kind: Option<String>,
 }
 
-/// Field separator used in every tmux `-F` probe format string ([`TmuxRuntime::list_windows_meta`],
-/// [`TmuxRuntime::list_windows_with_activity`]). tmux vis-sanitizes control characters in `-F`
-/// output — including a literal tab (0x09) — down to `_` whenever the tmux CLIENT process runs in
-/// the C/POSIX locale. That's exactly what a daemon spawned by the desktop GUI (Finder/launchd)
-/// inherits: neither sets `LANG`/`LC_*`, so tmux falls back to C/POSIX and every tab in a probe
-/// line collapses to `_`, merging all fields into one unparsable blob (`TERM` has no effect on
-/// this). A daemon launched from an interactive shell never hits it, because login shells export
-/// a real `LANG`/`LC_*` — which is why this bug only ever showed up "GUI doesn't show agents, TUI
-/// works". A printable, multi-char sentinel survives vis-sanitization in every locale tmux
-/// supports, so it can't be collapsed the way a single control character can. None of the fields
-/// these probes emit — window names of repomon-managed windows, `@<id>` window ids, transcript
-/// session uuids, agent-kind strings, or worktree paths — ever contain this sequence in practice,
-/// so it's safe as a delimiter. (See also [`locale_override`], the defense-in-depth companion fix
-/// that gives the tmux client a real locale so other output paths, e.g. `capture-pane`, aren't
-/// exposed to the same sanitization.)
+/// A printable sentinel survives tmux vis-sanitization in the C/POSIX locale, unlike tabs; probe
+/// fields do not contain this sequence.
 const PROBE_FIELD_SEP: &str = "%#%";
 
 /// The roomy grid every agent pane gets at spawn (and a brand-new session via `-x/-y`). Agents
@@ -98,7 +80,6 @@ pub fn resolve_tmux_from(
     path_var: Option<&std::ffi::OsStr>,
     sibling_dirs: &[PathBuf],
 ) -> Option<ResolvedTmux> {
-    // 1. REPOMON_TMUX env var override
     if let Some(val) = env_override {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
@@ -109,7 +90,6 @@ pub fn resolve_tmux_from(
         }
     }
 
-    // 2. System tmux via PATH
     let path_candidate = match path_var {
         Some(p) => crate::exec::find_in(p, "tmux"),
         None => crate::exec::find_in_path("tmux"),
@@ -135,10 +115,7 @@ pub fn resolve_tmux_from(
     None
 }
 
-/// Uncached resolution of the tmux binary following the precedence:
-/// 1. `REPOMON_TMUX` environment variable (absolute or path override).
-/// 2. System tmux via PATH (`repomon_core::exec::find_in_path("tmux")`).
-/// 3. Bundled sidecar tmux binary next to current executable or managed repomond copy.
+/// Resolves tmux without caching, preferring REPOMON_TMUX, then PATH, then bundled candidates.
 pub fn resolve_tmux_uncached() -> Option<ResolvedTmux> {
     let env_override = std::env::var("REPOMON_TMUX").ok();
     let mut sibling_dirs = Vec::new();
@@ -177,19 +154,8 @@ pub fn tmux_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("tmux"))
 }
 
-/// Pure decision: should the tmux CLIENT process be handed a locale override, and what should it
-/// be? Defense in depth alongside [`PROBE_FIELD_SEP`] — switching the `-F` probes to a sentinel
-/// separator stops *our* parsing from depending on a tab surviving, but every other tmux output
-/// path (`capture-pane` in particular) is still vis-sanitized whenever the client runs in the
-/// C/POSIX locale, which is exactly what a daemon spawned by the desktop GUI (Finder/launchd)
-/// gets — neither sets `LANG`/`LC_*`. So: if the process has NONE of `LC_ALL`, `LC_CTYPE`, or
-/// `LANG` set, hand the tmux client a real UTF-8 locale via `LC_ALL` (the highest-precedence
-/// locale variable, so setting only it is enough). If ANY of the three is already set, leave the
-/// environment alone — that's a real locale choice (the user's shell, or ours from a previous
-/// call) and overriding it would be wrong. Takes the three env values as parameters rather than
-/// reading `std::env` itself so the decision is a pure function and can be unit-tested without
-/// racing other tests that touch process environment (see `locale_env`, the thin real-env
-/// wrapper actually used by `run`/`run_allow_absent`).
+/// Supply a UTF-8 locale only when no locale variable is set, preventing tmux from sanitizing
+/// captured output while respecting explicit user choices.
 fn locale_override(
     lc_all: Option<&str>,
     lc_ctype: Option<&str>,
@@ -202,7 +168,7 @@ fn locale_override(
     }
 }
 
-/// [`locale_override`] applied to the daemon's actual environment — the value `run`/
+/// [`locale_override`] applied to the daemon's actual environment - the value `run`/
 /// `run_allow_absent` add to the tmux client's `Command` when set.
 fn locale_env() -> Option<(&'static str, &'static str)> {
     locale_override(
@@ -285,11 +251,8 @@ impl TmuxRuntime {
         }
     }
 
-    /// Parse a managed agent window name back into `(lane, slot)` — the inverse of
-    /// [`window_name`]/[`slot_name`]. `lane-7` → `(7, 1)`, `lane-7-3` → `(7, 3)`. Returns `None`
-    /// for any name that isn't a well-formed lane window (a terminal, the usage probe, or a
-    /// malformed `lane-…`), so callers can safely ignore non-agent windows. Matches the exact
-    /// shapes [`lane_windows_in`] counts, so the reaper and the overlay agree on what's a slot.
+    /// Parses an exact managed lane-window name into its lane and slot, returning `None` for
+    /// terminal, probe, and malformed names.
     pub fn parse_lane_window(name: &str) -> Option<(LaneId, usize)> {
         let rest = name.strip_prefix("lane-")?;
         match rest.split_once('-') {
@@ -308,8 +271,8 @@ impl TmuxRuntime {
     }
 
     /// Parse a plain-terminal window name (`term-{lane}-{n}`, as `terminal.open` mints them)
-    /// into its lane. `None` for anything else — agent windows, the usage probe, malformed
-    /// names — so terminal scans and agent scans stay mutually blind.
+    /// into its lane. `None` for anything else - agent windows, the usage probe, malformed
+    /// names - so terminal scans and agent scans stay mutually blind.
     pub fn parse_term_window(name: &str) -> Option<LaneId> {
         let rest = name.strip_prefix("term-")?;
         let (id, seq) = rest.split_once('-')?;
@@ -353,14 +316,14 @@ impl TmuxRuntime {
         format!("{}:{}", self.session, Self::window_name(lane))
     }
 
-    /// An *exact* `session:=window` target — tmux otherwise prefix-matches window names, which
+    /// An *exact* `session:=window` target - tmux otherwise prefix-matches window names, which
     /// would let `lane-1` resolve to `lane-1-2` once the first slot is gone.
     fn exact_target(&self, name: &str) -> String {
         format!("{}:={}", self.session, name)
     }
 
     /// repomon runs its tmux on a dedicated socket (named after the session) so its windows
-    /// never collide with — or share a server with — the user's own tmux.
+    /// never collide with - or share a server with - the user's own tmux.
     fn full_args<'a>(&'a self, args: &'a [&'a str]) -> Vec<&'a str> {
         let mut full = vec!["-L", self.session.as_str()];
         full.extend_from_slice(args);
@@ -384,10 +347,8 @@ impl TmuxRuntime {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// Like [`run`], but a *benign absence* — the window/session/pane is gone, or no tmux server
-    /// is running — is reported as empty output instead of an error. Lets `capture`/`list-windows`
-    /// skip a `has-session`/`has_named` preflight fork (the single biggest CPU win): a vanished
-    /// target means "nothing to show", while a *real* tmux fault still propagates as `Err`.
+    /// Treat missing targets as empty output without a separate preflight process, while
+    /// propagating other backend failures.
     fn run_allow_absent(&self, args: &[&str]) -> Result<String> {
         let mut cmd = Command::new(tmux_program());
         cmd.args(self.full_args(args));
@@ -399,15 +360,8 @@ impl TmuxRuntime {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // tmux: "can't find window/session/pane: …", "no server running on …",
-        // "error connecting to …" — the target simply isn't there. `set-option` phrases the
-        // same absence as "no such window/session: …" (tmux ≥ 3.x), unlike the capture/list
-        // commands. With `exit-empty off` (see `configure`), killing a pane's process directly
-        // (`terminate_pane_processes`) can make tmux tear the session down on its own — the last
-        // window's shell exiting is itself a destroy — before our own explicit `kill-window` for
-        // that same window runs; with no session left to fall back to as "current", tmux reports
-        // that race as "no current target" rather than "no such session". Same benign
-        // already-torn-down race either way.
+        // Target disappearance is benign, including "no current target" when the last pane exits
+        // before explicit teardown.
         let absent = stderr.contains("can't find ")
             || stderr.contains("no server running")
             || stderr.contains("error connecting")
@@ -442,13 +396,8 @@ impl TmuxRuntime {
         self.ok(&["has-session", "-t", &self.session])
     }
 
-    /// Cooperative single-owner guard for this tmux server (`tmux -L <session>`). Two `repomond`s
-    /// aimed at the same session — e.g. a stray test daemon that kept the default `tmux_session`
-    /// while using its own socket+store — must never run destructive sweeps against each other's
-    /// windows: the second daemon's store doesn't know the first's lanes, so its reaper would mark
-    /// every real `lane-<id>` window an orphan and kill it (the disappearing-sessions bug). The
-    /// first daemon to call this stamps `@repomon-owner` with its identity (`me`, its db path);
-    /// later daemons read a different value and back off. Returns true iff `me` owns the server.
+    /// Claims this tmux server for the database identity or verifies existing ownership, preventing
+    /// another daemon’s orphan sweep from deleting its windows.
     pub fn claim_or_verify_owner(&self, me: &str) -> bool {
         match self.server_owner() {
             Some(owner) => owner == me,
@@ -469,7 +418,7 @@ impl TmuxRuntime {
 
     /// Window names currently in the session.
     pub fn list_windows(&self) -> Result<Vec<String>> {
-        // No `has-session` preflight — `run_allow_absent` turns "no server / can't find session"
+        // No `has-session` preflight - `run_allow_absent` turns "no server / can't find session"
         // into an empty list, saving a fork on every call (overlay_agents, auto_continue, …).
         let out =
             self.run_allow_absent(&["list-windows", "-t", &self.session, "-F", "#{window_name}"])?;
@@ -488,11 +437,8 @@ impl TmuxRuntime {
         Ok(process_fingerprint(pid).map(|start| format!("{pid}:{start}")))
     }
 
-    /// Each window's name, current pane working directory, and last pane-activity time (Unix
-    /// epoch seconds). Used by the orphan reaper: the cwd spots `lane-<id>` windows whose cwd no
-    /// longer matches the worktree that id maps to (a stale window left by a re-registered /
-    /// renumbered worktree), and the activity time lets it spare a window whose agent is still
-    /// actively producing output.
+    /// Returns window names, working directories, and activity timestamps for orphan detection and
+    /// active-window protection.
     pub fn list_windows_with_activity(&self) -> Result<Vec<(String, PathBuf, i64)>> {
         let fmt = format!(
             "#{{window_name}}{sep}#{{pane_current_path}}{sep}#{{window_activity}}",
@@ -562,10 +508,8 @@ impl TmuxRuntime {
             .collect()
     }
 
-    /// Stamp `@repomon_session` on `window` by NAME — for callers that just created the
-    /// window and know exactly which transcript runs in it (`agent.adopt`). tmux destroys
-    /// window options with the window, so the binding can never outlive its agent (slot-name
-    /// recycling included). A vanished window is a benign no-op.
+    /// Stamps a known new window’s transcript identity by name, treating disappearance as a benign
+    /// no-op.
     pub fn set_window_session(&self, window: &str, session_id: &str) -> Result<()> {
         let target = self.exact_target(window);
         self.run_allow_absent(&[
@@ -579,10 +523,8 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Stamp `@repomon_session` by window ID (`@N`) — the overlay binder's write-back. The id
-    /// pins the exact window the pairing was computed against: ids are never reused within a
-    /// server, so a slot NAME recycled between the probe and the stamp can't inherit the old
-    /// transcript's binding. A vanished window is a benign no-op.
+    /// Stamps transcript identity by non-recycled window ID so a reused slot name cannot inherit
+    /// another session’s binding.
     pub fn set_window_session_by_id(&self, wid: u64, session_id: &str) -> Result<()> {
         let target = format!("@{wid}");
         self.run_allow_absent(&[
@@ -596,7 +538,7 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Stamp `@repomon_agent_kind` on `window` by NAME — for callers that just created the
+    /// Stamp `@repomon_agent_kind` on `window` by NAME - for callers that just created the
     /// window and know which agent kind runs in it (`agent.spawn`, `agent.adopt`).
     pub fn set_window_agent_kind(&self, window: &str, kind: &str) -> Result<()> {
         let target = self.exact_target(window);
@@ -611,7 +553,7 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Stamp `@repomon_agent_kind` by window ID (`@N`) — the overlay binder's write-back.
+    /// Stamp `@repomon_agent_kind` by window ID (`@N`) - the overlay binder's write-back.
     pub fn set_window_agent_kind_by_id(&self, wid: u64, kind: &str) -> Result<()> {
         let target = format!("@{wid}");
         self.run_allow_absent(&[
@@ -644,16 +586,13 @@ impl TmuxRuntime {
             .unwrap_or(false)
     }
 
-    /// Launch `command` for `lane` in `cwd` in the lane's first *free* agent slot — a running
+    /// Launch `command` for `lane` in `cwd` in the lane's first *free* agent slot - a running
     /// agent is never killed, so spawning again runs a second agent side by side. Returns the
     /// bare window name accepted by the named-window operations.
     pub fn spawn(&self, lane: LaneId, cwd: &Path, command: &str) -> Result<String> {
         let taken = self.windows_for(lane).unwrap_or_default();
-        // Allocate above the highest live slot rather than refilling a freed low one: slot
-        // order must keep tracking spawn order while any window lives, because the overlay's
-        // transcript↔window pairing (and its placeholder mapping) assumes the oldest slots
-        // hold the oldest agents. `windows_for` is slot-ascending, so the last entry carries
-        // the highest slot. (Mirrors the Windows backend's allocator.)
+        // Allocate above the highest live slot to preserve spawn order across gaps, matching the
+        // Windows allocator.
         let next = taken
             .last()
             .and_then(|name| Self::slot_of_window(name))
@@ -662,11 +601,7 @@ impl TmuxRuntime {
         let window = Self::slot_name(lane, next);
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
-            // `-d`: create the window WITHOUT making it the session's active window. tmux's default
-            // `new-window` selects the new window, which yanks any attached `tmux attach` client
-            // (a human "all the way in" on another agent) over to it, then yanks back when it's
-            // killed. Spawning detached keeps the human's focused window put. See the usage-probe
-            // flap (`spawn_named`) for the worst case.
+            // Detached creation preserves an attached human’s focused window.
             self.run(&[
                 "new-window",
                 "-d",
@@ -699,12 +634,8 @@ impl TmuxRuntime {
             ])?;
         }
         self.configure();
-        // Give the fresh window the roomy default grid explicitly. A `new-window` inherits the
-        // session's *current* size, which can be tiny (a mediated viewer shrank an earlier pane,
-        // or no client ever attached and the 80x24 floor applied) — an agent whose first paint
-        // lands in that box renders broken and some TUIs exit on the subsequent reflow storm.
-        // The desktop refits to the operator's viewport right after focusing; until then this is
-        // the same grid a brand-new session gets from `-x/-y` above.
+        // A fresh window can inherit a tiny session grid; set a usable initial size before the
+        // agent’s first paint.
         let _ = self.resize_named(&window, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS);
         Ok(window)
     }
@@ -718,7 +649,7 @@ impl TmuxRuntime {
     pub fn capture_named(&self, window: &str, lines: Option<u32>) -> Result<String> {
         // No `has_named` preflight (which itself forked `has-session` + `list-windows`): capture
         // directly and let `run_allow_absent` map a vanished window to empty output. Each capture
-        // is now ONE fork instead of three — the dominant streamer hot path.
+        // is now ONE fork instead of three - the dominant streamer hot path.
         let target = self.exact_target(window);
         let start = lines.map(|n| format!("-{n}")).unwrap_or_default();
         let mut args = vec!["capture-pane", "-e", "-p", "-t", &target];
@@ -790,19 +721,8 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Return the process at the root of a pane's process tree.
-    ///
-    /// `display-message -t session:=name` does NOT error when `name` doesn't exist the way
-    /// `kill-window` does — it silently falls back to reporting the session's *current* window
-    /// instead, `=` prefix notwithstanding. Reproduced directly: querying a nonexistent exact
-    /// target returns the real current window's own pid, not an absence. Every probe round's
-    /// defensive pre-clear (`kill_named` on a `usage-probe-<label>` window that doesn't exist
-    /// yet) hit exactly this: it would silently resolve to whatever real lane window happened to
-    /// be "current" and hand its pid to `terminate_pane_processes`, which then `SIGTERM`ed that
-    /// live agent's entire process tree — a different real window died on each probe cycle,
-    /// whichever one was current at that moment. So the window name is requested alongside the
-    /// pid and checked against what was actually asked for; a mismatch means "not found",
-    /// exactly like the other exact-match operations here already assume.
+    /// Verify the returned window name before trusting its PID: tmux can resolve a missing exact
+    /// target to the current window, which must never be terminated instead.
     #[cfg(unix)]
     fn pane_pid(&self, window: &str) -> Option<u32> {
         let out = self
@@ -844,10 +764,8 @@ impl TmuxRuntime {
         pids
     }
 
-    /// Signal the pane process tree before killing the tmux window. `kill-window` sends the
-    /// pane shell a hangup, but CLI children can ignore that signal or survive after being
-    /// reparented to PID 1 (notably `agy`). Querying the tree while the pane still exists keeps
-    /// teardown deterministic and prevents those children becoming untracked orphans.
+    /// Signal descendants while the pane tree is still discoverable because killing its shell alone
+    /// can leave surviving CLI children.
     fn terminate_pane_processes(&self, window: &str) {
         #[cfg(unix)]
         {
@@ -868,7 +786,7 @@ impl TmuxRuntime {
         let _ = window;
     }
 
-    /// Whether `window`'s app is on the *alternate screen* — i.e. a full-screen TUI (Claude, vim, …)
+    /// Whether `window`'s app is on the *alternate screen* - i.e. a full-screen TUI (Claude, vim, …)
     /// that owns its own scrollback. `false` for a plain shell (whose scrollback lives in tmux).
     pub fn alternate_on_named(&self, window: &str) -> bool {
         let target = self.exact_target(window);
@@ -885,7 +803,7 @@ impl TmuxRuntime {
     }
 
     /// Forward `ticks` mouse-wheel scroll events to `window`'s app, so a full-screen agent scrolls
-    /// its own history (the mediated pane can't otherwise — alternate-screen apps keep no tmux
+    /// its own history (the mediated pane can't otherwise - alternate-screen apps keep no tmux
     /// scrollback). Sends SGR wheel sequences (button 64 = up, 65 = down) at the pointer cell.
     pub fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
         if event.ticks == 0 {
@@ -900,11 +818,8 @@ impl TmuxRuntime {
         Ok(())
     }
 
-    /// Start streaming `window`'s raw PTY output into `fifo` (an existing named pipe): every
-    /// byte the pane emits from now on is appended by a `cat` tmux runs for the pane. Replaces
-    /// any pipe already on the window. ORDERING MATTERS: the reader must open the fifo BEFORE
-    /// this is called — `cat`'s open blocks until a reader appears, and tmux buffers pane
-    /// output behind a stalled pipe.
+    /// Streams raw pane output to an existing FIFO, replacing any previous pipe; open the reader
+    /// first because a blocked FIFO open stalls pane output.
     pub fn pipe_pane_named(&self, window: &str, fifo: &Path) -> Result<()> {
         let target = self.exact_target(window);
         let cmd = format!("cat > {}", shell_quote(&fifo.to_string_lossy()));
@@ -913,14 +828,14 @@ impl TmuxRuntime {
     }
 
     /// Stop streaming `window`'s output (tmux's no-command `pipe-pane` form). Benign when the
-    /// window — or the whole server — is already gone.
+    /// window - or the whole server - is already gone.
     pub fn pipe_pane_off_named(&self, window: &str) -> Result<()> {
         let target = self.exact_target(window);
         self.run_allow_absent(&["pipe-pane", "-t", &target])?;
         Ok(())
     }
 
-    /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
+    /// Send a literal string (no trailing Enter) - one keystroke's worth of input.
     pub fn send_literal(&self, lane: LaneId, text: &str) -> Result<()> {
         self.send_literal_named(&Self::window_name(lane), text)
     }
@@ -940,14 +855,8 @@ impl TmuxRuntime {
         tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
         self.run(&["send-keys", "-t", &target, "-l", text])?;
-        // A literal `-l` send arrives at the target program as an unbracketed burst of
-        // characters, indistinguishable at the terminal level from a paste. Several agent
-        // TUIs (Codex's composer in particular) treat a burst like that as "still pasting"
-        // and, as a safety measure against an accidental Enter buried inside pasted text,
-        // suppress auto-submit on any Enter that arrives too close behind it — so the
-        // Enter below can land in the input box without ever submitting, leaving the human
-        // to press it again by hand. A short quiet gap here lets that paste-burst detector
-        // settle before Enter arrives, so it reads as a deliberate keystroke.
+        // Allow the paste-burst detector to settle before Enter so the agent treats it as
+        // submission rather than pasted text.
         std::thread::sleep(std::time::Duration::from_millis(80));
         self.run(&["send-keys", "-t", &target, "Enter"])?;
         Ok(())
@@ -973,15 +882,8 @@ impl TmuxRuntime {
     /// drag-select), system-clipboard passthrough, and drag-select copies to the clipboard.
     /// Server-global, so calling it once per session creation is enough (idempotent).
     pub fn configure(&self) {
-        // tmux's default `exit-empty on` kills the whole server the instant its last window
-        // closes — and repomon routinely has zero *real* agent windows open for a moment (every
-        // usage-probe round kills its own placeholder window when done; a fleet with no lanes
-        // spawned has none at all). Without this, that transient emptiness takes the entire
-        // server down — every other window/session sharing it included — rather than just
-        // leaving an idle, ready-for-the-next-spawn server sitting there. Reproduced live: three
-        // successive usage-probe rounds each briefly left the probe as the sole window, and the
-        // third's own cleanup kill took the whole session (and every lane window that happened
-        // to already be gone at that instant) down with it.
+        // Keep the server alive through transient periods with no windows, including probe
+        // teardown.
         let _ = self.run(&["set", "-g", "exit-empty", "off"]);
         let _ = self.run(&["set", "-g", "mouse", "on"]);
         let _ = self.run(&["set", "-g", "set-clipboard", "on"]);
@@ -1076,17 +978,13 @@ impl TmuxRuntime {
         Ok(self.target_named(name))
     }
 
-    /// Launch `command` in `cwd` as an arbitrary named window — like [`spawn`](Self::spawn) but
-    /// with a caller-chosen window name instead of a lane slot. Used for the hidden `/usage`
-    /// probe (`usage-probe-…`), whose non-`lane-` name keeps it out of the lane-window scans.
-    /// Returns the window's exact target.
+    /// Launches a caller-named window and returns its exact target, allowing probes outside the
+    /// managed lane namespace.
     pub fn spawn_named(&self, name: &str, cwd: &Path, command: &str) -> Result<String> {
         let cwd = cwd.to_string_lossy();
         if self.session_exists() {
-            // `-d`: spawn detached. This is the usage probe's path; it spawns then kills a
-            // throwaway `usage-probe-…` window every few minutes. Without `-d`, each spawn yanks an
-            // attached client to the probe and each kill yanks it back, replaying every window's
-            // pane as a flip-book in macOS fullscreen focus (the flap this fixes). See `spawn`.
+            // Spawn probes detached so creation and teardown cannot change an attached client’s
+            // focus.
             self.run(&[
                 "new-window",
                 "-d",
@@ -1137,11 +1035,7 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Adjust a raw tmux probe for platform (pure): tmux is not a Windows dependency (agents run
-/// through the bundled ConPTY [`super::windows::agent_host_doctor`] instead), so on Windows this
-/// marks the probe `not_applicable` rather than reporting it meaningfully missing. Off Windows
-/// the probe passes through unchanged. Takes the platform as a parameter (rather than reading it
-/// itself) so the Windows branch is testable on every OS.
+/// Marks tmux inapplicable on Windows, where the bundled ConPTY host provides the agent runtime.
 pub fn tmux_doctor_for_platform(
     platform: crate::model::DoctorPlatform,
     mut raw: crate::model::TmuxDoctorInfo,
@@ -1150,19 +1044,8 @@ pub fn tmux_doctor_for_platform(
     raw
 }
 
-/// Render a [`SpawnSpec`] to the single shell command string tmux runs via `sh -c`:
-/// `env -u NO_COLOR K='v' … program 'arg1' 'arg2'`. The program is the user-configured command
-/// line and is passed through verbatim (it may legitimately be a shell fragment); env
-/// assignments and extra args are single-quoted via [`shell_quote`].
-///
-/// The leading `env -u NO_COLOR` unconditionally strips `NO_COLOR` from whatever ambient
-/// environment the daemon (and the tmux server it drives) happened to inherit. Nothing else in
-/// the spawn path ever touches TERM/COLORTERM/NO_COLOR, so a `NO_COLOR` set on the daemon's own
-/// process — common when it's launched from a script, CI-flavored wrapper, or another agent's
-/// shell — silently propagated to every spawned pane. Agent CLIs that honor the NO_COLOR
-/// convention (Claude Code, Antigravity's `agy`, and others) then rendered entirely without
-/// color, keeping only bold/dim/reset — reproduced by capturing a real tmux pane with `NO_COLOR=1`
-/// set. `env -u` on an already-unset var is a harmless no-op, so this is safe unconditionally.
+/// Render the configured shell fragment with quoted arguments and environment assignments,
+/// unsetting ambient NO_COLOR so spawned agents retain color unless explicitly overridden.
 fn render_spawn_command(spec: &SpawnSpec) -> String {
     let mut cmd = String::from("env -u NO_COLOR ");
     for (k, v) in &spec.env {
@@ -1416,10 +1299,8 @@ impl SessionBackend for TmuxRuntime {
         }
     }
 
-    /// An ignore-size tmux control client receives `%layout-change` and `%output` on
-    /// one stdout stream. That ordering is the crucial contract: a renderer sees the new grid
-    /// before any cursor-relative redraw produced for it. `ignore-size` ensures this observer
-    /// never participates in tmux's pane-size arbitration.
+    /// Observe grid and output changes on one ordered control stream without participating in
+    /// pane-size arbitration.
     fn open_byte_stream(&self, window: &str) -> Result<ByteStream> {
         let tag = NEXT_STREAM_TAG.fetch_add(1, Ordering::Relaxed);
         let target = self.exact_target(window);
@@ -1441,8 +1322,8 @@ impl SessionBackend for TmuxRuntime {
             .ok_or_else(|| Error::Agent(format!("pane id unavailable for {window}")))?
             .to_string();
 
-        // Clear a legacy pipe-pane left by an older daemon before switching this pane to control
-        // mode. Benign when no pipe exists.
+        // Clear an existing pipe-pane before control mode so an unread pipe cannot accumulate
+        // output.
         let _ = self.pipe_pane_off_named(window);
         let mut command = Command::new(tmux_program());
         command
@@ -1590,7 +1471,7 @@ mod tests {
         // each dimension is floored independently (103x18 keeps its width, gains rows).
         assert_eq!(clamp_pane_size(20, 4), (MIN_PANE_COLS, MIN_PANE_ROWS));
         assert_eq!(clamp_pane_size(103, 18), (103, MIN_PANE_ROWS));
-        // Healthy requests pass through unchanged.
+
         assert_eq!(clamp_pane_size(211, 60), (211, 60));
         assert_eq!(clamp_pane_size(120, 40), (120, 40));
     }
@@ -1604,7 +1485,7 @@ mod tests {
             render_spawn_command(&bare),
             "env -u NO_COLOR env -u CLAUDE_CONFIG_DIR claude"
         );
-        // Args are single-quoted and appended — byte-identical to the old
+        // Args are single-quoted and appended - byte-identical to the old
         // `format!("{command} {}", shell_quote(task))` assembly.
         let with_task = SpawnSpec::new("claude", "/tmp").arg("fix the bug");
         assert_eq!(
@@ -1627,10 +1508,7 @@ mod tests {
 
     #[test]
     fn render_spawn_command_always_unsets_no_color() {
-        // The exact reproduction: a daemon whose own environment carries NO_COLOR (set by a
-        // wrapping script, CI runner, or another agent's shell) must not leak it into the
-        // spawned agent — every agent CLI that honors NO_COLOR would otherwise render
-        // monochrome, confirmed against a real tmux pane.
+        // Ambient NO_COLOR must not silently disable spawned agents’ color.
         let spec = SpawnSpec::new("agy", "/tmp");
         assert!(render_spawn_command(&spec).starts_with("env -u NO_COLOR "));
     }
@@ -1686,9 +1564,9 @@ mod tests {
 
     #[test]
     fn parses_windows_meta_lines() {
-        // `name%#%@id%#%session?%#%agent_kind?` — fields 3 and 4 are empty when options are
+        // `name%#%@id%#%session?%#%agent_kind?` - fields 3 and 4 are empty when options are
         // unset. `%#%` (not tab) is the separator so the probe survives tmux's C/POSIX-locale
-        // vis-sanitization of control characters — see `PROBE_FIELD_SEP`.
+        // vis-sanitization of control characters - see `PROBE_FIELD_SEP`.
         let sep = PROBE_FIELD_SEP;
         let out = format!(
             "lane-1{sep}@3{sep}abc-123{sep}claude-code\nlane-1-2{sep}@7{sep}{sep}antigravity\norchestrator{sep}@1{sep}{sep}\n"
@@ -1716,18 +1594,18 @@ mod tests {
                 },
             ]
         );
-        // A malformed window id sorts last (u64::MAX), never panics.
+
         assert_eq!(
             TmuxRuntime::parse_windows_meta(&format!("w{sep}bogus{sep}{sep}\n"))[0].wid,
             u64::MAX
         );
-        // Empty probe (no server) → no windows.
+
         assert!(TmuxRuntime::parse_windows_meta("").is_empty());
     }
 
     #[test]
     fn parse_windows_meta_survives_locale_sanitized_output() {
-        // The new sentinel-separated probe line — exactly what tmux now emits regardless of the
+        // The new sentinel-separated probe line - exactly what tmux now emits regardless of the
         // tmux CLIENT's locale, because `%#%` (unlike a bare tab) is never vis-sanitized away.
         let out = format!(
             "lane-81{sep}@5{sep}sid-123{sep}claude-code\n",
@@ -1749,13 +1627,7 @@ mod tests {
             "sentinel-separated probe line must parse as a lane-81 window"
         );
 
-        // Documents the OLD failure shape this fix eliminates: under the old tab separator, a
-        // tmux client running in the C/POSIX locale (exactly what Finder/launchd hand a
-        // GUI-spawned daemon) vis-sanitized every tab to `_`, so the whole line degenerated into
-        // one unsplittable field. `name` swallowed everything, and a name like that can never
-        // parse as `lane-<id>` — which is why every agent rendered as external/invisible in the
-        // GUI. With the sentinel separator this garbling can no longer happen, but the shape is
-        // still worth asserting so a regression back to a sanitizable separator would be caught.
+        // A sanitized tab-delimited row must not be mistaken for a valid lane window.
         let garbled_old_style = "lane-81_@0_sid_claude-code\n";
         let garbled = TmuxRuntime::parse_windows_meta(garbled_old_style);
         assert_eq!(garbled.len(), 1);
@@ -1787,20 +1659,20 @@ mod tests {
                 ),
             ]
         );
-        // Empty probe (no server) → no windows.
+
         assert!(TmuxRuntime::parse_windows_activity("").is_empty());
     }
 
     #[test]
     fn locale_override_decision() {
-        // No locale vars set at all — the GUI/launchd context that triggers the bug — hands the
+        // No locale vars set at all - the GUI/launchd context that triggers the bug - hands the
         // tmux client a real UTF-8 locale.
         assert_eq!(
             locale_override(None, None, None),
             Some(("LC_ALL", "en_US.UTF-8"))
         );
         // Any one of the three already set means a real locale choice exists (the user's shell,
-        // or ours from an earlier call) — never override it.
+        // or ours from an earlier call) - never override it.
         assert_eq!(locale_override(Some("en_US.UTF-8"), None, None), None);
         assert_eq!(locale_override(None, Some("C"), None), None);
         assert_eq!(locale_override(None, None, Some("en_GB.UTF-8")), None);
@@ -1962,7 +1834,6 @@ mod tests {
         rt.kill_named("lane-1-2").unwrap();
         assert!(!rt.has_window(lane));
 
-        // Tear down the test session.
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", rt.session()])
             .output();
@@ -2141,7 +2012,7 @@ mod tests {
             return;
         }
         let rt = TmuxRuntime::new(format!("repomon-ownertest-{}", std::process::id()));
-        // A server must exist before server options can be set — spawn a throwaway window.
+        // A server must exist before server options can be set - spawn a throwaway window.
         rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'")
             .unwrap();
 
@@ -2159,7 +2030,7 @@ mod tests {
             !rt.claim_or_verify_owner("daemon-B"),
             "non-owner must back off"
         );
-        // The original owner is unaffected by the other's attempt.
+
         assert!(
             rt.claim_or_verify_owner("daemon-A"),
             "owner still owns after B's attempt"
@@ -2196,7 +2067,6 @@ mod tests {
         let rt = TmuxRuntime::new(format!("repomon-activetest-{}", std::process::id()));
         let cwd = std::env::temp_dir();
 
-        // The window a human is "attached" to (their focused agent).
         rt.spawn(1, &cwd, "sh -c 'sleep 30'").unwrap();
         assert_eq!(active_window(&rt).as_deref(), Some("lane-1"));
 
@@ -2283,7 +2153,6 @@ mod tests {
         let sibling_tmux = sibling_dir.join(format!("tmux{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&sibling_tmux, b"sibling-tmux").unwrap();
 
-        // Empty PATH
         let empty_path = std::ffi::OsStr::new("");
         let resolved = resolve_tmux_from(None, Some(empty_path), &[sibling_dir]);
         assert_eq!(

@@ -15,10 +15,8 @@ pub fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
         .find(|cand| is_executable(cand))
 }
 
-/// Windows: executables are found by extension, per `PATHEXT` — `claude` is really
-/// `claude.cmd` (the npm shim), `git` is `git.exe`, `wt` is `wt.exe`. Each PATH entry is
-/// probed with every candidate name before moving on, so the first PATH entry that has the
-/// tool wins (matching the unix behavior and `CreateProcess` semantics).
+/// Searches PATH entries in order using PATHEXT candidates so the first directory containing the
+/// requested executable wins.
 #[cfg(windows)]
 pub fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
     let pathext = std::env::var("PATHEXT").ok().filter(|v| !v.is_empty());
@@ -32,11 +30,7 @@ pub fn find_in(path_var: &OsStr, bin: &str) -> Option<PathBuf> {
 #[cfg(any(windows, test))]
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
-/// The filenames to try for `bin` under a `PATHEXT` value, in order. A name that already
-/// carries an extension is tried as given first (like `CreateProcess`); an extensionless name
-/// tries each PATHEXT extension first and the bare name last (best-effort for extensionless
-/// scripts, and harmless because real Windows tools always match an extension earlier).
-/// Pure string logic so it is unit-testable on every OS.
+/// Try an explicitly suffixed name first; otherwise try PATHEXT extensions before the bare name.
 #[cfg(any(windows, test))]
 fn candidate_names(bin: &str, pathext: &str) -> Vec<String> {
     let mut names = Vec::new();
@@ -112,12 +106,12 @@ mod tests {
                 "claude"
             ]
         );
-        // An explicit extension is honored as given, first.
+
         assert_eq!(
             candidate_names("tool.exe", ".COM;.EXE"),
             vec!["tool.exe", "tool.exe.COM", "tool.exe.EXE"]
         );
-        // Empty PATHEXT segments are skipped.
+
         assert_eq!(candidate_names("x", ".EXE;;"), vec!["x.EXE", "x"]);
     }
 

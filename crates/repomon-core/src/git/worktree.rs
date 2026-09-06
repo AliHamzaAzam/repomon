@@ -1,8 +1,5 @@
-//! Worktree enumeration and CRUD.
-//!
-//! gix can't enumerate or create worktrees yet, so we shell out to `git worktree
-//! list --porcelain` (a stable format we parse) and `git worktree add/remove/prune`
-//! (so we get exact git semantics rather than a reimplementation).
+//! Uses Git’s porcelain output and worktree commands to preserve Git’s enumeration and mutation
+//! semantics.
 
 use std::path::{Path, PathBuf};
 
@@ -122,10 +119,8 @@ pub fn add(
     Ok(())
 }
 
-/// Build the `git worktree add` arg vector. A `--` separates options from
-/// positionals so a branch/path that looks like an option (e.g. `--foo`) is
-/// never parsed as a flag. `-b <branch>` is an option, so it stays before the
-/// separator.
+/// Place path and branch positionals after -- so option-shaped input cannot become git flags; the
+/// -b option stays before it.
 fn add_args<'a>(
     new: &'a str,
     branch: &'a str,
@@ -225,7 +220,6 @@ bare
         assert!(!e[0].detached);
         assert!(e[0].head.is_some());
 
-        // Slashes in branch names are preserved.
         assert_eq!(e[1].branch.as_deref(), Some("hotfix/checkout-bug"));
         assert_eq!(e[1].locked.as_deref(), Some("some reason"));
 
@@ -239,7 +233,6 @@ bare
 
     #[test]
     fn add_args_checkout_existing_separates_positionals() {
-        // No -b: `--` precedes the path and branch positionals.
         assert_eq!(
             add_args("/code/wt/foo", "feature/x", None, false),
             ["worktree", "add", "--", "/code/wt/foo", "feature/x"]
@@ -261,7 +254,7 @@ bare
                 "origin/main"
             ]
         );
-        // Without a source the trailing positional is simply omitted.
+
         assert_eq!(
             add_args("/code/wt/foo", "feature/x", None, true),
             ["worktree", "add", "-b", "feature/x", "--", "/code/wt/foo"]
@@ -270,7 +263,6 @@ bare
 
     #[test]
     fn add_args_treats_option_like_path_as_positional() {
-        // A path/branch that looks like a flag stays after `--`.
         assert_eq!(
             add_args("--force", "--bad-branch", None, false),
             ["worktree", "add", "--", "--force", "--bad-branch"]
@@ -283,7 +275,7 @@ bare
             remove_args("/code/wt/foo", false),
             ["worktree", "remove", "--", "/code/wt/foo"]
         );
-        // `--force` is an option and precedes the `--` separator.
+
         assert_eq!(
             remove_args("--weird-path", true),
             ["worktree", "remove", "--force", "--", "--weird-path"]

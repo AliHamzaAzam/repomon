@@ -1,25 +1,10 @@
-//! Windows session backend: per-window `repomon-agent-host.exe` processes.
-//!
-//! The Windows counterpart of [`TmuxRuntime`](super::tmux::TmuxRuntime): each agent window is
-//! owned by one detached host process (ConPTY + child + server-side vt100 screen) that serves
-//! the frozen control protocol in `crates/repomon-host/PROTOCOL.md` on
-//! `\\.\pipe\repomon-<session>-<window>` and registers itself under
-//! `<data_dir>\hosts\<session>\<window>.json`. Hosts survive daemon restarts; on startup the
-//! backend re-adopts them by scanning the registry and `hello`-verifying each pipe — the
-//! Windows equivalent of the daemon finding an existing tmux server.
-//!
-//! Everything decision-shaped (spawn-command parsing, host argv assembly, target formats,
-//! scan adopt/skip/GC rules, shell selection) is pure logic tested on every OS; only the pipe
-//! client, host spawning, and the byte-stream pump are `#[cfg(windows)]`.
+//! Controls detached ConPTY hosts through the pipe and registry protocol. Hosts survive daemon
+//! restarts; adoption must verify the live host’s hello response before trusting a registry entry.
 
 use crate::error::{Error, Result};
 use crate::process::{WINDOWS_CREATE_NEW_PROCESS_GROUP, WINDOWS_CREATE_NO_WINDOW};
 
 use super::backend::AttachCommand;
-
-// ---------------------------------------------------------------------------
-// Pure logic (all OSes)
-// ---------------------------------------------------------------------------
 
 /// Environment overrides parsed out of a spawn program string (`KEY=VALUE` prefixes).
 pub type EnvPairs = Vec<(String, String)>;
@@ -29,20 +14,13 @@ pub type EnvPairs = Vec<(String, String)>;
 pub const WINDOWS_BACKGROUND_PROCESS_FLAGS: u32 =
     WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP;
 
-/// Split a [`SpawnSpec`](super::backend::SpawnSpec) `program` string into environment
-/// assignments and an argv. On Unix the program is a shell fragment run via `sh -c`; there is
-/// no shell on Windows, so the backend parses the common shapes itself: leading `KEY=VALUE`
-/// tokens become environment overrides (`CLAUDE_CONFIG_DIR='…' claude`), and the rest is
-/// whitespace-split with single/double quotes respected (quotes group, backslashes are plain
-/// path characters). An empty program is an error.
+/// Splits a configured program into leading environment assignments and quoted argv, treating
+/// backslashes as path characters and rejecting an empty program.
 pub fn split_spawn_program(program: &str) -> Result<(EnvPairs, Vec<String>)> {
     let mut tokens = tokenize(program).into_iter().peekable();
     let mut env: Vec<(String, String)> = Vec::new();
-    // A leading `env [-i] [-u NAME]… [KEY=VALUE]… program` — Unix launch commands route
-    // environment through `env` (the default Claude account launches as
-    // `env -u CLAUDE_CONFIG_DIR claude`), but there is no `env` on Windows. Translate it:
-    // `-u NAME` becomes a `NAME=` override with an empty value, which the host applies as a
-    // removal, and assignments fold into the same overrides as the bare `KEY=VALUE …` shape.
+    // Translate Unix env prefixes for the host: an empty override removes a variable, including
+    // CLAUDE_CONFIG_DIR for the default account.
     if tokens.peek().map(String::as_str) == Some("env") {
         tokens.next();
         while let Some(tok) = tokens.peek() {
@@ -88,7 +66,7 @@ fn is_env_key(key: &str) -> bool {
 }
 
 /// Whitespace-split honoring single/double quotes (quotes group and are stripped; backslash is
-/// a plain character — these are Windows paths, not shell escapes).
+/// a plain character - these are Windows paths, not shell escapes).
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
@@ -124,7 +102,7 @@ fn tokenize(s: &str) -> Vec<String> {
 
 /// The full argument vector for `repomon-agent-host.exe`, per the PROTOCOL.md §1 spawn
 /// contract: `--session S --window W --cwd DIR --owner TOK [--env K=V]... -- PROGRAM ARGS...`.
-/// `--cols`/`--rows` are omitted — the host defaults to 220×50 (tmux parity).
+/// `--cols`/`--rows` are omitted - the host defaults to 220×50 (tmux parity).
 pub fn host_spawn_args(
     session: &str,
     window: &str,
@@ -152,12 +130,12 @@ pub fn host_spawn_args(
     args
 }
 
-/// `session:window` — same shape as the tmux target so clients treat both opaquely.
+/// `session:window` - same shape as the tmux target so clients treat both opaquely.
 pub fn target_of(session: &str, window: &str) -> String {
     format!("{session}:{window}")
 }
 
-/// `session:=window` — the exact-match form (tmux parity; the `=` is inert here but keeps the
+/// `session:=window` - the exact-match form (tmux parity; the `=` is inert here but keeps the
 /// format identical across backends).
 pub fn exact_target_of(session: &str, window: &str) -> String {
     format!("{session}:={window}")
@@ -177,7 +155,7 @@ pub fn window_from_target(session: &str, target: &str) -> String {
 pub enum ConnectOutcome {
     /// Pipe connected (hello may or may not have succeeded).
     Connected,
-    /// Pipe absent: not found / connection refused — the host is gone.
+    /// Pipe absent: not found / connection refused - the host is gone.
     Absent,
     /// Pipe exists but every instance was momentarily busy.
     Busy,
@@ -194,10 +172,8 @@ pub enum ScanAction {
     Gc,
 }
 
-/// The adopt/skip/GC rule (PROTOCOL.md §6 + §8): a pipe that won't connect marks the entry
-/// stale (GC); a connected host is adopted only when its `hello.owner` matches `me` — on
-/// mismatch the daemon MUST back off (not adopt, not reap, not kill). A busy pipe or a failed
-/// hello on a live pipe is skipped, never GC'd.
+/// Adopts only verified owned hosts, removes entries only after failed connection, and skips busy
+/// or unverifiable live pipes without modifying them.
 pub fn scan_action(connect: ConnectOutcome, hello_owner: Option<&str>, me: &str) -> ScanAction {
     match connect {
         ConnectOutcome::Absent => ScanAction::Gc,
@@ -220,8 +196,7 @@ pub fn user_shell_from(pwsh: Option<std::path::PathBuf>, comspec: Option<String>
         .unwrap_or_else(|| "cmd.exe".to_string())
 }
 
-/// The command a client runs in a real terminal to attach to `window`: the raw byte-proxy
-/// attach client (`repomon attach-host <window>`, Track F).
+/// Returns the raw byte-proxy command a client runs in a real terminal to attach to the window.
 pub fn attach_command_for(window: &str) -> AttachCommand {
     AttachCommand {
         program: "repomon".to_string(),
@@ -235,15 +210,7 @@ pub fn attach_command_for(window: &str) -> AttachCommand {
 #[cfg(windows)]
 pub use host_backend::WindowsBackend;
 
-// ---------------------------------------------------------------------------
-// `system.doctor` support: locating `repomon-agent-host.exe`
-// ---------------------------------------------------------------------------
-
-/// Pure `repomon-agent-host.exe` resolution for `system.doctor`, mirroring
-/// [`super::tmux::resolve_tmux_from`]'s precedence: an env override, then a bundled copy beside
-/// the app (checked against the given candidate directories), then `PATH`. Takes every input as
-/// a parameter so the precedence is unit-testable on every OS with a temp directory standing in
-/// for the app bundle; [`agent_host_doctor`] supplies the real values.
+/// Resolves the agent host from an explicit override, bundled sibling directories, then PATH.
 pub fn resolve_agent_host_from(
     env_override: Option<&str>,
     sibling_dirs: &[std::path::PathBuf],
@@ -273,7 +240,7 @@ pub fn resolve_agent_host_from(
 
 /// The real `system.doctor` probe for the agent host: gathers the actual env var, executable-
 /// relative candidate directories, and `PATH`, then applies [`resolve_agent_host_from`]. No
-/// version is reported — the host protocol (PROTOCOL.md) has no `--version` query.
+/// version is reported - the host protocol (PROTOCOL.md) has no `--version` query.
 pub fn agent_host_doctor() -> crate::model::AgentHostDoctorInfo {
     let env_override = std::env::var("REPOMON_HOST_BIN").ok();
     let mut sibling_dirs = Vec::new();
@@ -307,10 +274,6 @@ pub fn agent_host_doctor() -> crate::model::AgentHostDoctorInfo {
         },
     }
 }
-
-// ---------------------------------------------------------------------------
-// The backend proper (Windows only)
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 mod host_backend {
@@ -356,10 +319,10 @@ mod host_backend {
     /// The result of trying to reach a host's pipe once (with busy retry).
     enum Connect {
         Ok(File),
-        /// `ERROR_FILE_NOT_FOUND`: no live pipe — the host is gone.
+        /// `ERROR_FILE_NOT_FOUND`: no live pipe - the host is gone.
         Absent,
         /// The pipe exists but couldn't be opened right now (all instances busy, or an
-        /// unexpected open error). Alive as far as we know — never GC'd.
+        /// unexpected open error). Alive as far as we know - never GC'd.
         Busy,
     }
 
@@ -492,10 +455,8 @@ mod host_backend {
         data_dir: PathBuf,
         /// Live byte-stream readers, one per window at most (trait contract).
         streams: Arc<Mutex<HashMap<String, ActiveStream>>>,
-        /// Short-TTL cache of the last registry scan. One overlay pass calls `scan()` several
-        /// times (`list_windows` + `live_agent_cwds`), and the GUI's fleet refresh adds
-        /// `terminal.list_all` — without this, each call re-reads the registry dir and does a
-        /// fresh pipe connect + hello roundtrip to EVERY live host, several times per 2s.
+        /// Reuse a brief registry snapshot so one overlay’s callers do not each reconnect to every
+        /// host.
         scan_cache: ScanCache,
         /// Pooled control connections, one slot per window. Requests to one window serialize
         /// on the slot (roundtrips are sub-ms on a local pipe); different windows don't block
@@ -525,7 +486,7 @@ mod host_backend {
         }
 
         /// Drop the cached scan so the next `scan()` re-reads reality. Called whenever this
-        /// daemon changes the set of hosts (spawn/kill) — external changes are covered by the
+        /// daemon changes the set of hosts (spawn/kill) - external changes are covered by the
         /// TTL.
         fn invalidate_scan(&self) {
             *self.scan_cache.lock().expect("scan cache lock") = None;
@@ -565,12 +526,8 @@ mod host_backend {
             crate::exec::find_in_path("repomon-agent-host")
         }
 
-        /// One request/response against a window's host on a pooled control connection.
-        /// A fresh pipe connect per request made every keystroke, capture, cursor, and size
-        /// query pay connect overhead; the connection is reused and rebuilt once on a
-        /// transport error (`Error::Io` — the host died or the pipe tore; a rebuilt connect
-        /// against a dead host correctly reports Absent). A host-ANSWERED error is returned
-        /// as-is and never retried: the op already executed once.
+        /// Reuse the control connection and reconnect once on transport failure; never retry a
+        /// host-answered error because its operation has already executed.
         fn request(&self, window: &str, op: Op) -> Result<serde_json::Value> {
             let slot = {
                 let mut pool = self.control.lock().expect("control pool lock");
@@ -580,7 +537,7 @@ mod host_backend {
             if let Some(c) = conn.as_mut() {
                 match roundtrip(&mut c.file, &mut c.dec, op.clone()) {
                     Ok(v) => return Ok(v),
-                    Err(Error::Io(_)) => *conn = None, // stale — reconnect below
+                    Err(Error::Io(_)) => *conn = None,
                     Err(e) => {
                         *conn = None;
                         return Err(e);
@@ -604,7 +561,7 @@ mod host_backend {
             }
         }
 
-        /// Like [`request`], but a vanished window is benign (`Ok(None)`) — the analogue of
+        /// Like [`request`], but a vanished window is benign (`Ok(None)`) - the analogue of
         /// the tmux impl's `run_allow_absent`.
         fn request_allow_absent(&self, window: &str, op: Op) -> Result<Option<serde_json::Value>> {
             match self.request(window, op) {
@@ -614,10 +571,8 @@ mod host_backend {
             }
         }
 
-        /// Scan the registry, GC stale entries, and return every live host we own
-        /// (PROTOCOL.md §6 + §8) — re-adoption *is* this scan run on a fresh daemon.
-        /// Served from a [`SCAN_CACHE_TTL`] cache so the several callers within one overlay
-        /// pass share a single real scan; see `scan_cache`.
+        /// Return owned live hosts and remove disconnected registry entries, sharing scans through
+        /// the short-lived cache.
         fn scan(&self) -> Vec<LiveHost> {
             {
                 let cache = self.scan_cache.lock().expect("scan cache lock");
@@ -731,13 +686,8 @@ mod host_backend {
             }
         }
 
-        /// Spawn from a [`SpawnSpec`]: parse the program string (env prefixes + quoting),
-        /// merge the spec's env, append its args, and launch the host.
-        ///
-        /// Leads with an unset of `NO_COLOR` (empty value, per the host's unset convention)
-        /// so whatever ambient environment the daemon inherited never silently mutes color in
-        /// agent CLIs that honor it; a later explicit `NO_COLOR` in `spec.env` still wins,
-        /// mirroring the Unix tmux spawn path's `env -u NO_COLOR` prefix.
+        /// Launch the parsed program with merged arguments and environment, clearing ambient
+        /// NO_COLOR unless the spec explicitly overrides it.
         fn spawn_spec(&self, window: &str, spec: &SpawnSpec) -> Result<()> {
             let (mut env, mut argv) = split_spawn_program(&spec.program)?;
             let mut all_env = vec![("NO_COLOR".to_string(), String::new())];
@@ -834,11 +784,7 @@ mod host_backend {
             // here could hand out a just-taken slot.
             self.invalidate_scan();
             let taken = self.windows_for(lane).unwrap_or_default();
-            // Allocate above the highest live slot rather than refilling a freed low one:
-            // slot order must keep tracking spawn order while any window lives, because the
-            // overlay's transcript↔window pairing (and its placeholder mapping) assumes the
-            // oldest slots hold the oldest agents. `windows_for` is slot-ascending, so the
-            // last entry carries the highest slot.
+            // Allocate above the highest live slot to preserve spawn order across gaps.
             let next = taken
                 .last()
                 .and_then(|name| TmuxRuntime::slot_of_window(name))
@@ -984,11 +930,8 @@ mod host_backend {
             attach_command_for(&window_from_target(&self.session, target))
         }
 
-        /// `subscribe_bytes` on a dedicated second connection (PROTOCOL.md §5: a subscribed
-        /// connection is stream-only). The first pushed frame is a full-screen replay; every
-        /// frame's payload is forwarded raw to the channel. A reader thread pumps the pipe;
-        /// [`close_byte_stream`](Self::close_byte_stream) stops it via a flag +
-        /// `CancelSynchronousIo`.
+        /// Subscribe on a dedicated stream-only connection, forwarding the initial screen replay
+        /// and subsequent bytes until closure cancels the reader.
         fn open_byte_stream(&self, window: &str) -> Result<ByteStream> {
             let mut file = match connect_pipe(&self.pipe_name(window), BUSY_CEILING) {
                 Connect::Ok(f) => f,
@@ -1001,7 +944,7 @@ mod host_backend {
             };
             let mut dec = FrameDecoder::new();
             // The subscribe response arrives on the same connection; the same decoder may
-            // already hold the first stream frames behind it — hand both to the pump.
+            // already hold the first stream frames behind it - hand both to the pump.
             roundtrip(&mut file, &mut dec, Op::SubscribeBytes)?;
 
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1039,12 +982,11 @@ mod host_backend {
 
     /// Drain stream frames from the subscribed connection into the channel until EOF, error,
     /// stop-flag, or the consumer hanging up. Disconnecting is the protocol's only
-    /// unsubscribe (PROTOCOL.md §7.11) — dropping `file` on return is the unsubscribe.
+    /// unsubscribe (PROTOCOL.md §7.11) - dropping `file` on return is the unsubscribe.
     fn pump(
         mut file: File,
         mut dec: FrameDecoder,
-        // TODO(windows-grid-parity): emit ordered Grid events when ConPTY's external size changes.
-        // The old daemon-side poll covered this; tmux control-mode replaced it only on Unix.
+        // External ConPTY size changes do not currently emit ordered Grid events.
         tx: tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>,
         stop: &AtomicBool,
     ) {
@@ -1054,7 +996,7 @@ mod host_backend {
                 match dec.next_frame() {
                     Ok(Some(payload)) => {
                         let Ok(frame) = serde_json::from_slice::<StreamFrame>(&payload) else {
-                            continue; // not a stream frame (unknown push): ignore
+                            continue;
                         };
                         if frame.stream != "bytes" {
                             continue;
@@ -1065,18 +1007,18 @@ mod host_backend {
                             continue;
                         };
                         if tx.send(ByteStreamEvent::Bytes(bytes)).is_err() {
-                            return; // consumer gone
+                            return;
                         }
                     }
                     Ok(None) => break,
-                    Err(_) => return, // corrupt peer
+                    Err(_) => return,
                 }
             }
             if stop.load(Ordering::Relaxed) {
                 return;
             }
             match file.read(&mut buf) {
-                Ok(0) | Err(_) => return, // EOF (host exited) or cancelled
+                Ok(0) | Err(_) => return,
                 Ok(n) => dec.extend(&buf[..n]),
             }
         }
@@ -1164,7 +1106,7 @@ mod tests {
     fn empty_program_is_an_error() {
         assert!(split_spawn_program("").is_err());
         assert!(split_spawn_program("   ").is_err());
-        // Only env assignments, nothing to run.
+
         assert!(split_spawn_program("FOO=bar").is_err());
     }
 
@@ -1222,7 +1164,7 @@ mod tests {
         assert_eq!(exact_target_of("repomon", "lane-7"), "repomon:=lane-7");
         assert_eq!(window_from_target("repomon", "repomon:lane-7"), "lane-7");
         assert_eq!(window_from_target("repomon", "repomon:=lane-7"), "lane-7");
-        // A bare window name passes through (defensive).
+
         assert_eq!(window_from_target("repomon", "lane-7"), "lane-7");
     }
 
@@ -1232,7 +1174,7 @@ mod tests {
             scan_action(ConnectOutcome::Connected, Some("me"), "me"),
             ScanAction::Adopt
         );
-        // Foreign owner: back off — never adopt, reap, or kill (PROTOCOL.md §6).
+        // Foreign owner: back off - never adopt, reap, or kill (PROTOCOL.md §6).
         assert_eq!(
             scan_action(ConnectOutcome::Connected, Some("other"), "me"),
             ScanAction::Skip

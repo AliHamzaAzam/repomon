@@ -1,8 +1,5 @@
-//! Read-only OpenCode session monitor.
-//!
-//! OpenCode 1.15.5 stores sessions, messages, and parts in SQLite. The monitor validates the
-//! required tables and columns before querying so a future incompatible schema degrades to no
-//! summary instead of breaking the fleet overlay.
+//! Reads OpenCode sessions from SQLite after validating required tables and columns, returning no
+//! summary for incompatible schemas.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -154,10 +151,7 @@ fn summarize(
     } else {
         AgentStatus::Running
     };
-    // The latest assistant text is what the daemon's transcript↔window pairing fingerprints
-    // against the pane capture. Without it an OpenCode session can never prove which window it
-    // drives, so once it stops being fresh it silently drops out of the overlay instead of
-    // staying classified.
+    // Retain assistant text so pane fingerprints can prove the session’s managed-window identity.
     let last_message = latest_text(conn, &session_id).map(|t| truncate(&t, 200));
     Some(TranscriptSummary {
         kind: AgentKind::OpenCode,
@@ -209,10 +203,8 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
-    /// `summary_for` reads its DB path from the process environment, and cargo runs a
-    /// crate's tests on parallel threads: without this lock, one test's `set_var`/`remove_var`
-    /// races another's read and the suite flakes. Every test that touches the variable holds
-    /// the guard for its whole body.
+    /// Serialize all environment access in these tests so path overrides cannot race parallel
+    /// readers.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_db<T>(db: &Path, f: impl FnOnce() -> T) -> T {
@@ -298,7 +290,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("opencode.db");
         fixture(&db, temp.path());
-        // A later user message must not override the assistant text.
+
         let conn = Connection::open(&db).unwrap();
         let now = Utc::now().timestamp_millis();
         conn.execute(

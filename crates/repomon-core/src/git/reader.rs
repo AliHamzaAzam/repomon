@@ -1,8 +1,5 @@
-//! gix-backed git reads: HEAD, branch, dirty state, ahead/behind, and commit walking.
-//!
-//! Everything here is synchronous and `!Sync`-friendly: the daemon calls these from
-//! `spawn_blocking`, opening the repository per call. We never shell out for status/log/diff
-//! — those go through gix. (Worktree CRUD is the one shellout, in [`super::worktree`].)
+//! Provides synchronous gix-backed repository reads with a fresh repository handle per call for use
+//! on blocking threads.
 
 use std::path::Path;
 
@@ -52,12 +49,8 @@ pub fn dirty_state(repo: &gix::Repository) -> Result<DirtyState> {
 /// for a worktree with thousands of changes.
 const ACTIVITY_STAT_CAP: u32 = 512;
 
-/// Count dirty entries AND, in the same status walk, find the newest mtime among the changed
-/// worktree files. `worktree_root` enables the mtime capture (the relative paths from the status
-/// iterator are joined onto it and `stat`ed); pass `None` to skip it (plain dirty count).
-///
-/// The mtime is repomon's "file activity" signal: a worktree being actively edited by an agent
-/// that leaves no transcript or process of its own still shows that work is happening.
+/// Collect dirty entries and optional file activity in one status walk, including work from agents
+/// without transcripts or independent processes.
 fn dirty_and_activity(
     repo: &gix::Repository,
     worktree_root: Option<&Path>,
@@ -163,12 +156,7 @@ const DEFAULT_BRANCH_CANDIDATES: [&str; 4] = [
     "refs/heads/master",
 ];
 
-/// Is every commit on this worktree's branch already contained in the repository's default
-/// branch? That is what makes a lane's worktree stale: the work landed, and the row is now
-/// bookkeeping.
-///
-/// Answered the same way as ahead/behind: walk from HEAD with the default branch hidden. An empty
-/// walk means HEAD adds nothing the default branch does not already have.
+/// Reports whether the worktree HEAD adds no commits beyond the repository’s default branch.
 pub fn merged_into_default(repo: &gix::Repository) -> Result<bool> {
     let head_id = match repo.head_id() {
         Ok(id) => id.detach(),
@@ -408,12 +396,10 @@ mod tests {
         let main_repo = open(root).unwrap();
         assert!(!merged_into_default(&main_repo).unwrap());
 
-        // A branch whose work is already in main.
         git(&["checkout", "-q", "-b", "landed"]);
         let landed = open(root).unwrap();
         assert!(merged_into_default(&landed).unwrap());
 
-        // The same branch once it carries a commit of its own.
         std::fs::write(root.join("b.txt"), "b").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "second"]);

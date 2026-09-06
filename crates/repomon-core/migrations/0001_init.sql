@@ -1,6 +1,5 @@
--- repomon schema v1.
--- All timestamps are RFC3339 UTC text; object ids are lowercase hex text.
--- IF NOT EXISTS keeps the migration safe to (re)apply against a pre-existing database.
+-- Timestamps are RFC3339 UTC text and object IDs are lowercase hexadecimal text; IF NOT EXISTS
+-- permits application against pre-existing tables.
 
 CREATE TABLE IF NOT EXISTS repos (
     id                     INTEGER PRIMARY KEY,
@@ -21,8 +20,7 @@ CREATE TABLE IF NOT EXISTS worktrees (
 );
 CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repo_id);
 
--- A lane is identified by (repo, worktree path); its id is assigned once and stays
--- stable across daemon restarts. Pin state and the tmux window live here too.
+-- Lane identity must remain stable across daemon restarts.
 CREATE TABLE IF NOT EXISTS lanes (
     id            INTEGER PRIMARY KEY,
     repo_id       INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,

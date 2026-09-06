@@ -1,8 +1,5 @@
--- Per-device remote-access credentials. Pairing mints one named, individually-revocable bearer
--- token per companion device (superseding the single shared `[remote] token` in config.toml,
--- which keeps working alongside these). Tokens are stored in plaintext deliberately: same threat
--- model as the config-file token they replace. Hashing them at rest is a future-hardening
--- candidate once the config token is retired.
+-- Store individually revocable device credentials alongside the shared config token, using the same
+-- local plaintext-storage trust boundary.
 CREATE TABLE remote_devices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,

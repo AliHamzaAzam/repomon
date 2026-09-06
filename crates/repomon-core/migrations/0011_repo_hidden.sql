@@ -1,3 +1,2 @@
--- Hide a repo from client sidebars without unregistering it. Registration is destructive enough
--- that "stop showing me this project" needed its own, reversible switch.
+-- Hiding a repository must preserve registration and its associated state.
 ALTER TABLE repos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;

@@ -1,6 +1,4 @@
--- Playbooks: procedural memory drafted by the orchestrator after completed goals, inert until a
--- human approves it. `content` is the live text (draft text before approval, approved text
--- after); `draft_content` holds a pending revision saved over an approved playbook.
+-- Keep a pending revision separate from approved content until human approval.
 CREATE TABLE IF NOT EXISTS playbooks (
     name          TEXT PRIMARY KEY,
     content       TEXT NOT NULL,

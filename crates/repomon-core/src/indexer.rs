@@ -1,8 +1,5 @@
-//! Full-history commit indexer (Phase 3).
-//!
-//! Walks each repo's HEAD ancestry and stores commits in SQLite so the timeline, sessions,
-//! and search can work over history rather than just the live HEAD window. Runs in the
-//! background on startup and after a repo is added.
+//! Indexes repository HEAD ancestry in SQLite for timeline, session, and search queries, running in
+//! the background at startup and after registration.
 
 use chrono::{TimeZone, Utc};
 
@@ -60,7 +57,7 @@ impl Indexer {
     }
 }
 
-/// From the unix epoch to a year from now — i.e. "everything reachable from HEAD".
+/// From the unix epoch to a year from now - i.e. "everything reachable from HEAD".
 fn full_range() -> TimeRange {
     TimeRange {
         from: Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now),

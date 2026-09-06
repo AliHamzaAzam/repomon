@@ -3,9 +3,8 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-/// Start a utility process without allocating a visible console on Windows. The daemon invokes
-/// Git and OS helpers during ordinary polling, so leaving the default creation flags can flash a
-/// console even though the daemon itself is windowless. Other platforms use a normal command.
+/// Creates a utility command without a visible Windows console, using normal process creation on
+/// other platforms.
 pub fn background_command<S: AsRef<OsStr>>(program: S) -> Command {
     let command = Command::new(program);
     #[cfg(windows)]

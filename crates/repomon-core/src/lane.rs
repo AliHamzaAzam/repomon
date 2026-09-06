@@ -1,8 +1,5 @@
-//! Lane management: list / get / create / delete / focus.
-//!
-//! A lane is the materialized `(repo, worktree)` join. `list` enumerates every worktree of
-//! every repo, computes live state, and assembles lanes (agent sessions are overlaid later,
-//! in Phase 2). `create` runs `git worktree add`; `delete` runs `git worktree remove`.
+//! Materializes repository/worktree joins as lanes and manages their worktree lifecycle; agent
+//! sessions are overlaid by the daemon.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,18 +32,11 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// How long a *clean* (not-since-invalidated) cached worktree state stays valid before a safety
-/// refresh — for changes the file watcher doesn't cover (e.g. linked worktrees outside a watched
-/// repo root). A worktree the watcher flags as changed re-walks on the next list regardless, so
-/// this can be generous; the refresh is also capped per list so it never re-walks all at once.
+/// Refresh clean cached state eventually for changes outside watcher coverage, with per-list caps
+/// to avoid synchronized walks.
 const STATE_TTL: Duration = Duration::from_secs(180);
-/// Minimum spacing between forced re-walks of a worktree the watcher keeps flagging dirty. An
-/// active agent writing files fires a burst of fsevents, each of which invalidates the state cache;
-/// without this, every `lane.list` would run a fresh (uncapped) gix status walk of that worktree.
-/// Within the debounce a dirty worktree reuses its last state and refreshes via the capped stale
-/// path instead, coalescing the burst into at most one walk per window. Kept short so a real change
-/// still surfaces within a poll or two. Must sit ABOVE the clients' 2s poll cadence: at 1.5s every
-/// single poll re-walked an actively-edited worktree; at 2.5s it's every other poll.
+/// Debounce watcher bursts longer than the clients’ poll interval to avoid a full status walk on
+/// every poll of an active worktree.
 const DIRTY_DEBOUNCE: Duration = Duration::from_millis(2500);
 /// How long a repo's cached `git worktree list` stays valid. Worktrees change only on lane
 /// create/delete (which clear the cache) or external `git worktree` ops; this TTL bounds the
@@ -64,10 +54,7 @@ struct StateEntry {
 /// Per-repo cache of `git worktree list` results, keyed by repo path.
 type WorktreeCache = Arc<Mutex<HashMap<PathBuf, (Instant, Vec<worktree::WorktreeEntry>)>>>;
 
-/// The inputs that determine a worktree's persisted DB row: `(repo_id, branch, head, is_main,
-/// name)`. Caching this per worktree path lets an unchanged worktree skip its `upsert_worktree`
-/// (a DB write) on every list — that unconditional write, run for all worktrees on every poll from
-/// every client, was the dominant source of the daemon's disk-write churn.
+/// Cache the persisted worktree signature to avoid redundant writes during polling.
 type WtSig = (RepoId, Option<String>, gix::ObjectId, bool, String);
 
 /// Cached `list` bookkeeping per worktree path: change signature, the persisted row, and lane id.
@@ -78,20 +65,13 @@ type WtCache = Arc<Mutex<HashMap<PathBuf, (WtSig, Worktree, LaneId)>>>;
 pub struct Lanes {
     store: Store,
     config: Config,
-    /// Per-worktree git state cache (keyed by worktree path). The gix status walk is the dominant
-    /// cost of `list`; we reuse a recent result and only re-walk a worktree the file watcher
-    /// flagged as changed (see [`Lanes::invalidate_state`]) or after [`STATE_TTL`]. Shared across
-    /// clones via `Arc` so a watcher invalidation reaches every handler.
+    /// Share cached worktree state across handlers so watcher invalidations reach every clone.
     state_cache: Arc<Mutex<HashMap<PathBuf, StateEntry>>>,
     /// Per-repo `git worktree list` cache (keyed by repo path), so a repo's worktrees aren't
     /// re-enumerated with a git subprocess on every overlay. Cleared by create/delete; otherwise
     /// bounded by [`WORKTREES_TTL`]. Shared across clones via `Arc`.
     worktrees_cache: WorktreeCache,
-    /// Per worktree path: its last-persisted row signature, the row itself, and its lane id. Lets
-    /// `list` skip BOTH the `upsert_worktree` and the `get_or_create_lane` writes when a worktree is
-    /// unchanged — each ran unconditionally per worktree per poll, and even a no-op
-    /// `INSERT ... ON CONFLICT DO NOTHING` commits a WAL frame, so together they were the daemon's
-    /// disk-write churn. See [`WtSig`].
+    /// Cache persisted worktree signatures and lane IDs to avoid redundant writes during polling.
     wt_cache: WtCache,
     /// Last-pruned keep-set per repo, so the store only checks for removed worktrees when
     /// the repo's worktree set changes.
@@ -115,9 +95,8 @@ impl Lanes {
         let repos = self.store.list_repos().await?;
         let metas = self.store.list_lane_meta().await?;
 
-        // Phase 1a — each repo's worktrees, reusing a recent `git worktree list` instead of forking
-        // git per repo on every overlay (worktrees change only on create/delete or external git
-        // ops). Cache misses run in parallel.
+        // Cache worktree listings to avoid forking git for every overlay; run cache misses in
+        // parallel.
         let mut repo_entries: Vec<(Repo, Vec<worktree::WorktreeEntry>)> = Vec::new();
         let mut wt_misses: Vec<Repo> = Vec::new();
         {
@@ -159,8 +138,6 @@ impl Lanes {
             }
         }
 
-        // Phase 1b — upsert each worktree's DB rows (cheap), collecting what each needs for its
-        // (expensive) git-state read, which we then run in parallel.
         let mut pending = Vec::new();
         for (repo, entries) in repo_entries {
             let mut keep = Vec::new();
@@ -179,7 +156,7 @@ impl Lanes {
                 let head = entry.head.unwrap_or_else(null_oid);
 
                 // Skip the DB writes (worktree upsert + lane get-or-create) when this worktree is
-                // unchanged since the last list — both commit a WAL frame even when nothing changes.
+                // unchanged since the last list - both commit a WAL frame even when nothing changes.
                 let sig: WtSig = (repo.id, entry.branch.clone(), head, is_main, name.clone());
                 let cached = {
                     let cache = self.wt_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -233,13 +210,8 @@ impl Lanes {
             }
         }
 
-        // Phase 2 — each worktree's live git state. `read_state` (gix status) is a full directory
-        // walk and the dominant cost of `lane.list`, so we cache it per worktree: reuse a recent
-        // state and only re-walk worktrees the watcher flagged as changed (`dirty`) or that are
-        // first-seen. The clean-but-TTL-expired refresh is capped per call (oldest first) so a
-        // synchronized expiry never re-walks every worktree at once — that spiked CPU; the rest
-        // keep their slightly-stale state and refresh on a later list. Walks run in parallel.
-        // (Agent transcript writes touch no worktree, so they never invalidate a cached state.)
+        // Cap expired-state refreshes to avoid synchronized full-worktree walks; watcher
+        // invalidations refresh changed worktrees independently of transcript activity.
         const WALK_CAP: usize = 2;
         let mut states: Vec<Option<Result<WorktreeState>>> = std::iter::repeat_with(|| None)
             .take(pending.len())
@@ -251,7 +223,7 @@ impl Lanes {
             for (i, (_, entry, _, _, _)) in pending.iter().enumerate() {
                 match cache.get(&entry.path) {
                     None => must_walk.push(i),
-                    // Dirty and not walked within the debounce → walk now.
+
                     Some(e) if e.dirty && e.walked_at.elapsed() >= DIRTY_DEBOUNCE => {
                         must_walk.push(i)
                     }
@@ -307,7 +279,6 @@ impl Lanes {
             }
         }
 
-        // Phase 3 — assemble the lanes.
         let mut lanes = Vec::with_capacity(pending.len());
         for ((repo, entry, wt, lane_id, head), st) in pending.into_iter().zip(states) {
             // Fall back to a prunable placeholder if the worktree dir is gone.
@@ -354,26 +325,16 @@ impl Lanes {
         Ok(lanes)
     }
 
-    /// Drop cached git state for the worktree that owns `root` so the next `list` re-walks it. The
-    /// file watcher calls this the moment a worktree's files change, keeping the fleet's dirty state
-    /// fresh without re-walking every worktree on every poll.
-    ///
-    /// A changed path belongs to a *single* worktree — the one whose cached path is the longest
-    /// prefix of the change (mirroring `watch::classify`'s `max_by_key(len)` ownership rule). The
-    /// earlier bidirectional `p.starts_with(root) || root.starts_with(p)` test also flagged the
-    /// PARENT worktree whenever a nested worktree changed, over-invalidating the cache and forcing
-    /// needless re-walks of the parent.
+    /// Invalidates the single worktree whose canonical path is the longest prefix of the changed
+    /// path.
     pub fn invalidate_state(&self, root: &Path) {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let mut cache = self.state_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = cache
             .iter_mut()
             .filter(|(p, _)| {
-                // Canonicalize the key side too: cache keys come from `git worktree list` and
-                // aren't necessarily in canonical form, and a raw prefix test against the
-                // canonicalized `root` breaks on Windows (`\\?\` verbatim prefix, 8.3 short
-                // names in temp paths). On unix keys are already canonical, so this is a no-op
-                // comparison there. Best-effort: an unresolvable key falls back to itself.
+                // Canonicalize both sides so Windows verbatim prefixes and short paths do not break
+                // worktree ownership checks.
                 let key = p.canonicalize().unwrap_or_else(|_| (*p).clone());
                 root.starts_with(key)
             })
@@ -432,7 +393,7 @@ impl Lanes {
             .get_or_create_lane(repo.id, path.to_string_lossy().into_owned())
             .await?;
 
-        // A worktree was added — drop the cached enumeration so list() picks it up at once.
+        // A worktree was added - drop the cached enumeration so list() picks it up at once.
         self.worktrees_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -446,7 +407,6 @@ impl Lanes {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
 
-        // Re-list and return the freshly created lane.
         self.list()
             .await?
             .into_iter()
@@ -492,7 +452,7 @@ impl Lanes {
                 .await
                 .map_err(join_err)??;
         }
-        // A worktree was removed — drop the cached enumeration and its stale state entry.
+        // A worktree was removed - drop the cached enumeration and its stale state entry.
         self.worktrees_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -512,10 +472,8 @@ impl Lanes {
         Ok(())
     }
 
-    /// Quick-merge a lane's branch into the repo's main worktree (best-effort).
-    ///
-    /// Runs `git -C <main-worktree> merge --no-edit <lane-branch>`. The main worktree must be
-    /// on the target branch and clean; conflicts surface as an error. Returns a status message.
+    /// Merges a lane into the clean main worktree on the requested target branch, returning
+    /// conflicts as errors.
     pub async fn merge(&self, id: LaneId, into: Option<String>) -> Result<String> {
         let meta = self
             .store
@@ -583,10 +541,10 @@ fn sort_lanes(lanes: &mut [Lane]) {
     lanes.sort_by(|a, b| {
         let ra = repo_activity[&a.repo.id];
         let rb = repo_activity[&b.repo.id];
-        rb.cmp(&ra) // repos: newest activity first
-            .then(a.repo.id.cmp(&b.repo.id)) // stable grouping
-            .then(b.worktree.is_main.cmp(&a.worktree.is_main)) // main first
-            .then(b.last_activity_at.cmp(&a.last_activity_at)) // then activity desc
+        rb.cmp(&ra)
+            .then(a.repo.id.cmp(&b.repo.id))
+            .then(b.worktree.is_main.cmp(&a.worktree.is_main))
+            .then(b.last_activity_at.cmp(&a.last_activity_at))
     });
 }
 
@@ -629,12 +587,8 @@ fn merge_branch(repo_path: &Path, branch: &str, into: Option<&str>) -> Result<St
         .output()
         .map_err(Error::Io)?;
     if !out.status.success() {
-        // Best-effort: a failed merge (typically a conflict) otherwise leaves the human's main
-        // checkout stuck mid-merge (MERGE_HEAD + conflict markers). This is not a force merge —
-        // we're not discarding any of the lane's or the main checkout's committed work, just
-        // undoing the in-progress merge attempt itself — so aborting here is safe to do
-        // unconditionally. Ignore the abort's own result: if it also fails there's nothing more
-        // we can do from here, and the original merge error is what the caller needs to see.
+        // Abort the failed merge attempt to avoid leaving the checkout in conflict, while returning
+        // the original failure if abort also fails.
         let _ = background_command("git")
             .arg("-C")
             .arg(repo_path)
@@ -789,7 +743,6 @@ mod tests {
         reg.add(dir.path()).await.unwrap();
         let lanes = Lanes::new(store, cfg);
 
-        // A clean worktree has no recent file-change signal.
         let before = lanes.list().await.unwrap();
         assert!(before[0].state.last_change_at.is_none());
 
@@ -809,9 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalidate_marks_only_the_longest_matching_worktree() {
-        // A nested worktree lives under a parent worktree's path. A change inside the nested
-        // worktree must dirty *only* the nested entry (the longest cached prefix of the change),
-        // not the parent — the old bidirectional prefix test over-invalidated the parent.
+        // A nested-worktree change must invalidate only the longest matching cached path.
         let base = tempfile::tempdir().unwrap();
         // Canonicalize so the manually-seeded keys match what `invalidate_state` canonicalizes to.
         let parent = base.path().canonicalize().unwrap();
@@ -845,7 +796,6 @@ mod tests {
             cache.insert(nested.clone(), entry());
         }
 
-        // A change inside the nested worktree.
         lanes.invalidate_state(&nested.join("file.txt"));
 
         let cache = lanes.state_cache.lock().unwrap_or_else(|e| e.into_inner());

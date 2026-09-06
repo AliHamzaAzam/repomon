@@ -1,10 +1,5 @@
-//! Configuration and on-disk path resolution.
-//!
-//! Config follows XDG on every platform (so the file lives at
-//! `~/.config/repomon/config.toml` on macOS too, for portability). Data follows platform
-//! conventions (`~/.local/share/repomon` on Linux, `~/Library/Application Support/repomon`
-//! on macOS). The socket path matches the build spec: `/tmp/repomon-$USER.sock` on macOS,
-//! `$XDG_RUNTIME_DIR/repomon.sock` on Linux.
+//! Resolves XDG-style configuration, platform data directories, and Unix socket or Windows
+//! named-pipe endpoints.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,10 +11,8 @@ use crate::error::{Error, Result};
 pub const DEFAULT_WORKTREE_TEMPLATE: &str = "~/code/{repo}-wt/{branch}";
 pub const DEFAULT_TMUX_SESSION: &str = "repomon";
 
-/// A tmux session name is safe to use as the `-L <label>` socket and in `session:window` targets.
-/// It's injected into many tmux command args, so restrict it to `[A-Za-z0-9_-]` — a name with a
-/// `:`, `=`, whitespace, or other metachar would corrupt target resolution (`exact_target` builds
-/// `{session}:={window}`). Empty is invalid.
+/// Accepts only a nonempty alphanumeric, underscore, or dash tmux session name so socket labels and
+/// target syntax remain unambiguous.
 pub fn valid_tmux_session(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
@@ -50,10 +43,8 @@ pub struct Config {
     pub time_format: String,
     /// The tmux session repomon manages agents in.
     pub tmux_session: String,
-    /// Accent color for headers, the selected lane, section dividers, and dirty marks. A named
-    /// color (`cyan`, `green`, `magenta`, `amber`, …) or a `#rrggbb`/`#rgb` hex. Unset defaults to
-    /// cyan; `"mono"` (or `"none"`/`"off"`) turns all color off for the original monochrome look.
-    /// (Status colors — running=green, needs-you=amber, rate-limited=cyan — are fixed.)
+    /// Selects a named or hexadecimal TUI accent, defaulting to cyan, with mono/none/off disabling
+    /// colors.
     pub accent: Option<String>,
     /// Theme preset for the GUI ("system", "dark", "midnight", "nord", "dracula", "sepia", "light").
     pub theme: Option<String>,
@@ -84,7 +75,7 @@ pub struct Config {
     pub notify_rate_limited: bool,
     /// Notify when a rate-limited agent is auto-continued and resumes work.
     pub notify_resumed: bool,
-    /// Notify when an agent goes idle / its session ends (off by default — can be noisy).
+    /// Notify when an agent goes idle / its session ends (off by default - can be noisy).
     pub notify_idle: bool,
     /// Master sound switch. The desktop uses it for custom cues and the daemon uses it for its
     /// native fallback when no GUI covers an event.
@@ -125,18 +116,11 @@ pub struct Config {
     /// Make desktop popups click-to-focus the terminal (uses `terminal-notifier` when
     /// installed; falls back to plain popups otherwise).
     pub notify_click_focus: bool,
-    /// Let the daemon post its own OS notification when no UI is covering one.
-    ///
-    /// On macOS that popup goes out through `osascript`, so it is delivered by Script Editor and
-    /// wears Script Editor's icon. Turning this off silences it: the TUI still pops its own while
-    /// it is on screen, and Mission Control still posts its own under the app's identity, but a
-    /// fleet with neither open stops notifying at the OS level. On by default, so alerts are not
-    /// lost on a machine that runs neither UI.
+    /// Allows daemon OS notifications when no UI covers delivery; disabling this silences alerts
+    /// when neither desktop nor TUI is open.
     pub notify_desktop_fallback: bool,
-    /// Notify when a worktree-isolated *subagent* finishes (an inferred file-activity session,
-    /// e.g. a Claude Code subagent that leaves no transcript or process of its own). Off by
-    /// default: you're alerted only when the *main* agent finishes, not each subagent it spawns.
-    /// Turn on to get a popup for every subagent too.
+    /// Enables notifications for inferred worktree subagents, disabled by default to avoid alerting
+    /// for every delegated task.
     pub notify_subagents: bool,
     /// Per-repo overrides, keyed by repo display name.
     pub repos: HashMap<String, RepoConfig>,
@@ -145,42 +129,27 @@ pub struct Config {
     pub remote: RemoteConfig,
     /// APNs push for the iOS companion: alerts reach the phone even with the app closed.
     pub push: PushConfig,
-    /// Show Claude account usage (the `/usage` 5-hour + weekly windows) in the TUI's bottom-right
-    /// corner. Off by default: subscription usage has no CLI/file/endpoint, so this works by
-    /// running `/usage` in a hidden throwaway `claude` session per account every few minutes —
-    /// which spawns a background process and writes a tiny transcript. See `docs/agents.md`.
+    /// Enables hidden CLI usage probes whose background processes and transcript writes make this
+    /// opt-in.
     pub usage_probe: bool,
     /// In the sidebars, expand a lane running several agents into one row per agent (a tree under
     /// the lane) instead of a single row with an `×N` badge. Off by default.
     pub expand_agents: bool,
-    /// Order sidebar repo groups by their most recent lane activity, so the project you are
-    /// working in floats to the top. Off by default (groups keep the daemon's order). Only the
-    /// groups move: lane order inside a group is untouched, since sorting *lanes* by activity made
-    /// them bubble around on every agent output.
-    ///
-    /// Superseded by [`Config::sort_mode`]; kept in sync by `config.set` so older clients (the
-    /// TUI) that only know the boolean keep seeing the right behavior.
+    /// Keeps the legacy repository-activity sort flag synchronized with sort_mode for clients that
+    /// still read the boolean.
     pub sort_repos_by_activity: bool,
-    /// How sidebar repo groups are ordered. `None` falls back to the legacy boolean above.
+    /// Selects sidebar repository order, falling back to sort_repos_by_activity when unset.
     pub sort_mode: Option<SortMode>,
-    /// How the per-lane agent tabs (the roster shown when a lane runs several agents) are
-    /// ordered. Independent of [`Config::sort_mode`]: one governs project groups, the other the
-    /// agents inside a single lane. `None` means Activity, the historical wire order.
+    /// Orders agents within a lane independently of repository sorting, defaulting to Activity when
+    /// unset.
     pub tab_sort_mode: Option<TabSortMode>,
-    /// Which agent powers the repomind orchestrator session — a built-in Claude variant (e.g.
-    /// `claude-work`), a custom agent name, or `codex` (the one non-Claude CLI with the MCP
-    /// client repomind needs; it runs with pane-only monitoring — no transcript chat view or
-    /// end-of-turn detection). Custom agents are composed with Claude-shaped flags, so their
-    /// commands must be `claude`-based. `None` falls back to bare `claude`. An explicit override
-    /// on `orchestrator.start` takes precedence over this.
+    /// Selects a Claude account, Claude-compatible custom command, Codex, Antigravity, or OpenCode
+    /// for orchestration, with per-start overrides taking precedence.
     pub orchestrator_agent: Option<String>,
     /// The model the orchestrator session runs (e.g. `opus`, `sonnet`). `None` lets `claude` pick
     /// its default. An explicit override on `orchestrator.start` takes precedence.
     pub orchestrator_model: Option<String>,
-    /// Render the focused agent through the embedded terminal emulator (fed by the pane's real
-    /// PTY byte stream) instead of the capture-based view. On by default; the capture path
-    /// remains the automatic fallback, and this is the escape hatch if the embedded renderer
-    /// misbehaves in some terminal.
+    /// Enables byte-stream terminal rendering with capture-based fallback.
     pub embedded_pty: bool,
     /// Wall-clock limit for one headless standing/triage orchestration run, in seconds.
     pub standing_timeout_secs: u64,
@@ -271,11 +240,8 @@ pub struct RepomindConfig {
     pub primary_agent: Option<String>,
     /// How many controller agents may run in the controller lane at once.
     pub max_controllers: usize,
-    /// Where basic-memory keeps its project list, `~/`-expandable. Unset means the CLI's own
-    /// default (`~/.basic-memory/config.json`). An isolated daemon points this at a throwaway
-    /// file so registering the home can never touch the operator's real vault config; the
-    /// `BASIC_MEMORY_CONFIG_DIR` environment variable, basic-memory's own documented override,
-    /// still wins over it. See `repomon_daemon::repomind::basic_memory`.
+    /// Selects the basic-memory configuration for project registration, unless
+    /// BASIC_MEMORY_CONFIG_DIR overrides it.
     pub basic_memory_config: Option<String>,
     /// The hard token budget for the assembled boot context (`.repomind/boot.md`). Estimated at
     /// four characters to a token; over budget, the journal is dropped first, then profile
@@ -315,11 +281,8 @@ pub struct UsageConfig {
     pub scan_interval_secs: u64,
     /// How many source files one pass reads, bounding the work per tick.
     pub max_files_per_scan: usize,
-    /// Whether to refresh prices from [`DEFAULT_USAGE_PRICE_URL`] once a day. On by default: a
-    /// stale built-in rate card is a worse default than one GET a day to a static GitHub file,
-    /// and a config-blind operator should get current prices without editing anything. Set this
-    /// to `false` to keep the ledger fully offline; the built-in table is always the floor either
-    /// way, and `[usage.price_overrides]` always wins over both.
+    /// Enables daily price refreshes, with built-in rates as fallback and operator overrides taking
+    /// precedence.
     pub refresh_prices: bool,
     /// Where to refresh prices from, when `refresh_prices` is on.
     pub price_url: Option<String>,
@@ -347,10 +310,8 @@ pub struct RepoConfig {
     pub worktree_template: Option<String>,
 }
 
-/// APNs (Apple push) credentials for the iOS companion. The daemon sends pushes directly to
-/// Apple over HTTP/2 using a `.p8` signing key from the Apple Developer account — keep the key
-/// file beside the config (e.g. `~/.config/repomon/AuthKey_XXXX.p8`), never in a repo. Push is
-/// active only when every field is set and at least one device has registered.
+/// Configures APNs delivery when credentials and device registrations exist, referencing a private
+/// signing-key file outside repositories.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PushConfig {
@@ -367,8 +328,8 @@ pub struct PushConfig {
 }
 
 /// Remote-access (companion app) settings: a WebSocket listener speaking the same JSON-RPC
-/// protocol as the Unix socket, gated by a bearer token. Bind it to a private address —
-/// typically the machine's Tailscale IP — never the open internet.
+/// protocol as the Unix socket, gated by a bearer token. Bind it to a private address -
+/// typically the machine's Tailscale IP - never the open internet.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
@@ -386,33 +347,30 @@ pub struct RemoteConfig {
 pub enum SortMode {
     /// The daemon's default order (manual positions where set, then name).
     Default,
-    /// Most recent lane activity first (the legacy `sort_repos_by_activity` behavior).
+    /// Orders repositories by most recent lane activity.
     Activity,
     /// Pure manual order: exactly the positions persisted by `repo.reorder`, no auto-sorting.
     Manual,
 }
 
-/// How the per-lane agent tabs are ordered. Deliberately not [`SortMode`]: repo groups have a
-/// meaningful "default" (daemon order), agent tabs do not — their historical order *is* activity.
+/// Selects the order of agent tabs within a lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TabSortMode {
-    /// Most recent agent activity first (the historical behavior).
+    /// Orders the most recently active agents first.
     Activity,
     /// The persisted per-lane tab order (`agent.set_tab_order`), no auto-sorting; newly seen
     /// agents append.
     Manual,
 }
 
-/// Resolve the effective tab sort mode from the optional setting. Pure for unit testing: an
-/// explicit mode wins; otherwise tabs stay in the historical activity order.
+/// Resolves an explicit tab order or defaults to activity.
 pub fn resolve_tab_sort_mode(mode: Option<TabSortMode>) -> TabSortMode {
     mode.unwrap_or(TabSortMode::Activity)
 }
 
-/// Resolve the effective sort mode from the explicit setting and the legacy boolean. Pure so the
-/// precedence rules are unit-testable: an explicit `sort_mode` always wins; otherwise the legacy
-/// boolean maps `true` to `Activity` and `false` to `Default`.
+/// Resolves repository ordering with an explicit sort_mode taking precedence over the boolean
+/// fallback.
 pub fn resolve_sort_mode(mode: Option<SortMode>, legacy_sort_by_activity: bool) -> SortMode {
     match mode {
         Some(m) => m,
@@ -455,11 +413,8 @@ impl Config {
         self.save_to(&config_path())
     }
 
-    /// Persist the config to a specific file, atomically and durably (write a unique temp
-    /// file, fsync it, rename over the target, then fsync the directory). NOTE: this rewrites
-    /// the whole file via serde, so any hand-added comments are not preserved — repomon owns
-    /// the file once you manage agents in-app. `None` options and empty maps are omitted, and
-    /// scalars serialize before tables so the output is always valid TOML.
+    /// Atomically and durably serializes the complete configuration, omitting empty options and
+    /// maps and replacing any hand-written comments.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         use std::io::Write;
         let parent = path.parent();
@@ -502,8 +457,8 @@ impl Config {
             .unwrap_or(&self.worktree_template)
     }
 
-    /// The effective sidebar repo sort mode, honoring the legacy boolean when `sort_mode` is
-    /// unset (config files written before the setting existed).
+    /// Resolves sidebar repository order, falling back to the legacy boolean when sort_mode is
+    /// unset.
     pub fn sort_mode(&self) -> SortMode {
         resolve_sort_mode(self.sort_mode, self.sort_repos_by_activity)
     }
@@ -583,8 +538,7 @@ pub fn expand_tilde(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// The user's home directory (portable — `$HOME` on unix, the profile dir on Windows).
-/// Shared by every path that used to read `$HOME` directly.
+/// Returns the user’s home directory on the current platform.
 pub fn home() -> PathBuf {
     directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
@@ -606,7 +560,7 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// The platform data directory for the SQLite database. `REPOMON_DATA_DIR` overrides it — handy
+/// The platform data directory for the SQLite database. `REPOMON_DATA_DIR` overrides it - handy
 /// for tests and for running an isolated second instance (its own DB) alongside the real daemon.
 pub fn data_dir() -> PathBuf {
     if let Ok(x) = std::env::var("REPOMON_DATA_DIR") {
@@ -682,9 +636,9 @@ mod tests {
     fn tmux_session_name_validation() {
         assert!(valid_tmux_session("repomon"));
         assert!(valid_tmux_session("work-2_b"));
-        assert!(!valid_tmux_session("")); // empty
+        assert!(!valid_tmux_session(""));
         assert!(!valid_tmux_session("a:b")); // colon corrupts session:window targets
-        assert!(!valid_tmux_session("a b")); // whitespace
+        assert!(!valid_tmux_session("a b"));
         assert!(!valid_tmux_session("a=b"));
         assert!(!valid_tmux_session("a;rm -rf"));
     }
@@ -730,10 +684,9 @@ mod tests {
 
     #[test]
     fn sort_mode_resolution_precedence() {
-        // No explicit mode: the legacy boolean decides.
         assert_eq!(resolve_sort_mode(None, false), SortMode::Default);
         assert_eq!(resolve_sort_mode(None, true), SortMode::Activity);
-        // An explicit mode always wins, even when it contradicts the legacy boolean.
+
         assert_eq!(
             resolve_sort_mode(Some(SortMode::Manual), true),
             SortMode::Manual
@@ -750,7 +703,6 @@ mod tests {
 
     #[test]
     fn tab_sort_mode_resolution_and_round_trip() {
-        // Unset keeps the historical activity order.
         assert_eq!(resolve_tab_sort_mode(None), TabSortMode::Activity);
         assert_eq!(Config::default().tab_sort_mode(), TabSortMode::Activity);
 
@@ -795,7 +747,6 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.sort_mode(), SortMode::Manual);
 
-        // A pre-sort-mode config file still resolves through the legacy boolean.
         std::fs::write(&path, "sort_repos_by_activity = true\n").unwrap();
         let legacy = Config::load_from(&path).unwrap();
         assert_eq!(legacy.sort_mode(), SortMode::Activity);
@@ -807,7 +758,7 @@ mod tests {
     fn parses_partial_toml() {
         let c: Config = toml::from_str("tmux_session = \"work\"\n").unwrap();
         assert_eq!(c.tmux_session, "work");
-        // Unspecified fields fall back to defaults.
+
         assert_eq!(c.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
         assert_eq!(c.notify_sound_volume, 0.25);
         assert!(c.notify_sound_unfocused_only);
@@ -841,11 +792,10 @@ mod tests {
             loaded.agent_icons.get("codex").map(String::as_str),
             Some("bolt")
         );
-        // Unrelated scalar fields survive the round-trip.
+
         assert_eq!(loaded.tmux_session, "work");
         assert_eq!(loaded.worktree_template, DEFAULT_WORKTREE_TEMPLATE);
 
-        // Clearing the default and removing the agent persists too.
         let mut c2 = loaded;
         c2.default_agent = None;
         c2.agents.clear();
@@ -854,7 +804,6 @@ mod tests {
         assert!(reloaded.default_agent.is_none());
         assert!(reloaded.agents.is_empty());
 
-        // The atomic write leaves no temp files behind.
         let leftover_tmp = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -932,7 +881,7 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_str).expect("parse partial config");
         assert!(cfg.supervision.enabled);
-        // Serde deserializes sparse map
+
         assert_eq!(
             cfg.supervision
                 .classes

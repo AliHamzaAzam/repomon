@@ -1,13 +1,5 @@
-//! Reading a dxkit stop-gate verdict from a worktree's loop ledger.
-//!
-//! [dxkit](https://github.com/vyuh-labs/dxkit) is a deterministic Stop-hook for Claude Code:
-//! when an agent tries to declare "done", the gate reruns scanners/tests on the changed files
-//! and blocks the stop on net-new findings. Every gate run appends one JSON line to
-//! `.dxkit/loop/ledger.jsonl` in the worktree (an append-only audit trail dxkit documents as
-//! safe for external tools to read). repomon tails that file: a fresh `allowed` verdict is a
-//! stronger done-signal than the git heuristic, and a fresh block *vetoes* it — the gate
-//! explicitly said the work isn't done. Worktrees without dxkit simply have no ledger, and
-//! everything falls back to the git heuristic.
+//! Combines completion evidence with the dxkit ledger. A fresh ledger decision takes precedence
+//! over git heuristics; without a ledger, the heuristics remain the fallback.
 
 use std::path::Path;
 
@@ -17,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Relative location of dxkit's loop ledger inside a worktree.
 pub const LEDGER_REL: &str = ".dxkit/loop/ledger.jsonl";
 
-/// How many bytes of the ledger tail to read — events are single lines well under 1 KB, so
+/// How many bytes of the ledger tail to read - events are single lines well under 1 KB, so
 /// this always covers the last event without reading an unbounded audit trail.
 const TAIL_BYTES: u64 = 8 * 1024;
 
@@ -37,9 +29,8 @@ pub struct GateVerdict {
     pub session_id: Option<String>,
 }
 
-/// Parse the LAST well-formed stop-gate event out of ledger content (later lines win —
-/// the ledger is append-only). Unknown fields, junk lines, and future schema versions are
-/// skipped rather than errors: the ledger is another tool's file.
+/// Reads the last valid stop-gate event, skipping unknown fields, malformed lines, and unsupported
+/// schema versions in the external ledger.
 pub fn parse_ledger_tail(content: &str) -> Option<GateVerdict> {
     #[derive(Deserialize)]
     struct Line {
@@ -63,7 +54,7 @@ pub fn parse_ledger_tail(content: &str) -> Option<GateVerdict> {
 }
 
 /// Read the latest gate verdict from `worktree`'s dxkit ledger, if one exists. Reads only
-/// the file's tail — the ledger is an unbounded audit trail.
+/// the file's tail - the ledger is an unbounded audit trail.
 pub fn read_gate_verdict(worktree: &Path) -> Option<GateVerdict> {
     use std::io::{Read, Seek, SeekFrom};
     let path = worktree.join(LEDGER_REL);
@@ -114,7 +105,7 @@ mod tests {
     fn non_stop_events_and_empty_content_yield_none() {
         assert_eq!(parse_ledger_tail(""), None);
         assert_eq!(parse_ledger_tail("not json at all\n"), None);
-        // A future non-Stop event kind is not a verdict.
+
         let other = r#"{"schema_version":1,"timestamp":"2026-07-07T10:00:00Z","event":"Baseline","allowed":true,"net_new_findings":0}"#;
         assert_eq!(parse_ledger_tail(other), None);
     }
@@ -127,7 +118,7 @@ mod tests {
         std::fs::write(&ledger, format!("{BLOCKED}\n{ALLOWED}\n")).unwrap();
         let v = read_gate_verdict(dir.path()).expect("verdict");
         assert!(v.allowed);
-        // No ledger at all → None (the common, dxkit-less case).
+
         let bare = tempfile::tempdir().unwrap();
         assert_eq!(read_gate_verdict(bare.path()), None);
     }

@@ -1,14 +1,9 @@
-//! Shared pane-text parsing: ANSI stripping, clock/date times, and percentages.
-//!
-//! These primitives are pure and fixture-tested through their callers. [`limit`](super::limit)
-//! reads Claude's usage-limit *pause* from a pane; [`usage`](super::usage) reads the `/usage`
-//! screen. Both need to strip the color escapes a `capture-pane -e` carries and to parse the
-//! clock times Claude prints in the machine's local timezone — so that logic lives here once.
+//! Shares ANSI stripping and local clock, date, and percentage parsing between pane readers.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc};
 
 /// A parsed reset time this far (or less) in the past is treated as "just reset" rather than
-/// rolled forward — Claude's session resets are always within a few hours, so a time well beyond
+/// rolled forward - Claude's session resets are always within a few hours, so a time well beyond
 /// this is a genuine next-day (cross-midnight) reset.
 pub(crate) const GRACE_PAST_HOURS: i64 = 6;
 
@@ -84,11 +79,8 @@ pub(crate) fn parse_pct(s: &str) -> Option<u8> {
     None
 }
 
-/// Resolve a reset moment from text that may carry a date (`"jun 21 at 7:59pm"`), a clock
-/// time (`"resets 11:59pm"`), or a relative duration (`"refreshes in 4h 18m"`). Date-bearing strings
-/// resolve to that calendar day (this year, or next year if already well past); bare times use
-/// [`parse_reset_at`]'s today/tomorrow logic; relative durations add hours and minutes to `now`.
-/// Input should be lowercased.
+/// Resolves a date, clock time, or relative reset duration from lowercased text using the local
+/// calendar.
 pub(crate) fn parse_reset_datetime(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     parse_dated(lower, now)
         .or_else(|| parse_reset_at(lower, now))
@@ -108,7 +100,6 @@ pub(crate) fn parse_relative_duration(lower: &str, now: DateTime<Local>) -> Opti
     let mut total_mins: i64 = 0;
     let mut found = false;
 
-    // Look for hours: (\d+)h
     if let Some(h_idx) = target.find('h') {
         let mut start = h_idx;
         while start > 0 && target.as_bytes()[start - 1].is_ascii_digit() {
@@ -147,12 +138,12 @@ const MONTHS: [&str; 12] = [
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
 ];
 
-/// Parse a dated reset with the day on either side of the month name — Claude's `"jun 21 at
+/// Parse a dated reset with the day on either side of the month name - Claude's `"jun 21 at
 /// 7:59pm"` (month-day) and Codex's `"04:00 on 19 jul"` (day-month). Returns `None` when no month
 /// name is present (the bare-time path handles that).
 fn parse_dated(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     for (mi, m) in MONTHS.iter().enumerate() {
-        // Require word boundaries so a month token only matches standalone — otherwise the
+        // Require word boundaries so a month token only matches standalone - otherwise the
         // substring search false-matches inside words ("maybe"→may, "smart"→mar, "separate"→sep),
         // yielding a bogus reset date that drives auto-continue scheduling.
         let Some(pos) = find_word(lower, m) else {
@@ -172,7 +163,7 @@ fn parse_dated(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Find `word` in `s` only where it stands alone — the char before and after the match must be
+/// Find `word` in `s` only where it stands alone - the char before and after the match must be
 /// non-alphabetic (digits and punctuation are fine, so "jun21"/"19jul" still match). Without this,
 /// a plain substring search false-matches month names embedded in ordinary words.
 fn find_word(s: &str, word: &str) -> Option<usize> {
@@ -217,7 +208,7 @@ fn first_int(s: &str) -> Option<u32> {
     None
 }
 
-/// The *last* standalone day-of-month integer in `s` — for the day-before-month order
+/// The *last* standalone day-of-month integer in `s` - for the day-before-month order
 /// (`"... on 19 jul"`). Same rules as [`first_int`] but keeps the final match.
 fn last_int(s: &str) -> Option<u32> {
     let b = s.as_bytes();
@@ -248,10 +239,8 @@ fn build_local(year: i32, month: u32, day: u32, time: NaiveTime) -> Option<DateT
     Local.from_local_datetime(&date.and_time(time)).earliest()
 }
 
-/// Claude states the *next* reset, at most a few hours out, in the machine's local timezone. So
-/// today's occurrence is the answer when it's upcoming **or only recently passed** (within
-/// [`GRACE_PAST_HOURS`]); only a time *well* in the past (a cross-midnight "resets 3am" seen at
-/// night) rolls to tomorrow. Returns `None` if no clock time is present. Input should be lowercased.
+/// Resolves a lowercased clock reset to today within the recent-past grace window, otherwise
+/// tomorrow, returning None without a clock time.
 pub(crate) fn parse_reset_at(lower: &str, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     let time = find_reset_time(lower)?;
     let date = now.date_naive();
@@ -264,12 +253,8 @@ pub(crate) fn parse_reset_at(lower: &str, now: DateTime<Local>) -> Option<DateTi
     Some(dt.with_timezone(&Utc))
 }
 
-/// Find the reset clock time — preferring one that appears after a "reset"/"again" cue, falling
-/// back to the first time anywhere in the text. Cues are tried bottom-up: pane text is
-/// chronological, so when a resumed-then-re-limited agent still shows an old limit message in
-/// scrollback, the newest (lowest) message must supply the time — scheduling off the stale one
-/// put a resume half a day out. A trailing cue with no time after it (prose like "the password
-/// reset flow") falls through to the previous cue rather than shadowing the real message.
+/// Finds the newest reset-related clock time, falling back through earlier cues without times and
+/// then to the first clock time in the text.
 pub(crate) fn find_reset_time(lower: &str) -> Option<NaiveTime> {
     let mut cues: Vec<usize> = ["reset", "again"]
         .iter()
@@ -285,7 +270,7 @@ pub(crate) fn find_reset_time(lower: &str) -> Option<NaiveTime> {
 }
 
 /// Scan for the first clock time. A bare integer is **not** a time (so "5-hour limit" and stray
-/// numbers don't match) — a match needs a `:mm` minute or an `am`/`pm` marker.
+/// numbers don't match) - a match needs a `:mm` minute or an `am`/`pm` marker.
 pub(crate) fn parse_first_time(s: &str) -> Option<NaiveTime> {
     let b = s.as_bytes();
     let mut i = 0;
@@ -327,7 +312,7 @@ pub(crate) fn try_parse_time_at(b: &[u8], start: usize) -> Option<NaiveTime> {
         i = j;
     }
 
-    // Optional spaces, then an am/pm marker — allowing periods (am, a.m., pm, p.m.).
+    // Optional spaces, then an am/pm marker - allowing periods (am, a.m., pm, p.m.).
     let mut k = i;
     while k < b.len() && b[k] == b' ' {
         k += 1;
@@ -376,15 +361,12 @@ mod tests {
         assert_eq!(parse_pct("   0% used"), Some(0));
         assert_eq!(parse_pct("100% used"), Some(100));
         assert_eq!(parse_pct("no percent here"), None);
-        assert_eq!(parse_pct("999% bogus"), None); // >100 → mis-parse, skipped
+        assert_eq!(parse_pct("999% bogus"), None);
     }
 
     #[test]
     fn reset_time_prefers_the_newest_message() {
-        // A pane keeps scrollback: after a resume and a re-limit, the OLD limit message is
-        // still above the fresh one. The pane is chronological, so the bottom-most cue with
-        // a time must win — scheduling off the stale message put a resume 14h out (seen live:
-        // "resets 7am" from the morning outranked the current "resets 5pm").
+        // The newest reset cue must win over older quota messages retained in scrollback.
         let pane = "you've hit your session limit \u{b7} resets 7am (asia/karachi)\n\
                     /upgrade or /usage-credits to finish what you're working on.\n\
                     \u{276f} continue\n\
@@ -417,7 +399,6 @@ mod tests {
 
     #[test]
     fn dated_reset_day_before_month() {
-        // Codex order: "resets 04:00 on 19 jul".
         let now = Local.with_ymd_and_hms(2026, 6, 19, 12, 0, 0).unwrap();
         let dt = parse_reset_datetime("resets 04:00 on 19 jul", now)
             .unwrap()
@@ -429,18 +410,18 @@ mod tests {
     #[test]
     fn month_substring_inside_word_is_not_a_date() {
         let now = Local.with_ymd_and_hms(2026, 6, 18, 20, 0, 0).unwrap();
-        // "maybe" contains "may" but must not extract a May date — it should fall back to the
+        // "maybe" contains "may" but must not extract a May date - it should fall back to the
         // bare-time path (today, 5pm), not jump to month 5.
         let dt = parse_reset_datetime("maybe later, around 5pm", now)
             .unwrap()
             .with_timezone(&Local);
-        assert_eq!(dt.month(), 6); // June (today's month), not May
+        assert_eq!(dt.month(), 6);
         assert_eq!(dt.day(), 18);
         assert_eq!((dt.hour(), dt.minute()), (17, 0));
         // The dated path on its own finds nothing for these embedded substrings.
-        assert!(parse_dated("maybe later, around 5pm", now).is_none()); // "may"
-        assert!(parse_dated("smart move at 5pm", now).is_none()); // "mar"
-        assert!(parse_dated("separate them by 5pm", now).is_none()); // "sep"
+        assert!(parse_dated("maybe later, around 5pm", now).is_none());
+        assert!(parse_dated("smart move at 5pm", now).is_none());
+        assert!(parse_dated("separate them by 5pm", now).is_none());
     }
 
     #[test]

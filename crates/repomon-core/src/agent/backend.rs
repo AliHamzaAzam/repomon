@@ -1,15 +1,5 @@
-//! The session-backend abstraction the daemon drives agents through.
-//!
-//! [`SessionBackend`] is the single choke point between repomon and whatever owns the agent
-//! processes. On macOS/Linux the implementation is [`TmuxRuntime`](super::tmux::TmuxRuntime)
-//! (a long-lived tmux server on a dedicated socket); a future Windows backend talks to
-//! per-agent host processes instead. Everything above this trait — the RPC handlers, the
-//! reaper, auto-continue, the usage probe, byte streaming — is backend-agnostic.
-//!
-//! The trait is deliberately **synchronous**: every daemon call site already runs backend IO
-//! inside `tokio::task::spawn_blocking`, and tmux itself is driven via blocking subprocess
-//! calls. Implementations must be `Send + Sync` so an `Arc<dyn SessionBackend>` can be shared
-//! across tasks.
+//! Provides synchronous agent-window operations shared by tmux and the Windows host. Call blocking
+//! backend I/O through spawn_blocking when serving asynchronous requests.
 
 use std::path::{Path, PathBuf};
 
@@ -18,16 +8,9 @@ use crate::model::LaneId;
 
 use super::tmux::{TmuxRuntime, WindowMeta};
 
-/// How to launch an agent process, structurally — program, extra arguments, working directory,
-/// and environment overrides — instead of a pre-quoted shell string.
-///
-/// `program` is the base command line as configured by the user (on Unix it may be a shell
-/// fragment such as `CLAUDE_CONFIG_DIR='…' claude`, because tmux runs commands through `sh -c`
-/// and agent commands are user-configured shell strings). `args` are appended by the backend
-/// with backend-appropriate quoting (the tmux impl single-quotes them via
-/// [`shell_quote`](super::tmux::shell_quote)); `env` entries are prepended as `KEY=value`
-/// assignments by backends that launch through a shell, or set on the child process directly
-/// by backends that don't.
+/// Describes a launch using a configured base command, arguments, working directory, and
+/// environment overrides; shell backends quote appended arguments and assignments, while direct
+/// backends set the child environment.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnSpec {
     /// Base command line (a shell fragment on Unix; never empty for a spawn).
@@ -110,14 +93,12 @@ pub struct WindowActivity {
 pub enum OwnerState {
     /// This daemon owns the backend server (it claimed it, or re-verified its own stamp).
     Owned,
-    /// Another daemon's stamp is on the server — back off from destructive sweeps.
+    /// Another daemon's stamp is on the server - back off from destructive sweeps.
     OwnedByOther,
 }
 
-/// The exact command a client should run in a real terminal to attach to a target — e.g.
-/// `tmux -L <session> attach -t <target>` on Unix. Carried as the optional `attach` field of
-/// the `agent.target` / `terminal.target` / `orchestrator.target` RPC responses so clients
-/// don't have to know which backend is running.
+/// Carries the backend-specific attach program and arguments so clients need no transport-specific
+/// knowledge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachCommand {
     pub program: String,
@@ -168,8 +149,8 @@ pub trait SessionBackend: Send + Sync {
         Ok(None)
     }
 
-    /// Window identity metadata used to keep transcript routing stable across refreshes.
-    /// Backends without durable window metadata degrade to name-only entries.
+    /// Provides durable window identity for stable transcript routing, falling back to names when
+    /// metadata is unavailable.
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
         Ok(self
             .list_windows()?
@@ -204,11 +185,11 @@ pub trait SessionBackend: Send + Sync {
         Ok(())
     }
 
-    /// Every window's name, pane cwd, and last-activity time — the orphan reaper's view.
+    /// Every window's name, pane cwd, and last-activity time - the orphan reaper's view.
     fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>>;
 
     /// Launch an agent in `lane`'s first *free* slot window; returns the new window's exact
-    /// attach target. A running agent is never killed — spawning again runs a second agent
+    /// attach target. A running agent is never killed - spawning again runs a second agent
     /// side by side.
     fn spawn(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String>;
 
@@ -242,7 +223,7 @@ pub trait SessionBackend: Send + Sync {
     /// Forward `ticks` mouse-wheel events (up or down) to the window's app.
     fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()>;
 
-    /// Send a literal string (no trailing Enter) — one keystroke's worth of input.
+    /// Send a literal string (no trailing Enter) - one keystroke's worth of input.
     fn send_literal_named(&self, window: &str, text: &str) -> Result<()>;
 
     /// Type `text` into the window and press Enter.
@@ -273,15 +254,12 @@ pub trait SessionBackend: Send + Sync {
     /// watchers and share one stream per window.
     fn open_byte_stream(&self, window: &str) -> Result<ByteStream>;
 
-    /// Stop streaming the window's bytes (EOFs the reader). Benign when the window — or the
-    /// whole server — is already gone.
+    /// Stop streaming the window's bytes (EOFs the reader). Benign when the window - or the
+    /// whole server - is already gone.
     fn close_byte_stream(&self, window: &str) -> Result<()>;
 
-    /// How many live supported agent CLI processes have each working directory, when the backend has
-    /// an authoritative view of its agent processes (the Windows hosts *own* their children).
-    /// `None` means "no view here — use the platform process probe instead", which is what
-    /// tmux answers: on unix the daemon scans ps/lsof//proc itself, catching external
-    /// sessions too. Used by the daemon's liveness probe (`rpc::live_cwds_cached`).
+    /// Returns authoritative live-agent counts by working directory, or `None` to request the
+    /// platform process probe.
     fn live_agent_cwds(&self) -> Option<std::collections::HashMap<PathBuf, usize>> {
         None
     }
@@ -330,7 +308,7 @@ mod tests {
     #[test]
     fn live_agent_cwds_defaults_to_probe_unavailable() {
         // Backends without an authoritative process view (tmux) answer `None`, which the
-        // daemon's liveness probe already treats as "don't filter" — the safe degradation.
+        // daemon's liveness probe already treats as "don't filter" - the safe degradation.
         let rt = TmuxRuntime::new("repomon-live-cwds-test");
         assert!(rt.live_agent_cwds().is_none());
     }

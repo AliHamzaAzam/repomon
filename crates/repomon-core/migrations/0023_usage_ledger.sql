@@ -1,10 +1,5 @@
--- The usage ledger: one row per billable agent turn, its daily rollup, the per-session digest
--- the sessions table reads, and the ingest cursors that make a re-read idempotent.
---
--- Costs are deliberately absent: the ledger stores tokens and every query re-prices them, so a
--- corrected rate corrects history. `repo_id` and `lane_id` are plain integers rather than foreign
--- keys because a turn can predate the repo being added, or outlive the lane being deleted, and
--- losing the row would lose the spend it records.
+-- Store tokens rather than cost so corrected rates can reprice history. Attribution IDs are not
+-- foreign keys because usage can predate registration and must survive lane deletion.
 
 CREATE TABLE usage_events (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,8 +28,7 @@ CREATE INDEX idx_usage_events_at ON usage_events(at);
 CREATE INDEX idx_usage_events_session ON usage_events(agent_kind, session_id);
 CREATE INDEX idx_usage_events_lane ON usage_events(lane_id, at);
 
--- Where each source was read up to. `offset` is a byte offset for line sources and a millisecond
--- epoch watermark for the OpenCode database.
+-- Line sources use byte offsets; OpenCode uses a millisecond timestamp watermark.
 CREATE TABLE usage_ingest_cursors (
   source_path TEXT    PRIMARY KEY,
   offset      INTEGER NOT NULL DEFAULT 0,
@@ -43,8 +37,7 @@ CREATE TABLE usage_ingest_cursors (
   error       TEXT
 );
 
--- Daily rollups, maintained as events are inserted. `repo_id` and `lane_id` use 0 for "none" so
--- the unique key works: SQLite treats NULLs in a unique index as distinct from each other.
+-- Use zero for absent attribution because SQLite unique indexes treat NULL values as distinct.
 CREATE TABLE usage_daily (
   day                TEXT    NOT NULL,
   agent_kind         TEXT    NOT NULL,
@@ -64,7 +57,6 @@ CREATE TABLE usage_daily (
 
 CREATE INDEX idx_usage_daily_day ON usage_daily(day);
 
--- One row per agent session, for the sessions table's headline and counters.
 CREATE TABLE usage_sessions (
   agent_kind  TEXT NOT NULL,
   session_id  TEXT NOT NULL,

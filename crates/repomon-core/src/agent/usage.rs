@@ -1,14 +1,5 @@
-//! Parsing agent usage screens into structured limit "windows".
-//!
-//! Subscription usage has no CLI flag, file, or supported endpoint for either agent — the only
-//! source is an interactive command: Claude's `/usage` and Codex's `/status`. The daemon's usage
-//! probe runs that command in a throwaway session, captures the pane (`capture-pane -e`), and
-//! hands the text here. This module is the pure, fixture-tested heart: it strips ANSI, anchors on
-//! the labels each tool prints, and reads each limit window's percentage and reset time. It is
-//! deliberately lenient about layout — these screens are undocumented and change between versions,
-//! so it anchors on labels rather than positions and returns `None` (never fabricated numbers)
-//! when nothing recognizable is on screen. Both tools are normalized to **% used** so the UI shows
-//! one consistent metric (Codex reports "% left", which is converted).
+//! Parses usage screens by labels rather than fixed positions and normalizes percentages to used
+//! capacity. Unrecognized layouts return no snapshot.
 
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,7 +18,7 @@ pub struct UsageWindow {
 }
 
 /// An account's usage: an ordered list of limit windows (shortest first). Empty/absent windows
-/// mean nothing was readable — clients show nothing rather than zeros.
+/// mean nothing was readable - clients show nothing rather than zeros.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -55,10 +46,8 @@ pub struct AccountUsage {
     pub age_secs: u64,
 }
 
-/// Why a manual `usage.refresh` did or did not change anything. A manual request bypasses the
-/// probe watcher's five-minute freshness cooldown (it never reports `Cooldown` for that reason);
-/// `Cooldown` here instead means a refresh was already in flight when this one arrived, so it was
-/// skipped rather than starting a second one.
+/// Reports manual refresh outcomes, using Cooldown for a concurrent in-flight probe rather than the
+/// ordinary freshness interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -153,7 +142,7 @@ pub fn parse_usage(pane: &str) -> Option<UsageReport> {
 }
 
 /// Parse Codex's `/status` screen. The lines look like
-/// `│  Monthly limit:  [bars] 95% left (resets 04:00 on 19 Jul) │` — note Codex reports **% left**
+/// `│  Monthly limit:  [bars] 95% left (resets 04:00 on 19 Jul) │` - note Codex reports **% left**
 /// (converted to % used here) and may show 5-hour, weekly, or (Free) monthly windows.
 pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
     let now = Local::now();
@@ -181,12 +170,8 @@ pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
     (!windows.is_empty()).then_some(UsageReport { windows })
 }
 
-/// Parse Antigravity's (`agy`) `/usage` screen.
-///
-/// Antigravity renders a "Models & Quota" screen with model groups (e.g. "GEMINI MODELS",
-/// "CLAUDE AND GPT MODELS"), displaying "Five Hour Limit Remaining" and "Weekly Limit Remaining"
-/// with percentage bars (reporting **% remaining**, converted to **% used**) and relative reset
-/// times (e.g. "Refreshes in 4h 18m").
+/// Parses Antigravity model-group limits, converting remaining percentages to used capacity and
+/// resolving relative reset times.
 pub fn parse_antigravity_usage(pane: &str) -> Option<UsageReport> {
     let now = Local::now();
     let mut windows = Vec::new();
@@ -243,7 +228,6 @@ pub fn parse_antigravity_usage(pane: &str) -> Option<UsageReport> {
         return None;
     }
 
-    // Sort to place 5h before wk for each group
     windows.sort_by_key(|w| match w.label.as_str() {
         "5h" => 0,
         "wk" => 1,
@@ -339,12 +323,12 @@ mod tests {
         let r = parse_usage(pane).expect("should parse the /usage screen");
         assert_eq!(win(&r, "5h").pct_used, 15);
         assert_eq!(win(&r, "wk").pct_used, 41);
-        assert_eq!(win(&r, "sonnet").pct_used, 0); // "Current week (Sonnet only)"
+        assert_eq!(win(&r, "sonnet").pct_used, 0);
 
         let s = win(&r, "5h").reset_at.unwrap().with_timezone(&Local);
-        assert_eq!((s.hour(), s.minute()), (23, 59)); // "Resets 11:59pm"
+        assert_eq!((s.hour(), s.minute()), (23, 59));
         let w = win(&r, "wk").reset_at.unwrap().with_timezone(&Local);
-        assert_eq!((w.month(), w.day()), (6, 21)); // "Resets Jun 21 at 7:59pm"
+        assert_eq!((w.month(), w.day()), (6, 21));
         assert_eq!((w.hour(), w.minute()), (19, 59));
     }
 
@@ -354,9 +338,9 @@ mod tests {
         let pane = include_str!("fixtures/codex_status_v0.ansi");
         let r = parse_codex_status(pane).expect("should parse the /status screen");
         let mo = win(&r, "mo");
-        assert_eq!(mo.pct_used, 5); // "95% left" → 5% used
+        assert_eq!(mo.pct_used, 5);
         let reset = mo.reset_at.expect("monthly reset").with_timezone(&Local);
-        assert_eq!((reset.month(), reset.day()), (7, 19)); // "resets 04:00 on 19 Jul"
+        assert_eq!((reset.month(), reset.day()), (7, 19));
         assert_eq!((reset.hour(), reset.minute()), (4, 0));
     }
 
@@ -397,8 +381,8 @@ mod tests {
         let pane = "  5h limit:      [██░] 32% left (resets 14:00)\n  \
                     Weekly limit:  [█░] 88% left (resets 09:00 on 21 Jun)\n";
         let r = parse_codex_status(pane).expect("paid parse");
-        assert_eq!(win(&r, "5h").pct_used, 68); // 100 - 32
-        assert_eq!(win(&r, "wk").pct_used, 12); // 100 - 88
+        assert_eq!(win(&r, "5h").pct_used, 68);
+        assert_eq!(win(&r, "wk").pct_used, 12);
     }
 
     #[test]
@@ -432,10 +416,10 @@ CLAUDE AND GPT MODELS
     Quota available
 "#;
         let r = parse_antigravity_usage(pane).expect("antigravity usage parsed");
-        assert_eq!(win(&r, "5h").pct_used, 8); // 100 - 92
-        assert_eq!(win(&r, "wk").pct_used, 29); // 100 - 71
-        assert_eq!(win(&r, "claude-5h").pct_used, 0); // 100 - 100
-        assert_eq!(win(&r, "claude-wk").pct_used, 0); // 100 - 100
+        assert_eq!(win(&r, "5h").pct_used, 8);
+        assert_eq!(win(&r, "wk").pct_used, 29);
+        assert_eq!(win(&r, "claude-5h").pct_used, 0);
+        assert_eq!(win(&r, "claude-wk").pct_used, 0);
         assert!(win(&r, "5h").reset_at.is_some());
         assert!(win(&r, "wk").reset_at.is_some());
     }

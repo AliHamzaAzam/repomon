@@ -1,9 +1,5 @@
-//! Debounced filesystem watching.
-//!
-//! We watch each worktree root recursively (FSEvents/inotify), debounce 250 ms, and classify
-//! each changed path into a coarse [`ChangeKind`]. Anything under `.git/objects/` is dropped
-//! (it churns constantly and tells us nothing useful), as are other `.git` internals we don't
-//! care about. The daemon subscribes and re-syncs the affected repo on each change.
+//! Debounces recursive filesystem changes and classifies useful paths for repository refresh while
+//! ignoring irrelevant Git internals.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -35,10 +31,7 @@ pub struct RepoChange {
 
 /// A filesystem watcher over a set of worktree roots.
 pub struct Watcher {
-    // `NoCache`, not the default `RecommendedCache` (`FileIdMap` on macOS): the file-id cache
-    // `stat`s + `readdir`s the tree on every event to track renames, which pegs a core when a
-    // watched worktree churns (a dev server / build). repomon only needs "this root changed", not
-    // rename correlation, so the cache is pure overhead.
+    // Only changed roots matter here; avoid rename-correlation stat calls with NoCache.
     debouncer: Debouncer<RecommendedWatcher, NoCache>,
     tx: broadcast::Sender<RepoChange>,
     roots: Arc<Mutex<Vec<PathBuf>>>,
@@ -118,7 +111,7 @@ fn classify(roots: &[PathBuf], path: &Path) -> Option<(PathBuf, ChangeKind)> {
         return None;
     }
     // Build / dependency / tooling output churns constantly and is gitignored, so it never moves
-    // the tracked git status we surface — don't wake a re-sync (and a gix status walk) for it.
+    // the tracked git status we surface - don't wake a re-sync (and a gix status walk) for it.
     const NOISE: &[&str] = &[
         "/target/",
         "/node_modules/",
@@ -172,9 +165,9 @@ mod tests {
             classify_str(r, "/repo/.git/worktrees/x/HEAD"),
             Some(ChangeKind::Head)
         );
-        // Objects churn is always dropped.
+
         assert_eq!(classify_str(r, "/repo/.git/objects/ab/cdef"), None);
-        // Other .git internals are ignored.
+
         assert_eq!(classify_str(r, "/repo/.git/config"), None);
     }
 

@@ -1,8 +1,5 @@
-//! Local LLM inference subsystem for repomon.
-//!
-//! Provides pure-Rust, zero-idle-memory local LLM capabilities across macOS, Linux, and Windows
-//! using `candle` and quantized GGUF models. Tensors and model weights are loaded on demand per
-//! invocation and immediately dropped upon completion, ensuring zero resident background RAM.
+//! Loads quantized GGUF models for on-demand local inference and releases model ownership after
+//! each invocation.
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -72,9 +69,7 @@ pub fn resolve_model_files(config: &LocalLlmConfig) -> Result<(PathBuf, PathBuf)
     Ok((model_path, tokenizer_path))
 }
 
-/// Runs a single one-shot inference against the local GGUF model and drops all weights upon return.
-///
-/// Guaranteed 0 MB resident RAM when idle.
+/// Runs one inference with the configured GGUF model, releasing its weights when the call returns.
 pub fn generate_oneshot(prompt: &str, config: Option<&LocalLlmConfig>) -> Result<String> {
     let default_cfg = LocalLlmConfig::default();
     let cfg = config.unwrap_or(&default_cfg);
@@ -171,10 +166,8 @@ pub fn sanitize_session_slug(raw: &str) -> Option<String> {
         return None;
     }
 
-    // Take the first non-empty line
     let first_line = text.lines().find(|l| !l.trim().is_empty())?.trim();
 
-    // Strip common wrapping quotes or markdown formatting
     let cleaned = first_line
         .trim_matches(|c| c == '`' || c == '"' || c == '\'' || c == '#' || c == '*' || c == ':')
         .trim();
@@ -192,7 +185,6 @@ pub fn sanitize_session_slug(raw: &str) -> Option<String> {
         }
     }
 
-    // Strip trailing hyphen
     while slug.ends_with('-') {
         slug.pop();
     }
@@ -201,7 +193,6 @@ pub fn sanitize_session_slug(raw: &str) -> Option<String> {
         return None;
     }
 
-    // Limit maximum length to 36 characters
     if slug.len() > 36 {
         if let Some(idx) = slug[..36].rfind('-') {
             slug.truncate(idx);

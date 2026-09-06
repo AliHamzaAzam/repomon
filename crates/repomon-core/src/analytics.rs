@@ -1,8 +1,5 @@
-//! Timeline density and cross-repo correlations (Phase 3).
-//!
-//! Historical per-lane activity isn't tracked, so the timeline is per-repo: density is the
-//! commit count per time bucket, and correlations are the Jaccard similarity of two repos'
-//! active-bucket sets.
+//! Computes per-repository commit density and Jaccard similarity of active time buckets; per-lane
+//! activity history is not retained.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -143,9 +140,9 @@ mod tests {
     fn resample_keeps_peaks_and_stretches() {
         // Shrinking: the max of each span survives (the 5 must not vanish).
         assert_eq!(resample_max(&[0, 5, 0, 0, 1, 1, 0, 2], 4), vec![5, 0, 1, 2]);
-        // Stretching: nearest-neighbor repetition.
+
         assert_eq!(resample_max(&[1, 3], 4), vec![1, 1, 3, 3]);
-        // Identity and edge cases.
+
         assert_eq!(resample_max(&[1, 2, 3], 3), vec![1, 2, 3]);
         assert_eq!(resample_max(&[], 3), vec![0, 0, 0]);
         assert!(resample_max(&[1, 2], 0).is_empty());
@@ -178,7 +175,7 @@ mod tests {
         let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let from = base;
         let to = base + chrono::Duration::seconds(300);
-        let bucket = 100; // 3 buckets
+        let bucket = 100;
 
         // repo 1 active in buckets 0 and 2; repo 2 active in buckets 0 and 2 (full overlap).
         let commits = vec![

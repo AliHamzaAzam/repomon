@@ -1,9 +1,5 @@
-//! The SQLite store.
-//!
-//! All database access is serialized onto a single dedicated thread that owns the
-//! `Connection`. Callers submit closures and await the result over a oneshot channel, so
-//! the tokio runtime is never blocked and rusqlite's `!Sync` connection never crosses an
-//! `.await`. Schema migrations are hand-rolled against `PRAGMA user_version`.
+//! Serialize SQLite access on a dedicated connection-owning thread so async callers never block on
+//! database work or carry a connection across await points.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
@@ -18,18 +14,8 @@ use crate::agent::supervision::SupervisionOverrides;
 use crate::error::{Error, Result};
 use crate::model::*;
 
-/// Embedded migrations as `(target user_version, sql)`, applied in ascending order to any database
-/// sitting below the target.
-///
-/// The target is spelled out rather than derived from the array index because migration numbers
-/// have diverged across branches here: a database built from a feature branch can sit at a
-/// `user_version` higher than the number of migrations this build ships, and an index-derived
-/// target is then never greater than `user_version`, so the migration is skipped **silently and
-/// permanently**. `repos.hidden` landed on exactly that rake. Numbering also collided: two branches
-/// both claimed 7.
-///
-/// So: never renumber a shipped entry, and give a new migration a version above every number any
-/// branch has used (7 through 10 are spoken for by unmerged work).
+/// Use explicit increasing schema versions rather than array indices; never renumber shipped
+/// migrations or reuse reserved version numbers.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_agent_kind.sql")),
@@ -94,7 +80,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
-/// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
+/// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
 /// an unapproved draft is a proposal, not knowledge, and stale proposals shouldn't pile up.
 const PLAYBOOK_DRAFT_TTL_DAYS: i64 = 30;
 
@@ -105,7 +91,7 @@ const MAX_DEVICES: usize = 32;
 
 /// Cap on paired remote devices. Unlike push tokens (evicted oldest-first), these are live access
 /// credentials, so pairing a new distinct device past the cap errors rather than silently evicting
-/// one — dropping a credential out from under an in-use device would lock it out without warning.
+/// one - dropping a credential out from under an in-use device would lock it out without warning.
 const MAX_REMOTE_DEVICES: usize = 16;
 
 const MESSAGE_MAX_BYTES: usize = 8 * 1024;
@@ -186,8 +172,6 @@ impl Store {
         rx.await
             .map_err(|_| Error::Other("store call dropped".into()))?
     }
-
-    // ---- repos ---------------------------------------------------------------
 
     pub async fn add_repo(
         &self,
@@ -280,10 +264,8 @@ impl Store {
         .await
     }
 
-    /// Persist a full manual ordering: `ordered_ids` are assigned dense positions 0..n-1 in one
-    /// transaction, so a partially-applied reorder is never observable. Repos omitted from the
-    /// list keep their old position (they may simply be hidden); pass every visible id to order
-    /// the whole set.
+    /// Persist supplied repository positions atomically while preserving omitted repositories'
+    /// positions.
     pub async fn set_repo_order(&self, ordered_ids: Vec<RepoId>) -> Result<()> {
         self.call(move |c| {
             let tx = c.transaction()?;
@@ -317,8 +299,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- worktrees -----------------------------------------------------------
 
     pub async fn upsert_worktree(
         &self,
@@ -395,8 +375,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- lanes ---------------------------------------------------------------
 
     /// Return the stable lane id for `(repo_id, worktree_path)`, creating it if absent.
     pub async fn get_or_create_lane(
@@ -489,12 +467,8 @@ impl Store {
         .await
     }
 
-    // ---- remote devices ------------------------------------------------------
-
-    /// Mint-or-return a per-device remote token. Re-pairing an existing `name` returns the same
-    /// row unchanged (so re-showing the QR is idempotent); a new name mints a fresh 32-byte token
-    /// and inserts it. The table is capped at [`MAX_REMOTE_DEVICES`]: a new distinct name past the
-    /// cap errors rather than evicting, because these are live credentials.
+    /// Return an existing named credential or mint a new one, refusing new names at the device cap
+    /// rather than evicting live credentials.
     pub async fn remote_device_pair(&self, name: &str) -> Result<RemoteDevice> {
         let name = name.to_string();
         self.call(move |c| {
@@ -585,8 +559,7 @@ impl Store {
         .await
     }
 
-    /// Set (or clear, with `None`) a lane's role. The only role R1 assigns is `"controller"`,
-    /// on the single lane of the repomind home repo.
+    /// Sets or clears the lane role, including the repomind home’s controller role.
     pub async fn set_lane_role(&self, lane_id: LaneId, role: Option<String>) -> Result<()> {
         self.call(move |c| {
             c.execute(
@@ -613,8 +586,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- session labels ------------------------------------------------------
 
     /// Set (or clear, when `label` is `None`) a user-defined label for a surfaced session.
     /// Transcript-backed external sessions use their session id; managed sessions use a
@@ -652,8 +623,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- agent tab order -------------------------------------------------------
 
     /// Persist a lane's manual agent-tab ordering: `ordered_session_ids` are assigned dense
     /// positions in one transaction (the lane's previous order is replaced wholesale, so stale
@@ -746,15 +715,8 @@ impl Store {
         .await
     }
 
-    // ---- fleet messages -----------------------------------------------------
-
-    /// Create a restricted MCP identity and return its one-time plaintext token.
-    ///
-    /// A daemon restart may rediscover the same still-running process and mint a fresh launch
-    /// token for it. In that case the old token must remain valid: the agent already has it in
-    /// its environment and cannot be refreshed. A process fingerprint is therefore required to
-    /// distinguish that harmless re-adoption from a genuinely replaced process. Fingerprints we
-    /// cannot establish are deliberately treated as a replacement for security.
+    /// Mint a restricted MCP token while preserving existing tokens only for a verified matching
+    /// process fingerprint, treating unverifiable identities as replacements.
     pub async fn create_mcp_identity(
         &self,
         identity: ResolvedAgentAddress,
@@ -1166,8 +1128,6 @@ impl Store {
         .await
     }
 
-    // ---- commits -------------------------------------------------------------
-
     /// Insert commits, ignoring ones already present. Returns the number newly added.
     pub async fn insert_commits(&self, commits: Vec<Commit>) -> Result<usize> {
         self.call(move |c| {
@@ -1240,8 +1200,6 @@ impl Store {
         .await
     }
 
-    // ---- orchestration journal ----------------------------------------------
-
     /// Append one journal entry (its `id` field is ignored). Returns the assigned rowid.
     pub async fn append_journal(&self, e: JournalEntry) -> Result<i64> {
         self.call(move |c| {
@@ -1306,10 +1264,8 @@ impl Store {
         .await
     }
 
-    /// The cold-start recap: every entry after the previous session's `session_start` (i.e. the
-    /// second-newest one), ascending — the previous session's actions plus anything since,
-    /// including the current session's own `session_start` marker. Empty until two sessions
-    /// exist.
+    /// Return journal entries since the previous session start in ascending order, or an empty list
+    /// until two session starts exist.
     pub async fn journal_since_prev_session(&self, limit: usize) -> Result<Vec<JournalEntry>> {
         self.call(move |c| {
             let anchor: Option<i64> = c
@@ -1337,8 +1293,6 @@ impl Store {
         .await
     }
 
-    // ---- playbooks -----------------------------------------------------------
-
     /// Legacy SQLite playbooks for migration, in name order after expired drafts are swept.
     pub async fn list_playbooks(&self) -> Result<Vec<Playbook>> {
         self.call(|c| {
@@ -1351,8 +1305,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- standing-orchestration schedules ------------------------------------
 
     /// Add a schedule. The spec is validated by the caller (`schedule::parse_spec`).
     pub async fn add_schedule(
@@ -1415,10 +1367,8 @@ impl Store {
         .await
     }
 
-    // ---- approval policy -----------------------------------------------------
-
     /// Record one permission verdict and return how many CONSECUTIVE trailing approvals the
-    /// (repo, pattern) now has — a deny resets the streak (denies never generalize).
+    /// (repo, pattern) now has - a deny resets the streak (denies never generalize).
     pub async fn record_approval_event(
         &self,
         repo: String,
@@ -1514,8 +1464,6 @@ impl Store {
         .await
     }
 
-    // ---- agent sessions ------------------------------------------------------
-
     /// Insert or update a session keyed by its manifest path. Returns its id.
     pub async fn upsert_session(&self, s: AgentSession) -> Result<SessionId> {
         self.call(move |c| {
@@ -1572,8 +1520,6 @@ impl Store {
         })
         .await
     }
-
-    // ---- agent supervision ---------------------------------------------------
 
     pub async fn lane_policy(&self, lane: LaneId) -> Result<Option<SupervisionOverrides>> {
         self.call(move |c| {
@@ -1754,16 +1700,8 @@ impl Store {
         .await
     }
 
-    // ---- usage ledger ----
-
-    /// Insert ledger events. Returns how many rows the call actually changed.
-    ///
-    /// A row is keyed on `(source_path, source_offset)`, so re-reading a source is harmless. A key
-    /// that is already stored is taken to the elementwise maximum of the two counts rather than
-    /// ignored: a Claude message is written one line per content block and the last line carries
-    /// the final numbers, so the pass that first sees a message part-written must be allowed to
-    /// correct itself when the rest of it lands. Counts only ever grow, so the maximum is the
-    /// finished message. The whole call is one transaction.
+    /// Atomically insert events keyed by source and offset, raise replayed token counts to their
+    /// elementwise maxima, and return the number of changed rows.
     pub async fn record_usage_events(
         &self,
         events: Vec<crate::usage_ledger::UsageEvent>,
@@ -1958,19 +1896,8 @@ impl Store {
         .await
     }
 
-    /// Write session digests, replacing any row for the same agent kind and session id.
-    ///
-    /// `headline_version` only advances when this pass actually produced a headline: an
-    /// incremental read that saw no new user or assistant text carries `headline: None` and
-    /// leaves both the stored headline and its version alone, so a session already flagged stale
-    /// stays eligible for [`Store::usage_sessions_needing_headline_upgrade`] rather than being
-    /// waved through on a pass that never looked at its old text again.
-    ///
-    /// The counters accumulate, because a session's turns arrive a few at a time and can come
-    /// from several transcripts at once (its own, and one per subagent it spawned). The one
-    /// exception is a digest an older reader wrote: the first write at a newer `counts_version`
-    /// replaces its counters instead of adding to them, so a re-read of every source converges on
-    /// the true count rather than doubling it.
+    /// Merge session digests without erasing absent headlines, accumulating counters except when a
+    /// newer counts version requires authoritative replacement.
     pub async fn upsert_usage_sessions(
         &self,
         rows: Vec<crate::usage_ledger::UsageSessionMeta>,
@@ -1984,10 +1911,8 @@ impl Store {
         .await
     }
 
-    /// Up to `limit` sessions whose stored `headline_version` is older than `current_version`,
-    /// each as `(agent_kind, session_id, source_path)` so the caller can re-read the file and
-    /// recompute. Sessions with no recorded source are included too, since a caller with nothing
-    /// to re-read can still mark them current rather than checking forever.
+    /// List a bounded batch of stale headline identities and optional source paths, including
+    /// missing sources the caller can retire.
     pub async fn usage_sessions_needing_headline_upgrade(
         &self,
         current_version: u32,
@@ -2008,10 +1933,8 @@ impl Store {
         .await
     }
 
-    /// Overwrite one session's headline with a freshly recomputed value, unconditionally (unlike
-    /// [`Store::upsert_usage_sessions`], which never clobbers a headline with `None`): a full
-    /// re-read of the source is authoritative, so a session that turns out to have no real
-    /// headline at all must be allowed to lose a stale, injected one.
+    /// Replace a session headline authoritatively, allowing a null result to erase stale injected
+    /// text.
     pub async fn update_usage_session_headline(
         &self,
         agent_kind: String,
@@ -2037,10 +1960,8 @@ impl Store {
         .await
     }
 
-    /// Mark one session's headline current without touching its content: the source could not be
-    /// re-read this pass (missing, or the session never resurfaced in a fresh scan), so trying
-    /// again would only starve the rest of the backlog out of its bounded batch. A later
-    /// incremental ingest pass still corrects the headline for real if the source changes again.
+    /// Retire an unreadable session from the headline-upgrade backlog without changing its content,
+    /// allowing later ingest to correct it.
     pub async fn mark_usage_session_headline_current(
         &self,
         agent_kind: String,
@@ -2165,10 +2086,8 @@ impl Store {
         .await
     }
 
-    /// Every model the ledger has ever seen: its most recent event and how many tokens (every
-    /// kind summed) it has run since `cutoff`. Backs `usage.models`' Settings > Usage table, which
-    /// needs to show every model at least once, not just the ones active in whatever window the
-    /// operator happens to have open.
+    /// Return every observed model with its latest activity and tokens since the cutoff, including
+    /// models with no recent usage.
     pub async fn usage_model_seen(
         &self,
         cutoff: DateTime<Utc>,
@@ -2194,8 +2113,6 @@ impl Store {
     }
 }
 
-// ---- connection init + migrations --------------------------------------------
-
 fn init(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -2217,8 +2134,6 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
     }
     Ok(())
 }
-
-// ---- row mapping helpers -----------------------------------------------------
 
 fn collect<T>(
     rows: rusqlite::MappedRows<'_, impl FnMut(&Row) -> rusqlite::Result<T>>,
@@ -2771,8 +2686,7 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
 const REPO_COLUMNS: &str =
     "id, path, name, added_at, worktree_root_template, hidden, position, label";
 
-/// Manual order first (ascending), then unpositioned repos by name — so a fresh database keeps
-/// the legacy ordering until the user drags something.
+/// Orders explicitly positioned repositories first by position, then the rest by name.
 const REPO_ORDER: &str = "ORDER BY (position IS NULL), position, name";
 
 fn worktree_from_row(r: &Row) -> rusqlite::Result<Worktree> {
@@ -2952,7 +2866,7 @@ mod tests {
         }
         let devices = s.list_devices().await.unwrap();
         assert_eq!(devices.len(), MAX_DEVICES, "device count is capped");
-        // The earliest tokens were evicted; the most recent survive.
+
         assert!(
             devices
                 .iter()
@@ -2973,7 +2887,7 @@ mod tests {
         let again = s.remote_device_pair("phone").await.unwrap();
         assert_eq!(a.token, again.token);
         assert_eq!(s.remote_device_list().await.unwrap().len(), 1);
-        // A different name mints a fresh, distinct token.
+
         let b = s.remote_device_pair("ipad").await.unwrap();
         assert_ne!(a.token, b.token);
         assert_eq!(s.remote_device_list().await.unwrap().len(), 2);
@@ -3030,7 +2944,7 @@ mod tests {
                 .is_some(),
             "last_seen_at is stamped"
         );
-        // Stamping an unknown device is a harmless no-op (no error).
+
         s.remote_device_seen("ghost").await.unwrap();
     }
 
@@ -3074,7 +2988,7 @@ mod tests {
             .await
             .unwrap();
         let recent = s.recent_journal(10).await.unwrap();
-        // Newest first, fields intact.
+
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].action, "spawn_agent");
         assert_eq!(recent[0].outcome, "ok");
@@ -3129,7 +3043,7 @@ mod tests {
         let hits = s.search_journal("auth".into(), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].action, "spawn_agent");
-        // action column is searched too
+
         let hits = s.search_journal("merge".into(), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].action, "merge_lane");
@@ -3145,7 +3059,7 @@ mod tests {
         s.append_journal(journal("old", "spawn_agent", None))
             .await
             .unwrap();
-        // The previous session: its start and actions ARE the recap.
+
         s.append_journal(journal("prev", "session_start", None))
             .await
             .unwrap();
@@ -3155,7 +3069,7 @@ mod tests {
         s.append_journal(journal("prev", "merge_lane", None))
             .await
             .unwrap();
-        // The current session's own start.
+
         s.append_journal(journal("cur", "session_start", None))
             .await
             .unwrap();
@@ -3260,7 +3174,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        // Streaks are per repo+pattern.
+
         assert_eq!(
             s.record_approval_event("web".into(), "cargo test".into(), "approve".into())
                 .await
@@ -3282,7 +3196,7 @@ mod tests {
             .unwrap();
         s.add_approval_rule("api".into(), "cargo test".into())
             .await
-            .unwrap(); // idempotent
+            .unwrap();
         assert!(
             s.has_approval_rule("api".into(), "cargo test".into())
                 .await
@@ -3361,15 +3275,8 @@ mod tests {
 
     #[test]
     fn migrations_reach_a_database_numbered_past_them() {
-        // A database built from a feature branch: main's schema, but a `user_version` above every
-        // migration main ships (unmerged work numbered its migrations 7 through 10). Deriving each
-        // target from the array index made `current < target` false here, so later migrations were
-        // skipped silently and forever. That is how `repos.hidden` went missing and `repo.list`
-        // started erroring with "no such column".
-        //
-        // The fixture stands in for main's schema at that point, so it carries the tables the
-        // migrations above 10 alter: `repos` (0011, 0019) and `lanes` (0022, in its post-0005
-        // AUTOINCREMENT shape).
+        // An existing schema version can exceed a migration's array index; explicit version targets
+        // must still apply later migrations.
         let mut c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE repos (
@@ -3458,7 +3365,6 @@ mod tests {
     async fn agent_session_order_round_trip_and_replace() {
         let s = store().await;
 
-        // Empty until written.
         assert!(s.list_agent_session_orders().await.unwrap().is_empty());
 
         s.set_agent_session_order(7, vec!["c".into(), "a".into(), "b".into()])
@@ -3470,7 +3376,6 @@ mod tests {
             &vec!["c".to_string(), "a".to_string(), "b".to_string()]
         );
 
-        // A second lane's order is independent.
         s.set_agent_session_order(9, vec!["z".into()])
             .await
             .unwrap();
@@ -3524,7 +3429,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Unpositioned repos keep the legacy name order.
         assert_eq!(
             s.list_repos()
                 .await
@@ -3608,7 +3512,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Create a few lanes; the last one has the highest id.
         s.get_or_create_lane(r.id, "/code/a".into()).await.unwrap();
         s.get_or_create_lane(r.id, "/code/a-wt/one".into())
             .await
@@ -3618,7 +3521,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Free the highest id (a worktree being removed).
         s.call(move |c| {
             c.execute("DELETE FROM lanes WHERE id = ?1", params![max_id])?;
             Ok(())
@@ -3667,7 +3569,6 @@ mod tests {
         .unwrap();
         assert_eq!(s.list_worktrees(r.id).await.unwrap().len(), 2);
 
-        // Upsert again updates head in place, doesn't duplicate.
         let w = s
             .upsert_worktree(
                 r.id,
@@ -3712,7 +3613,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(added, 3);
-        // Re-inserting the same oids adds nothing.
+
         let again = s.insert_commits(vec![mk(1, 10), mk(4, 40)]).await.unwrap();
         assert_eq!(again, 1);
 
@@ -3726,7 +3627,6 @@ mod tests {
         assert_eq!(got[0].oid, oid(1));
         assert_eq!(got[1].oid, oid(2));
 
-        // repo filter that excludes everything.
         let none = s
             .commits_in_range(range, Some(vec![r.id + 99]))
             .await
@@ -4215,8 +4115,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Existing installations can already contain a legitimate operator thread at zero from
-        // the old every-reply-decrements behavior. The operator must be able to continue it.
+        // Persisted operator threads at zero remaining hops must remain replyable.
         let parent_id = parent.id.clone();
         s.call(move |c| {
             c.execute(
@@ -4434,7 +4333,6 @@ mod tests {
 
     #[test]
     fn migration_18_applies_from_17() {
-        // Staged DB from version 17
         let mut c17 = Connection::open_in_memory().unwrap();
         for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 17) {
             let tx = c17.transaction().unwrap();
@@ -4447,7 +4345,6 @@ mod tests {
             .unwrap();
         assert_eq!(v17, 17);
 
-        // Run migrations -> reaches at least 18 and the tables exist
         run_migrations(&mut c17).unwrap();
 
         let lp_exists: i64 = c17
@@ -4471,7 +4368,6 @@ mod tests {
 
     #[test]
     fn migration_19_applies_fresh_and_from_18() {
-        // Fresh DB reaches the newest version
         let mut c = Connection::open_in_memory().unwrap();
         init(&mut c).unwrap();
         let newest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
@@ -4481,7 +4377,6 @@ mod tests {
         assert_eq!(version, newest);
         assert!(newest >= 19);
 
-        // Staged DB from version 18
         let mut c18 = Connection::open_in_memory().unwrap();
         for (target, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 18) {
             let tx = c18.transaction().unwrap();
@@ -4494,7 +4389,6 @@ mod tests {
             .unwrap();
         assert_eq!(v18, 18);
 
-        // Run migrations -> reaches 19 and the new columns exist
         run_migrations(&mut c18).unwrap();
         let v19: i64 = c18
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -4564,7 +4458,6 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].lane_id, 10);
 
-        // Update existing policy
         let mut p_updated = p;
         p_updated.enabled = false;
         p_updated.classes.clear();
@@ -4574,7 +4467,6 @@ mod tests {
         assert!(!read2.enabled);
         assert!(read2.classes.is_empty());
 
-        // Delete policy
         s.delete_lane_policy(10).await.unwrap();
         assert_eq!(s.lane_policy(10).await.unwrap(), None);
         assert!(s.lane_policies().await.unwrap().is_empty());
@@ -4603,7 +4495,6 @@ mod tests {
             pane_excerpt: Some("test pane output".to_string()),
         };
 
-        // Insert 5 entries across 2 lanes: 3 on lane 1, 2 on lane 2
         let id1 = s
             .append_supervision(make_entry(1, "dialog", "approve"))
             .await
@@ -4627,7 +4518,6 @@ mod tests {
 
         assert_eq!(vec![id1, id2, id3, id4, id5], vec![1, 2, 3, 4, 5]);
 
-        // Query all, newest first
         let all = s.supervision_log(None, 10, None).await.unwrap();
         assert_eq!(all.len(), 5);
         assert_eq!(
@@ -4635,17 +4525,14 @@ mod tests {
             vec![5, 4, 3, 2, 1]
         );
 
-        // Lane filter: lane 1
         let l1 = s.supervision_log(Some(1), 10, None).await.unwrap();
         assert_eq!(l1.len(), 3);
         assert_eq!(l1.iter().map(|e| e.id).collect::<Vec<_>>(), vec![5, 3, 1]);
 
-        // Lane filter: lane 2
         let l2 = s.supervision_log(Some(2), 10, None).await.unwrap();
         assert_eq!(l2.len(), 2);
         assert_eq!(l2.iter().map(|e| e.id).collect::<Vec<_>>(), vec![4, 2]);
 
-        // Cursor pagination with before_id
         let page1 = s.supervision_log(None, 2, None).await.unwrap();
         assert_eq!(page1.iter().map(|e| e.id).collect::<Vec<_>>(), vec![5, 4]);
 
@@ -4661,7 +4548,6 @@ mod tests {
             .unwrap();
         assert_eq!(page3.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1]);
 
-        // supervision_last
         let last1 = s.supervision_last(1).await.unwrap().expect("last exists");
         assert_eq!(last1.id, 5);
         let last2 = s.supervision_last(2).await.unwrap().expect("last exists");
@@ -4738,7 +4624,6 @@ mod tests {
         assert_eq!(stored_excerpt.len(), 800);
         assert_eq!(stored_excerpt, "a".repeat(800));
 
-        // Multibyte unicode test
         let unicode_long = "🦀".repeat(1000); // each emoji is 4 bytes
         let e2 = SupervisionEntry {
             id: 0,
@@ -4764,7 +4649,6 @@ mod tests {
         assert_eq!(stored_unicode.chars().count(), 800);
         assert_eq!(stored_unicode, "🦀".repeat(800));
     }
-    // ---- usage ledger ----
 
     fn usage_event(offset: i64, model: &str, at: &str) -> crate::usage_ledger::UsageEvent {
         crate::usage_ledger::UsageEvent {
@@ -5420,7 +5304,7 @@ mod tests {
                 conn.execute("INSERT INTO usage_events(at, agent_kind, model, account, source_path, source_offset) VALUES ('2026-09-01T00:00:00Z', 'claude-code', 'test-model', 'default', 'fixture', 0)", []).unwrap();
             }
             init(&mut conn).unwrap();
-            // Reopening an already-migrated database is idempotent.
+
             run_migrations(&mut conn).unwrap();
             let version: i64 = conn
                 .pragma_query_value(None, "user_version", |r| r.get(0))

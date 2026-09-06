@@ -1,10 +1,5 @@
-//! Daemon service management (launchd on macOS, systemd user units on Linux, a Task Scheduler
-//! logon task on Windows).
-//!
-//! Lives in `repomon-core` because the `repomon daemon …` subcommands run from the TUI
-//! binary and must drive install/start/stop without depending on the daemon crate. A
-//! service is optional on every platform — the TUI auto-spawns `repomond` on demand —
-//! so failures here surface as advice, not as a wall.
+//! Manages optional login services through launchd, systemd user units, or Windows Task Scheduler
+//! independently of daemon wiring.
 
 use std::path::{Path, PathBuf};
 
@@ -98,7 +93,7 @@ pub enum ServiceOp {
     IsActive,
 }
 
-/// The `systemctl` argv for an operation — pure, so the shapes are testable on every platform.
+/// The `systemctl` argv for an operation - pure, so the shapes are testable on every platform.
 pub fn systemctl_user_args(op: ServiceOp) -> Vec<&'static str> {
     match op {
         ServiceOp::DaemonReload => vec!["--user", "daemon-reload"],
@@ -131,7 +126,7 @@ pub enum TaskOp {
     Query,
 }
 
-/// The `schtasks` argv for an operation — pure, so the shapes are testable on every platform.
+/// The `schtasks` argv for an operation - pure, so the shapes are testable on every platform.
 /// Query uses `/FO CSV /NH` because the status field's *position* is locale-independent even
 /// where `/FO LIST`'s labels are not.
 pub fn schtasks_args(op: TaskOp) -> Vec<&'static str> {
@@ -266,10 +261,10 @@ mod platform {
     }
 
     /// `Err(reason)` when systemd user services can't work here. The daemon still runs without
-    /// one — the TUI auto-spawns `repomond` — so callers surface this as advice, not a wall.
+    /// one - the TUI auto-spawns `repomond` - so callers surface this as advice, not a wall.
     fn systemd_available() -> std::result::Result<(), String> {
         const HINT: &str = "the TUI auto-starts repomond, so a service is optional";
-        // The documented probe for "is systemd PID 1 here" — absent in containers and on
+        // The documented probe for "is systemd PID 1 here" - absent in containers and on
         // non-systemd inits.
         if !Path::new("/run/systemd/system").exists() {
             return Err(format!(
@@ -375,7 +370,7 @@ mod platform {
     use super::*;
     use crate::process::background_command;
 
-    /// The task's path in the Task Scheduler library — no file on disk, but callers print it
+    /// The task's path in the Task Scheduler library - no file on disk, but callers print it
     /// after install the way the Unix arms print the plist/unit path.
     pub fn service_file_path() -> PathBuf {
         PathBuf::from(format!(r"\{TASK_NAME}"))
@@ -406,14 +401,13 @@ mod platform {
         let args = schtasks_create_args(&run);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         schtasks(&argv)?;
-        // Start it now too — parity with launchd bootstrap and `systemctl enable --now`.
+        // Start it now too - parity with launchd bootstrap and `systemctl enable --now`.
         schtasks_op(TaskOp::Run)?;
         Ok(())
     }
 
     pub fn uninstall() -> Result<()> {
         if schtasks_op(TaskOp::Query).is_err() {
-            // Not installed — nothing to do, like the Unix arms.
             return Ok(());
         }
         let _ = schtasks_op(TaskOp::End);
@@ -481,7 +475,6 @@ pub fn log_file() -> PathBuf {
 pub fn repomond_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // EXE_SUFFIX is ".exe" on Windows and "" on Unix.
             let cand = dir.join(format!("repomond{}", std::env::consts::EXE_SUFFIX));
             if cand.exists() {
                 return cand;

@@ -36,9 +36,8 @@ candle-transformers = { workspace = true }
 tokenizers = { workspace = true }
 hf-hub = { workspace = true }
 
-# The Windows session backend talks to per-agent host processes; the host crate carries the
-# frozen wire types (protocol/codec/registry) and the per-user pipe DACL the daemon's own
-# IPC pipe reuses. windows-sys is for CancelSynchronousIo (byte-stream reader shutdown).
+# Share host protocol types and per-user pipe security; CancelSynchronousIo stops blocking Windows
+# stream readers.
 [target.'cfg(windows)'.dependencies]
 repomon-host = { path = "../repomon-host" }
 base64 = { workspace = true }

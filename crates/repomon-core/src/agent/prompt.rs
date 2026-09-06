@@ -1,12 +1,5 @@
-//! Detecting a pending interactive prompt (permission dialog, plan approval, trust dialog,
-//! a question with options) in a managed agent's pane.
-//!
-//! A transcript that ends in a tool call reads as **Running**, but the pane may actually be
-//! sitting on "Do you want to proceed? ❯ 1. Yes …" — blocked on the user, with nothing in the
-//! JSONL to say so. This module is the pure, fixture-tested detector: given recent pane text it
-//! decides whether the agent is waiting on an interactive prompt, and produces a compact
-//! summary (dialog header + question) to use as the notification's "why". The daemon flips
-//! such sessions to `Waiting` during `lane.list`.
+//! Detect live pane dialogs and work indicators that transcripts cannot represent, while excluding
+//! answered prompts left in scrollback.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,20 +11,18 @@ const QUESTION_REACH: usize = 5;
 /// How far above the question to look for the dialog's top border (the `╭` line).
 const HEADER_REACH: usize = 20;
 /// How far below the option menu the confirmation footer ("Enter to confirm · Esc to cancel")
-/// may sit — used only as corroborating evidence for the folder-trust dialog, which (unlike
+/// may sit - used only as corroborating evidence for the folder-trust dialog, which (unlike
 /// every other dialog this module recognizes) can appear with no question line in view at all.
 const FOOTER_REACH: usize = 3;
 
-/// Detect a pending interactive prompt in an agent's recent pane text and summarize it
-/// (`"Bash command — Do you want to proceed?"`). Returns `None` for ordinary output, for
-/// numbered lists without a selection cursor, and for the usage-limit menu (which is a
-/// rate-limit pause, not a permission ask — see [`super::limit`]).
+/// Summarize a live interactive prompt, excluding ordinary lists and quota menus handled by the
+/// rate-limit detector.
 pub fn detect_pending_prompt(pane: &str) -> Option<String> {
     detect_dialog(pane).map(|d| d.summary())
 }
 
 /// How many content lines of the dialog's body (the command being approved, the edit summary)
-/// [`detect_dialog`] keeps — enough for a peek popup, small enough to ride in `lane.list`.
+/// [`detect_dialog`] keeps - enough for a peek popup, small enough to ride in `lane.list`.
 const BODY_MAX_LINES: usize = 8;
 /// Maximum number of non-empty context lines collected above a question.
 const CONTEXT_MAX_LINES: usize = 12;
@@ -75,7 +66,7 @@ pub struct DialogOption {
 }
 
 impl PendingDialog {
-    /// The compact one-line summary — exactly what [`detect_pending_prompt`] returns.
+    /// The compact one-line summary - exactly what [`detect_pending_prompt`] returns.
     pub fn summary(&self) -> String {
         let s = match &self.title {
             Some(t) => format!("{t} — {}", self.question),
@@ -89,14 +80,8 @@ impl PendingDialog {
     }
 }
 
-/// Detect a pending interactive dialog and return it fully parsed: header, question, body,
-/// options, and cursor position. Same detection rules as [`detect_pending_prompt`].
-///
-/// Two recognizers run in order. The box-drawing scan below reads Claude Code, Codex, Hermes and
-/// OpenCode, all of which draw a contiguous run of numbered rows under a question. Antigravity
-/// 1.1.x draws its menus without a box, follows them with key-hint footers the scan reads as
-/// "content below the menu", and lets a long option wrap at the pane width, which splits the
-/// contiguous run outright. Its layout gets its own recognizer rather than a weaker generic rule.
+/// Parse dialog content, options, and cursor position using boxed-menu and footer-anchored boxless
+/// recognizers.
 pub fn detect_dialog(pane: &str) -> Option<PendingDialog> {
     let stripped: Vec<String> = pane.lines().map(strip_ansi).collect();
     let cleaned: Vec<String> = stripped.iter().map(|l| content(l).to_string()).collect();
@@ -112,8 +97,8 @@ fn detect_boxed_dialog(stripped: &[String], cleaned: &[String]) -> Option<Pendin
     let options: Vec<Option<(bool, Option<u32>, String)>> =
         cleaned.iter().map(|l| parse_option_line(l)).collect();
 
-    // The active dialog is the last thing on screen — find the bottom-most option block that
-    // really looks like a selection menu: ≥2 numbered rows plus a visible `❯` cursor.
+    // The active dialog is the last thing on screen - find the bottom-most option block that
+    // really looks like a selection menu: ≥2 numbered rows plus a visible `U+276F` cursor.
     let mut end = options.len();
     while end > 0 {
         let block_end = options[..end].iter().rposition(|p| p.is_some())?;
@@ -172,12 +157,8 @@ fn detect_boxed_dialog(stripped: &[String], cleaned: &[String]) -> Option<Pendin
                     context,
                 });
             }
-            // Claude's folder-trust dialog ("Security guide" / "Yes, I trust this folder").
-            // On a freshly spawned worker the question line ("Do you trust the files in this
-            // folder?") can be scrolled out of the capture window entirely, so `describe`
-            // above finds no question and comes back empty. Recognize the dialog by its
-            // distinctive first option plus its confirmation footer instead — see the live
-            // fixture in the tests below.
+            // Recognize trust prompts by their distinctive option and confirmation footer when the
+            // question has scrolled outside the capture.
             if is_trust_dialog(&block) && has_confirm_footer(cleaned, block_end) {
                 return Some(PendingDialog {
                     title: None,
@@ -190,16 +171,12 @@ fn detect_boxed_dialog(stripped: &[String], cleaned: &[String]) -> Option<Pendin
             }
             return None;
         }
-        end = start; // not a menu — keep scanning the lines above
+        end = start; // not a menu - keep scanning the lines above
     }
     None
 }
 
-/// The footers Antigravity 1.1.x prints under a live dialog: its in-flight status line
-/// ("esc to cancel") and the key hints below the menu ("↑/↓ Navigate · tab Amend · ctrl+g
-/// edit/expand command", "↑/↓ Navigate · enter Confirm"). Once a dialog is answered the status
-/// line flips to "? for shortcuts", so the presence of one of these separates a pending prompt
-/// from answered scrollback.
+/// Require an in-flight footer to distinguish live boxless dialogs from answered scrollback.
 fn is_antigravity_live_footer(line: &str) -> bool {
     let t = line.trim();
     let lower = t.to_lowercase();
@@ -240,16 +217,8 @@ const PREAMBLE_MAX_LINES: usize = 3;
 /// as prose that landed under the menu.
 const OPTION_MAX_CHARS: usize = 120;
 
-/// Antigravity 1.1.x's boxless dialog: a question line, then option rows, then key-hint footers.
-///
-/// Three things defeat [`detect_boxed_dialog`] here. The hint rows below the menu ("↑/↓ Navigate
-/// · tab Amend …") read as content below the block, so a live prompt is discarded as scrollback.
-/// The folder-trust dialog offers two rows with no numbers at all, below the "two numbered rows"
-/// gate. And at the 80 columns the production tmux server usually runs, the long "(Persist to
-/// settings.json)" option wraps, which breaks the contiguous run the scan walks. This recognizer
-/// anchors on the question instead, absorbs wrapped remainders into the option above them, and
-/// requires one of Antigravity's live footers below the menu so an answered dialog still in
-/// scrollback does not resurrect.
+/// Anchor boxless menus on their question and live footer, absorbing wrapped options and accepting
+/// unnumbered trust choices.
 fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<PendingDialog> {
     // Measure the tail from the last line with content, not from the bottom of the capture: tmux
     // pads a short pane with blank rows, and counting those pushed the dialog out of reach.
@@ -263,10 +232,7 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
             t.ends_with('?') && t.split_whitespace().count() >= 3 && !t.starts_with('#')
         })
         .map(|i| i + first);
-    // The folder-trust dialog opens the session, so on a 45-line capture of a 50-line pane its
-    // question ("Do you trust the contents of this project?") has already scrolled out of view --
-    // the same blind spot the Claude trust branch above covers. Anchor on the option wording and
-    // stand in the question, as that branch does.
+    // A trust question can scroll above the capture, so recover it from distinctive option wording.
     let (q, synthetic) = match question_at {
         Some(q) => (q, None),
         None => {
@@ -378,12 +344,8 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
     })
 }
 
-/// An Antigravity quota wall: the model refused the turn because the account's per-model quota is
-/// spent, and the pane drops straight back to an idle composer. The status is honestly Idle, but
-/// "no output for 4m" hides the cause, so report the wall (and its reset window when printed).
-///
-/// Claude's own usage limit is [`super::limit`]'s job (it has a menu and an auto-continue path),
-/// so its wording is deliberately not matched here.
+/// Report an Antigravity model quota wall and optional reset window without matching Claude's
+/// separate quota-menu contract.
 pub fn detect_quota_exhausted(pane: &str) -> Option<String> {
     let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
     let hit = lines.iter().rposition(|l| {
@@ -436,11 +398,8 @@ fn parse_reset_window(line: &str) -> Option<String> {
     Some(tokens.join(" "))
 }
 
-/// Parse a `detect_quota_exhausted` reason's trailing "resets in 2h 15m" window into an actual
-/// duration, so a caller can turn it into an absolute deadline once (at first sight) instead of
-/// trusting the wall message to still be accurate however long it lingers in a short pane
-/// capture. Returns `None` when the reason names no reset window (the open-ended "quota
-/// exhausted" case, which a caller should keep retrying on presence alone).
+/// Parse a reset duration so callers can anchor a deadline once instead of repeatedly extending it
+/// from stale pane text.
 pub fn parse_reset_duration(reason: &str) -> Option<chrono::Duration> {
     let window = parse_reset_window(reason)?;
     let mut total = chrono::Duration::zero();
@@ -460,11 +419,8 @@ pub fn parse_reset_duration(reason: &str) -> Option<chrono::Duration> {
     found.then_some(total)
 }
 
-/// The keystrokes (tmux `send-keys` names) that select `target` (0-based option index):
-/// arrow from the visible cursor to the option's row, then Enter. Without a visible cursor,
-/// fall back to the option's printed number — digit selection confirms immediately; the
-/// trailing Enter then lands harmlessly on the empty input box. (Generalizes
-/// [`super::limit::menu_select_keys`], which steers only the usage-limit menu's wait option.)
+/// Select an option by cursor movement and Enter, falling back to its printed number when no cursor
+/// is visible.
 pub fn dialog_select_keys(dialog: &PendingDialog, target: usize) -> Vec<String> {
     match dialog.selected {
         Some(cur) => {
@@ -510,10 +466,7 @@ fn describe_hermes_approval(
     ))
 }
 
-/// Describe the dialog whose menu starts at line `menu_start`: the question line just above
-/// it, the header (the first content line under the box's `╭` border), the body lines
-/// between header and question (capped at [`BODY_MAX_LINES`]), and context lines above the
-/// question (capped at [`CONTEXT_MAX_LINES`]).
+/// Extract bounded dialog context around the option menu for display and classification.
 fn describe(
     stripped: &[String],
     cleaned: &[String],
@@ -577,7 +530,7 @@ fn describe(
 }
 
 /// A line that reads as the dialog's question: the explicit ask phrasings, or any line ending
-/// in `?` (covers arbitrary question dialogs). Requiring an adjacent `❯` menu keeps quoted
+/// in `?` (covers arbitrary question dialogs). Requiring an adjacent `U+276F` menu keeps quoted
 /// questions in ordinary output from matching.
 fn is_question(cleaned: &str) -> bool {
     let t = cleaned.trim();
@@ -594,7 +547,7 @@ fn is_limit_option(lower_text: &str) -> bool {
 }
 
 /// Whether an options block is Claude's folder-trust dialog, recognized by its first option's
-/// exact wording alone — the dialog carries no question line to anchor on when the pane tail is
+/// exact wording alone - the dialog carries no question line to anchor on when the pane tail is
 /// captured mid-scroll (see [`detect_pending_prompt`]).
 fn is_trust_dialog(block: &[&(bool, Option<u32>, String)]) -> bool {
     block
@@ -607,10 +560,8 @@ fn is_trust_option(text: &str) -> bool {
     text.eq_ignore_ascii_case("Yes, I trust this folder")
 }
 
-/// Whether the trust dialog's confirmation footer appears within [`FOOTER_REACH`] lines below
-/// the option menu. Required alongside the option wording in [`is_trust_dialog`] so an unrelated
-/// "Yes, I trust this folder" string in ordinary output — with no question line nearby either —
-/// can't false-positive as a pending prompt.
+/// Require a nearby confirmation footer so quoted trust-option text cannot masquerade as a live
+/// dialog.
 fn has_confirm_footer(cleaned: &[String], block_end: usize) -> bool {
     let end = (block_end + 1 + FOOTER_REACH).min(cleaned.len());
     cleaned[block_end + 1..end]
@@ -647,12 +598,8 @@ fn has_trailing_content(cleaned: &[String], block_end: usize) -> bool {
         .any(|l| !is_footer_or_border(l))
 }
 
-/// How a pending prompt should be handled by an orchestrator: a routine **permission** ask the
-/// agent raised about its own next tool call (proceed / make this edit / trust the folder), or a
-/// genuine **decision** the agent is deferring to a human ("Which auth method should we use?").
-///
-/// An orchestrator may auto-answer a [`PromptClass::Permission`] in an autonomous posture, but
-/// must escalate a [`PromptClass::Decision`] to the human and never answer it itself.
+/// Distinguish permissions that autonomous orchestration may answer from decisions that always
+/// require human escalation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptClass {
@@ -662,12 +609,8 @@ pub enum PromptClass {
     Decision,
 }
 
-/// Classify a [`detect_pending_prompt`] summary as a routine permission ask or a real decision.
-///
-/// Conservative by construction: only the well-known permission phrasings Claude uses for its
-/// own tool calls map to [`PromptClass::Permission`]; everything else (any other question) is a
-/// [`PromptClass::Decision`] so an uncertain prompt is escalated to the human rather than
-/// auto-answered.
+/// Classify only recognized permission wording as automatable, escalating all uncertain prompts as
+/// decisions.
 pub fn classify_prompt(summary: &str) -> PromptClass {
     let l = summary.to_lowercase();
     // The phrasings Claude uses when asking to run its own proposed tool call. These are the
@@ -682,10 +625,10 @@ pub fn classify_prompt(summary: &str) -> PromptClass {
         "do you want to allow",
         // Folder-trust dialogs: lane windows only ever run inside worktrees of repos the human
         // has already explicitly registered with repomon, so trusting the folder is routine
-        // housekeeping, not a decision-class ask — safe for an orchestrator to auto-answer.
+        // housekeeping, not a decision-class ask - safe for an orchestrator to auto-answer.
         "do you trust",
         // Codex's MCP tool-call approval ("Allow the repomon MCP server to run tool
-        // \"fleet_status\"?" — live fixture in the tests below): the same routine
+        // \"fleet_status\"?" - live fixture in the tests below): the same routine
         // own-next-tool-call ask as Claude's "do you want to run".
         "mcp server to run tool",
     ];
@@ -720,29 +663,13 @@ const SPINNER_GLYPHS: [char; 6] = [
     '\u{273b}', '\u{273d}', '\u{2733}', '\u{2736}', '\u{2722}', '\u{2217}',
 ];
 
-/// Whether `c` opens a spinner frame. Codex rotates the four-dot braille cycle
-/// (U+2807, U+280B, U+2819 …) while Antigravity 1.1.x rotates the eight-dot one
-/// (U+28FE, U+28FD, U+28FB, U+28BF, U+287F, U+28DF, U+28EF, U+28F7); enumerating either cycle
-/// glyph by glyph is how the eight-dot family came to be missed entirely, so accept the whole
-/// Braille Patterns block instead. U+2800 (the blank pattern) is excluded: TUIs use it as an
-/// invisible spacer, and a blank cannot be a visible spinner frame.
+/// Accept visible Braille Patterns spinner frames across providers, excluding the blank U+2800
+/// spacer.
 fn is_spinner_glyph(c: char) -> bool {
     SPINNER_GLYPHS.contains(&c) || ('\u{2801}'..='\u{28ff}').contains(&c)
 }
 
-/// The "N background agents are still working" status line, when this pane line really IS that
-/// status line rather than an agent's own prose *about* background agents.
-///
-/// The line is printed on its own, optionally behind a spinner glyph:
-///
-/// ```text
-/// Waiting for 2 background agents to finish
-/// 3 background agents running
-/// ```
-///
-/// The previous rule accepted "background agent" plus "running" anywhere on a line, so an agent
-/// that merely wrote "Here is the status of the running background agents:" pinned its own window
-/// to Running for as long as that sentence stayed in the captured scrollback.
+/// Match standalone background-agent status lines rather than prose discussing background work.
 fn subagent_wait_count(line: &str) -> Option<usize> {
     // Drop a leading spinner/bullet glyph and its padding; a digit is alphanumeric, so a line
     // that opens with its count survives.
@@ -777,15 +704,8 @@ fn subagent_wait_count(line: &str) -> Option<usize> {
     )
 }
 
-/// A live streaming/thinking indicator on screen, as the short phrase behind it.
-///
-/// This is the only signal that survives a long tool call: the transcript-derived status decays to
-/// `Idle` after two silent minutes, so an agent grinding through a five-minute build reads Idle
-/// while its pane is visibly working. A spinner line is what the operator actually sees, so it is
-/// what "running" is defined against.
-///
-/// A finished turn keeps its glyph but stamps the result (`\u{273b} Baked for 1m 9s . done 1:00 PM`),
-/// so a "done" stamp disqualifies the line.
+/// Return a live pane work indicator that survives transcript silence, rejecting completed lines
+/// carrying a done stamp.
 pub fn detect_active_spinner(pane: &str) -> Option<String> {
     // Bottom-up: a capture carries scrollback, and only the last frame describes what the pane is
     // doing now. Scanning top-down reported a stale frame's phrase.
@@ -796,12 +716,8 @@ pub fn detect_active_spinner(pane: &str) -> Option<String> {
             continue;
         }
         let lower = t.to_lowercase();
-        // Antigravity's in-flight footer. It prints "esc to cancel" at the head of its status line
-        // for exactly as long as a turn is running and swaps it for "? for shortcuts" the moment
-        // the turn ends, so it survives a capture that lands between spinner redraws. Claude
-        // carries the same words inside a key hint ("Enter to confirm / Esc to cancel"), never at
-        // the head of a line, so anchoring on the start keeps the two apart. It is the weaker
-        // witness of the two: keep looking for a glyph line, whose phrase is what to report.
+        // An anchored in-flight footer survives spinner redraw gaps; prefer a visible spinner
+        // phrase when available.
         if lower.starts_with("esc to cancel") {
             in_flight_footer = true;
             continue;
@@ -838,13 +754,12 @@ pub fn detect_subagent_running(pane: &str) -> Option<String> {
         }
         let lower = t.to_lowercase();
 
-        // 1. The "N background agents still working" status line.
         if let Some(count) = subagent_wait_count(t) {
             waiting_count = Some(count);
         }
 
         // 2. Match active subagent row: `◯ <kind> <description> <timer> ...`
-        // Ensure it is not a finished log (e.g. `⏺ Agent "..." finished · 14m 22s`)
+        // Ensure it is not a finished log (e.g. `U+23FA Agent "..." finished · 14m 22s`)
         if (t.contains('◯') || t.contains('○') || t.starts_with("◯") || t.starts_with("○"))
             && !lower.contains("finished")
         {
@@ -1032,10 +947,8 @@ mod tests {
 
     #[test]
     fn detects_folder_trust_dialog_without_question_line() {
-        // Ground-truth pane capture from a live worker stuck on Claude's folder-trust dialog
-        // (see repomind fix-1 brief). The question line ("Do you trust the files in this
-        // folder?") had scrolled out of the capture window, leaving only this tail — which
-        // used to be invisible to the detector entirely.
+        // A live trust dialog may retain its options and footer after its question scrolls out of
+        // capture.
         let pane = " Security guide\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel";
         assert_eq!(
             parse_option_line(" ❯ 1. Yes, I trust this folder"),
@@ -1063,7 +976,7 @@ mod tests {
 
     #[test]
     fn trust_wording_without_confirm_footer_is_not_a_prompt() {
-        // Same first-option wording, but no confirmation footer nearby and no question line —
+        // Same first-option wording, but no confirmation footer nearby and no question line -
         // not enough evidence, so this must not match (guards against loosening detection).
         let pane = "Security guide\n\n❯ 1. Yes, I trust this folder\n  2. No, exit";
         assert_eq!(detect_pending_prompt(pane), None);
@@ -1071,10 +984,7 @@ mod tests {
 
     #[test]
     fn detects_codex_mcp_tool_approval_dialog() {
-        // Ground-truth pane capture from a live codex orchestrator in supervised mode
-        // (`-a on-request`) hitting its MCP tool-call approval. Codex draws its selection
-        // cursor as `›` (U+203A), not Claude's `❯` (U+276F) — this dialog was invisible to the
-        // detector until `parse_option_line` learned the glyph.
+        // Codex approval menus use U+203A, distinct from Claude's U+276F cursor.
         let pane = "  Field 1/1\n\
               Allow the repomon MCP server to run tool \"fleet_status\"?\n\
               › 1. Allow                   Run the tool and continue.\n\
@@ -1473,10 +1383,7 @@ Do you want to proceed?
         );
     }
 
-    /// Real capture, 2026-09-04, of an Antigravity window parked at an empty composer whose
-    /// scrollback still held the agent's own sentence "Here is the status of the running
-    /// background agents:". The daemon reported it Running for as long as that line stayed in
-    /// the captured window.
+    /// Prose about running background agents must not count as a work indicator.
     #[test]
     fn prose_about_background_agents_is_not_a_running_subagent() {
         let pane = include_str!("fixtures/antigravity_idle_prose_subagents.txt");
@@ -1504,8 +1411,7 @@ Do you want to proceed?
         );
     }
 
-    /// Real capture, 2026-09-04, of a Claude Code window whose pane changed inside six seconds
-    /// while the daemon reported it `waiting` (rendered as NEEDS YOU).
+    /// A live spinner overrides transcript-only waiting evidence.
     #[test]
     fn claude_pane_with_live_subagents_reads_running() {
         let pane = include_str!("fixtures/claude_running_subagents.txt");
@@ -1517,8 +1423,7 @@ Do you want to proceed?
         assert_eq!(detect_dialog(pane), None);
     }
 
-    /// Real capture, 2026-09-04: a finished Claude turn keeps its spinner glyph but stamps the
-    /// result, so the glyph alone must not read as "still working".
+    /// A completed spinner must not count as ongoing work.
     #[test]
     fn finished_turn_spinner_stamp_is_not_active() {
         let pane = include_str!("fixtures/claude_idle_done_spinner.txt");
@@ -1526,8 +1431,7 @@ Do you want to proceed?
         assert_eq!(detect_subagent_running(pane), None);
     }
 
-    /// Real capture, 2026-09-04: an Antigravity window at an idle prompt whose scrollback holds
-    /// the near-miss sentence "Waiting for cargo test -p repomon-daemon to finish."
+    /// Background-task prose in scrollback is not live activity.
     #[test]
     fn idle_antigravity_prompt_reads_neither_running_nor_dialog() {
         let pane = include_str!("fixtures/antigravity_idle_prompt.txt");
@@ -1544,10 +1448,7 @@ Do you want to proceed?
         );
     }
 
-    /// Live capture, 2026-09-04, of an Antigravity 1.1.12 window mid turn: the spinner is the
-    /// eight-dot braille cycle (U+28FE family), not the four-dot one Claude and Codex use, and the
-    /// live footer reads "esc to cancel" rather than "esc to interrupt". Neither matched, so a
-    /// visibly working pane reported idle for the whole turn.
+    /// Boxless menus and eight-dot braille spinners must remain recognizable.
     #[test]
     fn antigravity_working_pane_reads_running() {
         let pane = include_str!("fixtures/antigravity_working_spinner.txt");
@@ -1593,9 +1494,7 @@ Do you want to proceed?
         assert_eq!(detect_active_spinner(pane), None);
     }
 
-    /// Live capture, 2026-09-04: Antigravity blocked on a Bash permission ask. The generic scan
-    /// threw it away because the "\u{2191}/\u{2193} Navigate \u{b7} tab Amend" hint below the menu counted as
-    /// trailing content, so the daemon reported idle while the pane waited on a human.
+    /// Menu navigation hints must not make an active permission prompt look like scrollback.
     #[test]
     fn antigravity_permission_dialog_is_a_pending_prompt() {
         let pane = include_str!("fixtures/antigravity_permission_dialog.txt");
@@ -1619,8 +1518,7 @@ Do you want to proceed?
         assert_eq!(dialog.options[3].text, "No");
     }
 
-    /// Live capture, 2026-09-04: Antigravity's folder-trust dialog offers two rows and no numbers
-    /// at all, so the "two numbered rows" gate never let it through.
+    /// Folder-trust choices can be unnumbered.
     #[test]
     fn antigravity_trust_dialog_is_a_pending_prompt() {
         let pane = include_str!("fixtures/antigravity_trust_dialog.txt");
@@ -1634,8 +1532,7 @@ Do you want to proceed?
         assert_eq!(dialog.options[0].text, "Yes, I trust this folder");
     }
 
-    /// Live capture, 2026-09-04: an Antigravity window parked at its composer while a background
-    /// shell task keeps ticking in the footer. The task line is not the agent working.
+    /// A background shell task in the footer does not make the agent active.
     #[test]
     fn antigravity_background_task_ticking_is_still_idle() {
         let pane = include_str!("fixtures/antigravity_idle_background_task.txt");
@@ -1645,8 +1542,7 @@ Do you want to proceed?
         assert_eq!(detect_quota_exhausted(pane), None);
     }
 
-    /// Live capture, 2026-09-04: the same window one second after the turn ended. The footer flips
-    /// from "esc to cancel" to "? for shortcuts" and the composer is bare.
+    /// An empty composer with shortcut hints indicates a finished turn.
     #[test]
     fn antigravity_finished_turn_reads_idle() {
         let pane = include_str!("fixtures/antigravity_idle_after_turn.txt");

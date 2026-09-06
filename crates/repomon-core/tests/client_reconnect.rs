@@ -1,9 +1,4 @@
-//! Regression test for the "daemon connection closed" bug.
-//!
-//! The daemon reaps idle client connections after 120s (see `repomon-daemon` socket.rs). A
-//! `DaemonClient` must transparently reconnect on its next `call` instead of failing every
-//! RPC forever once its connection is dropped — the failure that bricked the MCP bridge's
-//! action tools (`read_agent`, `send_to_agent`, …) while subscription-fed reads kept working.
+//! Verifies that a client reconnects on its next RPC after a daemon closes an idle connection.
 
 use std::time::Duration;
 
@@ -51,11 +46,9 @@ async fn call_reconnects_after_daemon_drops_connection() {
 
     let client = DaemonClient::connect(&sock).await.unwrap();
 
-    // First call rides the original connection.
     let r1 = client.call("ping", None).await.expect("first call");
     assert_eq!(r1, json!("pong"));
 
-    // Let the client observe the dropped connection.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The daemon reaped the connection. The client must reconnect transparently. Before the fix
@@ -68,7 +61,7 @@ async fn call_reconnects_after_daemon_drops_connection() {
 }
 
 /// Answer every request by id, and if the request is `subscribe`, also push one
-/// `event.test` notification — standing in for the daemon's per-connection `forwarding` flag
+/// `event.test` notification - standing in for the daemon's per-connection `forwarding` flag
 /// (only connections that sent `subscribe` get events; see `repomon-daemon` socket.rs).
 async fn serve_and_notify_on_subscribe(stream: IpcStream) {
     let (mut rd, mut wr) = tokio::io::split(stream);
@@ -101,7 +94,7 @@ async fn subscribe_survives_reconnect() {
 
     // Mock daemon: connection 1 acks the `subscribe` call (like the real daemon) and is then
     // dropped, simulating the 120s reap. Connection 2 is where the client must replay
-    // `subscribe` on its own — the daemon only forwards events on connections that asked.
+    // `subscribe` on its own - the daemon only forwards events on connections that asked.
     tokio::spawn(async move {
         let s1 = listener.accept().await.unwrap();
         {
@@ -126,7 +119,6 @@ async fn subscribe_survives_reconnect() {
         .await
         .expect("subscribe call");
 
-    // Let the client observe the dropped connection.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Any call triggers a transparent reconnect, which must replay `subscribe` on the new

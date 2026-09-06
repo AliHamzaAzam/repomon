@@ -1,9 +1,5 @@
-//! Writing to the system clipboard, shared by the TUI and the tmux copy binding.
-//!
-//! On Unix the tool is probed rather than `cfg`-gated: one testable selection path covers
-//! pbcopy on macOS, wl-copy/xclip on Linux, and shims wherever they appear. On Windows the
-//! clipboard is reached through Windows PowerShell (`Set-Clipboard`/`Get-Clipboard`); the
-//! argv/script builders are pure and unit-tested on every OS.
+//! Uses available Unix clipboard tools or Windows PowerShell to share clipboard access across
+//! terminal clients.
 
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -30,8 +26,8 @@ fn platform_copy_argv() -> Option<Vec<String>> {
     Some(windows_copy_argv())
 }
 
-/// Preference order: pbcopy (macOS), then the display server's native tool — wl-copy under
-/// Wayland, xclip under X11 — then wl-copy as a last resort (covers Wayland sessions where
+/// Preference order: pbcopy (macOS), then the display server's native tool - wl-copy under
+/// Wayland, xclip under X11 - then wl-copy as a last resort (covers Wayland sessions where
 /// `$WAYLAND_DISPLAY` isn't exported to the daemon).
 #[cfg(any(not(windows), test))]
 fn select_copy_argv(wayland: bool, has: impl Fn(&str) -> bool) -> Option<Vec<String>> {
@@ -96,10 +92,8 @@ pub fn windows_powershell_argv(script: &str) -> Vec<String> {
     .collect()
 }
 
-/// Copy script: read the raw stdin bytes and decode them as UTF-8 in the script itself, so
-/// the console input codepage never touches the text. This is why clip.exe (and a plain
-/// `$input | Set-Clipboard`) are avoided — both run redirected stdin through the OEM
-/// codepage and mangle anything outside it.
+/// Decode stdin bytes explicitly as UTF-8 because console-codepage decoding corrupts characters
+/// outside the OEM set.
 const WINDOWS_COPY_SCRIPT: &str = "$s=[Console]::OpenStandardInput();\
 $m=New-Object System.IO.MemoryStream;$s.CopyTo($m);\
 Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString($m.ToArray()))";

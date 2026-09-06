@@ -1,8 +1,4 @@
-//! Lane diff: what a lane's branch has produced vs the repo's base branch, plus its uncommitted
-//! state. Shells out to `git log`/`git diff`/`git merge-base` — precedent is [`super::worktree`],
-//! which shells out because gix lacks ergonomic coverage for these too. Read-only; used by the
-//! daemon's `lane.diff` RPC to give the orchestrator git visibility before it trusts a worker's
-//! "done" claim.
+//! Reads branch and uncommitted changes through Git’s log, diff, and merge-base commands.
 
 use std::path::Path;
 
@@ -27,17 +23,17 @@ pub struct LaneDiff {
     pub commits: String,
     /// Whether `commits` was cut short of the full log.
     pub commits_truncated: bool,
-    /// `git diff --stat <merge_base>..HEAD` — committed work vs the base branch.
+    /// `git diff --stat <merge_base>..HEAD` - committed work vs the base branch.
     pub committed_stat: String,
-    /// `git diff HEAD --stat` — staged + unstaged changes.
+    /// `git diff HEAD --stat` - staged + unstaged changes.
     pub uncommitted_stat: String,
     /// Count of untracked files (`git ls-files --others --exclude-standard`), computed live
-    /// with the stats above — never a cached scan, so one snapshot is self-consistent.
+    /// with the stats above - never a cached scan, so one snapshot is self-consistent.
     pub untracked: usize,
 }
 
 /// Compute `worktree_path`'s [`LaneDiff`] against `base` (a branch name resolvable from the
-/// worktree — e.g. the repo main checkout's current branch).
+/// worktree - e.g. the repo main checkout's current branch).
 pub fn lane_diff(worktree_path: &Path, base: &str) -> Result<LaneDiff> {
     let merge_base_full = run(worktree_path, &["merge-base", "HEAD", base])
         .map_err(|e| Error::Git(format!("no common ancestor between HEAD and '{base}': {e}")))?
@@ -77,22 +73,19 @@ pub fn lane_diff(worktree_path: &Path, base: &str) -> Result<LaneDiff> {
     })
 }
 
-/// `git diff HEAD` (staged + unstaged) — the actual patch text for `include_patch`. Capping to a
+/// `git diff HEAD` (staged + unstaged) - the actual patch text for `include_patch`. Capping to a
 /// caller-supplied character limit is the caller's responsibility.
 pub fn diff_patch(worktree_path: &Path) -> Result<String> {
     run(worktree_path, &["diff", "HEAD"])
 }
 
-/// One commit's full detail, for the `commit.show` RPC: everything a commit-detail view needs to
-/// render without a second round trip. `patch`/`stat` mirror `LaneDiff`'s equivalent fields
-/// (unified diff text and `git diff --stat` text respectively); capping `patch` to a
-/// caller-supplied character limit is the caller's responsibility, same as `diff_patch` above.
+/// Carries structured commit details and uncapped patch/stat text for caller-side display limits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct CommitShow {
     /// The full 40-char oid, resolved from whatever the caller passed in (which may have been
-    /// abbreviated) — never the caller's own possibly-short string, so a client always has a
+    /// abbreviated) - never the caller's own possibly-short string, so a client always has a
     /// stable, unambiguous id to key off of.
     pub oid: String,
     pub author_name: String,
@@ -104,40 +97,23 @@ pub struct CommitShow {
     pub body: String,
     pub patch: String,
     pub stat: String,
-    /// Always `false` from [`commit_show`] itself — truncation happens one layer up, in the
-    /// `commit.show` RPC handler, the same `cap_chars` server-side cap `lane.diff`'s patch uses.
-    /// Carried as a field here (rather than a separate bool the handler bolts onto a hand-built
-    /// JSON object, as `lane.diff` does) so `CommitShow`'s ts-rs binding is the RPC's actual wire
-    /// shape and the frontend gets a real, always-present `boolean` instead of an optional one.
+    /// Reports server-side patch truncation; commit_show itself leaves this false.
     pub patch_truncated: bool,
 }
 
-/// A field separator that can't plausibly appear in a commit's author name/email/subject —
+/// A field separator that can't plausibly appear in a commit's author name/email/subject -
 /// `git log`/`git show` `--format` output is otherwise plain text, so splitting on this is safe
 /// (unlike, say, a comma or pipe, which real commit metadata could legitimately contain).
 const FIELD_SEP: &str = "\u{1f}";
 
-/// True for a string `git rev-parse` would accept as an abbreviated-or-full hex object id: only
-/// hex digits, no `-` (so a caller-supplied oid can never be mistaken for a git flag — every git
-/// flag starts with `-`, which is never a hex digit), and a length in git's actual abbreviation
-/// range (a `git show`/`rev-parse` short hash is never shorter than 4 hex digits, never longer
-/// than a 40-char sha1 — this crate doesn't yet support sha256 repos).
+/// Accept only 4-40 hexadecimal digits so an object ID cannot be interpreted as a git flag; SHA-256
+/// repositories are unsupported.
 fn looks_like_oid(oid: &str) -> bool {
     (4..=40).contains(&oid.len()) && oid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `git show <oid>`, split into structured fields for the `commit.show` RPC. Shells out via the
-/// same `run()` helper (and the same arg-array-not-shell-string discipline) as every other
-/// function in this module.
-///
-/// `oid` is validated and resolved before anything else runs:
-/// 1. [`looks_like_oid`] rejects anything that isn't plain hex up front — defense in depth against
-///    an oid-shaped argument being misread as a flag, even though arg-array invocation already
-///    makes shell injection impossible.
-/// 2. `git rev-parse --verify <oid>^{commit}` confirms the oid both resolves *within this lane's
-///    repo* and names a commit (not a blob/tree/tag) before any other command runs, and yields the
-///    full oid every other command below then uses — so a short, ambiguous, or otherwise
-///    unverified id is never passed to `git show` directly.
+/// Reads structured commit details after validating a hexadecimal ID and resolving it to a commit
+/// in the lane’s repository.
 pub fn commit_show(worktree_path: &Path, oid: &str) -> Result<CommitShow> {
     if !looks_like_oid(oid) {
         return Err(Error::Git(format!("not a valid commit id: {oid:?}")));
@@ -261,12 +237,10 @@ mod tests {
         let (dir, wt_parent) = repo_with_lane_worktree();
         let wt_path = wt_parent.path().join("feat");
 
-        // One commit ahead of main.
         std::fs::write(wt_path.join("a.txt"), "a\n").unwrap();
         git(&wt_path, &["add", "a.txt"]);
         git(&wt_path, &["commit", "-m", "feat: add a"]);
 
-        // Plus an uncommitted (unstaged) change.
         std::fs::write(wt_path.join("README.md"), "changed\n").unwrap();
 
         let d = lane_diff(&wt_path, "main").unwrap();
@@ -288,7 +262,7 @@ mod tests {
             "uncommitted_stat was: {:?}",
             d.uncommitted_stat
         );
-        assert_eq!(d.untracked, 0); // a tracked-file edit is not an untracked file
+        assert_eq!(d.untracked, 0);
 
         let _ = dir; // keep the main repo tempdir alive for the duration of the test
     }
@@ -308,7 +282,7 @@ mod tests {
         std::fs::write(wt_path.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(wt_path.join("ignored.txt"), "z\n").unwrap();
         let d = lane_diff(&wt_path, "main").unwrap();
-        assert_eq!(d.untracked, 3); // scratch, notes, and the new .gitignore itself
+        assert_eq!(d.untracked, 3);
 
         let _ = dir;
     }
@@ -367,7 +341,7 @@ mod tests {
     fn looks_like_oid_accepts_only_plain_hex_in_gits_abbreviation_range() {
         assert!(looks_like_oid("abc1234"));
         assert!(looks_like_oid("0123456789abcdef0123456789abcdef01234567"));
-        assert!(looks_like_oid("ABC1234")); // git accepts uppercase hex too
+        assert!(looks_like_oid("ABC1234"));
         assert!(!looks_like_oid("abc")); // shorter than git's 4-char floor
         assert!(!looks_like_oid("0123456789abcdef0123456789abcdef012345678")); // one char past a full sha1
         assert!(!looks_like_oid("not-hex-at-all"));
@@ -441,7 +415,6 @@ mod tests {
         let (dir, wt_parent) = repo_with_lane_worktree();
         let wt_path = wt_parent.path().join("feat");
 
-        // Well-formed hex, but no such commit exists in this repo.
         let err = commit_show(&wt_path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap_err();
         assert!(
             err.to_string().contains("does not resolve to a commit"),

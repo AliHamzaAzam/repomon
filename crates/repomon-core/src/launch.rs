@@ -15,10 +15,8 @@ use crate::{Config, client::DaemonClient, config, service};
 /// on-access scanning overhead, while keeping the fast path instantaneous via tiered backoff.
 pub const DEFAULT_DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// How long a freshly spawned daemon is watched for an immediate exit before the caller falls
-/// back to ordinary connect backoff. A daemon that dies inside this window (a missing runtime
-/// DLL, a corrupt database, a port/pipe already owned) is the failure the connection pill used to
-/// render as an endless "Retrying" with nothing to act on.
+/// Watch immediate child exits briefly so startup failures are reported before ordinary connection
+/// backoff.
 pub const BOOT_WATCH_WINDOW: Duration = Duration::from_secs(3);
 
 /// How many trailing lines of the daemon log a boot failure carries to the UI.
@@ -33,12 +31,7 @@ const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 /// ones link the CRT statically, see `.cargo/config.toml`).
 pub const VC_REDIST_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
 
-/// Why a daemon could not be started or reached, in a shape a UI can act on.
-///
-/// The desktop app spawns `repomond` detached and windowless, so a spawn that fails or a daemon
-/// that exits at once produces no console, no dialog, and no clue: the connection pill just says
-/// "Retrying" forever. Each variant carries what the user needs to get unstuck, and [`Self::hint`]
-/// turns the two failures nobody can be expected to diagnose into one actionable line.
+/// Describes an actionable failure to start or reach a detached daemon.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonLaunchError {
     /// The resolved `repomond` path does not exist. A broken or partial install.
@@ -109,10 +102,7 @@ impl DaemonLaunchError {
     }
 }
 
-/// Recognise a launch failure whose cause is invisible from the message alone, and return the fix.
-///
-/// Pure string matching on purpose: the two shapes below only ever occur on Windows, and a
-/// diagnostic nobody can run on the other two platforms is a diagnostic nobody maintains.
+/// Recognizes actionable startup failures from their diagnostic text.
 pub fn launch_hint(detail: &str) -> Option<String> {
     let lowered = detail.to_lowercase();
     // 0xC0000135 STATUS_DLL_NOT_FOUND: a dependency of the image is not on the loader's search
@@ -158,9 +148,8 @@ pub fn connect_hint(endpoint: &str, detail: &str) -> Option<String> {
     None
 }
 
-/// The last `lines` lines of `path`, or an empty string when there is nothing to read. Only the
-/// trailing [`LOG_TAIL_MAX_BYTES`] are touched, so an old install's multi-megabyte log costs the
-/// same as a fresh one's.
+/// Reads the requested trailing log lines within LOG_TAIL_MAX_BYTES, returning an empty string when
+/// nothing is readable.
 pub fn log_tail(path: &Path, lines: usize) -> String {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -215,12 +204,8 @@ pub fn endpoint_label(socket: &Path) -> String {
     }
 }
 
-/// Connect to a running daemon, or start a detached `repomond` and connect to that.
-///
-/// Returns `Err` if no daemon is running and `repomond` cannot be launched. A caller that embeds
-/// the daemon may use the error as its signal to start the in-process fallback. The error is
-/// typed rather than opaque so a GUI can render the cause and offer the fix; `?` still converts
-/// it into an `anyhow::Error` for the CLI callers that only print it.
+/// Connects to a running daemon or launches one, returning a typed failure that an embedding caller
+/// can use to select its fallback.
 pub async fn ensure_daemon(
     config: &Config,
     socket_override: Option<PathBuf>,
@@ -240,12 +225,8 @@ pub async fn ensure_daemon(
         })
 }
 
-/// Spawn the daemon and watch it for `window`: return as soon as the endpoint answers, and fail
-/// the moment the child exits instead of leaving the caller to time out against a dead process.
-///
-/// Staying alive past `window` without binding yet is *not* an error. Cold VM boots, first-run
-/// SQLite migrations, and Defender scans all push the first successful connect well past three
-/// seconds, so the caller's own backoff takes it from here.
+/// Watches a new daemon until it answers or exits, allowing a still-live child to continue booting
+/// beyond the observation window.
 pub async fn spawn_and_watch_boot(
     socket: &Path,
     window: Duration,
@@ -294,10 +275,8 @@ async fn watch_boot(
     }
 }
 
-/// Launch `repomond` as a detached background process and send its output to the daemon log.
-///
-/// The returned [`Child`] is only for observing an immediate exit (see [`spawn_and_watch_boot`]);
-/// dropping it does not stop the daemon, which is the point of launching it detached.
+/// Launches a detached daemon with log redirection, returning a child handle whose drop does not
+/// terminate it.
 pub fn spawn_daemon(socket: &Path) -> std::result::Result<Child, DaemonLaunchError> {
     use std::process::{Command, Stdio};
 
@@ -363,13 +342,7 @@ fn append_daemon_log(msg: &str) {
     }
 }
 
-/// Connect to the daemon, retrying with tiered backoff up to `timeout`.
-///
-/// Tiered schedule:
-/// - Tier 1 (0s - 2s): 40ms interval (fast path for warm daemon/local launch)
-/// - Tier 2 (2s - 6s): 100ms interval
-/// - Tier 3 (6s - 12s): 250ms interval (cold VM start, SQLite schema migrations)
-/// - Tier 4 (12s+): 500ms interval (heavy load, VM disk I/O, Defender scanning)
+/// Retries daemon connections with tiered backoff until the timeout.
 pub async fn connect_with_backoff(socket: &Path, timeout: Duration) -> Result<DaemonClient> {
     let start = Instant::now();
     let mut attempt = 0usize;
@@ -401,7 +374,6 @@ pub async fn connect_with_backoff(socket: &Path, timeout: Duration) -> Result<Da
                 let elapsed = start.elapsed();
                 let is_timeout = elapsed >= timeout;
 
-                // Determine tier and delay based on elapsed time
                 let (tier, delay) = if elapsed < Duration::from_secs(2) {
                     (1, Duration::from_millis(40))
                 } else if elapsed < Duration::from_secs(6) {
@@ -472,10 +444,8 @@ pub async fn connect_with_backoff(socket: &Path, timeout: Duration) -> Result<Da
     ))
 }
 
-/// Connect to the daemon, retrying a specified number of times with 40ms interval.
-///
-/// Kept for callers / test harnesses that specify a discrete try count; callers wishing for
-/// cold-start / VM resilience should prefer [`connect_with_backoff`].
+/// Retries a fixed number of connections at 40 ms intervals, with connect_with_backoff preferred
+/// for cold starts.
 pub async fn connect_with_retry(socket: &Path, tries: usize) -> Result<DaemonClient> {
     let start = Instant::now();
     let mut last = None;

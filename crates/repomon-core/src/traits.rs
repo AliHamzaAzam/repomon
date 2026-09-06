@@ -1,8 +1,4 @@
-//! Dyn-compatible async traits the daemon implements and clients call via JSON-RPC.
-//!
-//! Concrete implementations live alongside their data ([`Registry`], [`Lanes`]); these
-//! traits exist so future consumers (a SwiftUI shell, a CLI helper) can depend on the
-//! abstraction rather than the concrete types.
+//! Defines dyn-compatible async interfaces for daemon operations exposed through JSON-RPC.
 
 use std::path::{Path, PathBuf};
 

@@ -1,14 +1,5 @@
-//! Claude Code session monitor.
-//!
-//! Claude Code records each session as a JSONL transcript under
-//! `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, where the directory name is the
-//! working directory with `/` and `.` replaced by `-`. That encoding has changed before, so
-//! it's isolated in [`encode_project_dir`] and covered by a fixture test; matching also
-//! falls back to reading each transcript's recorded `cwd`.
-//!
-//! From the transcript we derive: tool-call count, last activity, a title, and the
-//! all-important status — **Waiting** (the agent finished its turn and needs you) vs
-//! **Running** (mid tool-loop) vs **Idle** (gone quiet).
+//! Reads Claude transcripts to derive session activity and turn status. Project-directory encoding
+//! is lossy, so discovery also checks the recorded working directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,16 +24,16 @@ pub struct TranscriptSummary {
     pub tool_call_count: u32,
     pub status: AgentStatus,
     pub title: Option<String>,
-    /// The agent's most recent message text — what it said (or asked) when it last ended a
+    /// The agent's most recent message text - what it said (or asked) when it last ended a
     /// turn. This is the "why" behind a needs-you notification.
     pub last_message: Option<String>,
     /// The Claude config dir this session belongs to, when it isn't the default `~/.claude`
     /// (e.g. a work account run with `CLAUDE_CONFIG_DIR=~/.claude-work`). Drives adopt.
     pub config_dir: Option<PathBuf>,
-    /// The session id (transcript filename stem) — lets adopt resume *this* exact session
+    /// The session id (transcript filename stem) - lets adopt resume *this* exact session
     /// (`claude --resume <id>`) when several run in one worktree.
     pub session_id: Option<String>,
-    /// Whether the last entry is the agent speaking with no tool call — it finished its turn.
+    /// Whether the last entry is the agent speaking with no tool call - it finished its turn.
     /// Unlike `status` (whose `Waiting` decays to `Idle` after [`IDLE_AFTER`]), this fact
     /// survives the decay: the stall detector needs "did it end its turn?" long after 10 min.
     pub ended_turn: bool,
@@ -79,7 +70,7 @@ impl TranscriptSummary {
             ended_turn: self.ended_turn,
             gate: None,
             config_dir: self.config_dir,
-            custom_label: None, // overlay sets this from the session_labels store
+            custom_label: None,
             generated_label: None, // overlay sets this from the session_generated_labels store
         }
     }
@@ -104,16 +95,11 @@ pub fn default_config_base() -> PathBuf {
     home().join(".claude")
 }
 
-/// All Claude config dirs to consider: the default `~/.claude`, any `~/.claude-*` that holds a
-/// `projects/` dir (e.g. a separate work account run with `CLAUDE_CONFIG_DIR=~/.claude-work`),
-/// and an explicit `$CLAUDE_CONFIG_DIR` if set. Each contains a `projects/` subdir.
-///
-/// Cached with a short TTL: this is called per-lane on every `lane.list`, and the underlying
-/// `read_dir($HOME)` is the dominant cost there. The set of config dirs changes ~never, so a
-/// process-global cache (re-scanned every ~45 s) turns ~10 `$HOME` scans per refresh into ~0.
+/// Returns the default, variant, and explicitly configured Claude config directories, cached
+/// briefly to avoid scanning the home directory on every lane refresh.
 pub fn config_bases() -> Vec<PathBuf> {
     use std::time::{Duration, Instant};
-    // Tests mutate env / home and expect immediate results — never cache there.
+    // Tests mutate env / home and expect immediate results - never cache there.
     if cfg!(test) {
         return config_bases_uncached();
     }
@@ -159,21 +145,8 @@ fn config_bases_uncached() -> Vec<PathBuf> {
     bases
 }
 
-/// The launch command for the Claude account rooted at `base`, immune to a leaked
-/// `CLAUDE_CONFIG_DIR` in the daemon's own environment (the daemon is commonly started from a
-/// `claude-work` shell, so it may carry `CLAUDE_CONFIG_DIR=~/.claude-work`; a bare `claude` would
-/// silently inherit that, making "claude-code" and "claude-work" launch the *same* account).
-///
-/// - **Default account (`~/.claude`):** `env -u CLAUDE_CONFIG_DIR claude` — *unset* the variable.
-///   Claude Code reads the default profile from `~/.claude.json` (HOME) **only when the variable
-///   is unset**; `CLAUDE_CONFIG_DIR=~/.claude` instead points at the vestigial
-///   `~/.claude/.claude.json` stub (no account → onboarding), so we must strip the var, not pin it.
-/// - **Variant account:** `CLAUDE_CONFIG_DIR=<dir> claude` — pin it explicitly (shell-quoted, since
-///   this runs via `sh -c` from tmux `new-window`).
-///
-/// Account identity is unchanged: `account_key`/`account_label` stay keyed on the `config_dir`
-/// option, `command_account` reads the default (no `CLAUDE_CONFIG_DIR=`) back as `None`, and
-/// `program_of` sees through the `env -u …` prefix to the `claude` program.
+/// Builds an account-specific launch command, unsetting inherited `CLAUDE_CONFIG_DIR` for the
+/// default account because explicitly setting `~/.claude` selects a different profile location.
 pub fn launch_command(base: &Path) -> String {
     if canonical(base) == canonical(&default_config_base()) {
         "env -u CLAUDE_CONFIG_DIR claude".to_string()
@@ -185,10 +158,8 @@ pub fn launch_command(base: &Path) -> String {
     }
 }
 
-/// Spawnable Claude agents, one per detected config dir: `(name, launch command)`. The default
-/// account is `("claude-code", "env -u CLAUDE_CONFIG_DIR claude")`; a `~/.claude-work` dir becomes
-/// `("claude-work", "CLAUDE_CONFIG_DIR=/…/.claude-work claude")`. Each command is immune to a
-/// daemon's own leaked `CLAUDE_CONFIG_DIR` (see [`launch_command`]).
+/// Lists detected Claude accounts with launch commands insulated from inherited account
+/// configuration.
 pub fn agent_variants() -> Vec<(String, String)> {
     let default = default_config_base();
     config_bases()
@@ -207,10 +178,7 @@ pub fn agent_variants() -> Vec<(String, String)> {
         .collect()
 }
 
-/// A stable key for a Claude account, identifying it by its config dir. The default account
-/// (`~/.claude`, carried as `config_dir: None`) is `"default"`; a variant is its dir path. The
-/// usage probe stores per-account usage under this key and a client matches the focused agent's
-/// `AgentSession::config_dir` to it.
+/// Identifies a Claude account by its config-directory path, using default when no variant is set.
 pub fn account_key(config_dir: Option<&Path>) -> String {
     config_dir
         .map(|p| p.display().to_string())
@@ -235,10 +203,8 @@ pub fn account_label(config_dir: Option<&Path>) -> String {
     }
 }
 
-/// Encode a working directory to Claude Code's project directory name.
-///
-/// Windows paths encode their separators too: `C:\Users\me\code` becomes
-/// `C--Users-me-code` (the drive colon and each backslash map to `-`, same as `/`).
+/// Encodes a working directory into Claude’s project-directory name, replacing separators, dots,
+/// and Windows drive colons with dashes.
 pub fn encode_project_dir(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .chars()
@@ -267,11 +233,8 @@ pub fn newest_transcript_in(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// How a cached entry is invalidated and aged.
-///
-/// `key` is `(mtime, len)`: mtime alone misses a same-second append (the file grows but the
-/// coarse-resolution mtime doesn't move), so the byte length is folded in to catch that case.
-/// `seq` is a monotonic access stamp used for LRU-ish eviction once the map is full.
+/// The mtime and byte length jointly detect same-timestamp appends; the sequence stamp bounds the
+/// cache through approximate LRU eviction.
 #[derive(Clone)]
 struct CacheEntry {
     key: (SystemTime, u64),
@@ -293,18 +256,12 @@ fn cache_seq() -> u64 {
 }
 
 /// The cache's soft capacity. Past this we evict the least-recently-used entry on each insert
-/// rather than clearing everything — so a fleet with more than this many transcripts doesn't
+/// rather than clearing everything - so a fleet with more than this many transcripts doesn't
 /// re-parse the whole set on every refresh.
 const CACHE_CAP: usize = 1024;
 
-/// Parse a transcript into a summary, memoised by file mtime+length.
-///
-/// `summary_for`/`summaries_for` call this on every fleet refresh (~1/s in live views). Without
-/// the memo, an idle-but-recent session's whole JSONL is re-read and re-parsed each time. The
-/// cache is keyed by path and invalidated when the file's mtime *or* length changes — length is
-/// folded in because a same-second append grows the file without moving the coarse-resolution
-/// mtime, which would otherwise serve a stale summary — so it stays correct while making repeated
-/// refreshes of unchanged transcripts nearly free.
+/// Parses a transcript, caching by path, mtime, and length so same-timestamp appends invalidate the
+/// summary.
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     let key = std::fs::metadata(path)
         .ok()
@@ -313,12 +270,10 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
         if let Ok(mut c) = cache().lock() {
             if let Some(entry) = c.get_mut(path) {
                 if entry.key == key {
-                    entry.seq = cache_seq(); // touch: mark as recently used for LRU
+                    entry.seq = cache_seq();
                     let mut s = entry.summary.clone();
-                    // `status` is the one *time*-derived field: a transcript that stops changing
-                    // still decays to Idle after IDLE_AFTER even though its mtime — our cache key
-                    // — never moves again. The content-derived Waiting/Running stays valid while
-                    // the file is unchanged, so only the idle transition needs re-applying here.
+                    // Reapply time-based idle decay even when unchanged transcript metadata keeps
+                    // the cached content valid.
                     if Utc::now() - s.last_activity > IDLE_AFTER {
                         s.status = AgentStatus::Idle;
                     }
@@ -331,7 +286,7 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     if let Some(key) = key {
         if let Ok(mut c) = cache().lock() {
             // Bound memory: transcript paths accumulate as sessions end. Past the cap, evict the
-            // single least-recently-used entry rather than clearing the whole map — a full clear
+            // single least-recently-used entry rather than clearing the whole map - a full clear
             // makes a fleet of >CACHE_CAP transcripts re-parse everything on every refresh.
             if c.len() >= CACHE_CAP && !c.contains_key(path) {
                 if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.seq).map(|(p, _)| p.clone()) {
@@ -351,13 +306,11 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     Some(summary)
 }
 
-/// Parse a transcript into a summary (uncached — see [`parse_transcript`]).
+/// Parse a transcript into a summary (uncached - see [`parse_transcript`]).
 fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let text = std::fs::read_to_string(path).ok()?;
-    // File mtime is only a fallback anchor: Claude bumps it by rewriting the transcript's trailer
-    // metadata (pr-link, ai-title, …) without adding a message, so mtime alone would read a frozen
-    // agent as freshly active and re-fire its stale "needs you" alert. Prefer the latest real
-    // message timestamp (tracked below), falling back to mtime when no entry carries one.
+    // Prefer message timestamps because metadata-only rewrites advance file mtime without real
+    // agent activity.
     let mtime: DateTime<Utc> = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .map(DateTime::<Utc>::from)
@@ -382,7 +335,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
             }
         }
         let entry_type = v.get("type").and_then(Value::as_str);
-        // Count only real conversation turns as activity — not the untimestamped trailer
+        // Count only real conversation turns as activity - not the untimestamped trailer
         // (last-prompt/ai-title/…) or a pr-link refresh, which bump mtime without new work.
         if matches!(entry_type, Some("assistant") | Some("user")) {
             if let Some(ts) = v
@@ -425,7 +378,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
             }
             Some("user") => {
                 last_type = Some("user");
-                // Title from the first *real* prompt — skip Claude Code's injected scaffolding
+                // Title from the first *real* prompt - skip Claude Code's injected scaffolding
                 // (the local-command caveat, slash-command invocations, local-command stdout),
                 // which would otherwise show up as "<local-command-caveat>Caveat: …".
                 if title.is_none() {
@@ -450,7 +403,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
     let status = if Utc::now() - last_activity > IDLE_AFTER {
         AgentStatus::Idle
     } else if last_type == Some("assistant") && !last_assistant_has_tool {
-        // The agent spoke and issued no tool call — it's waiting on you.
+        // The agent spoke and issued no tool call - it's waiting on you.
         AgentStatus::Waiting
     } else {
         AgentStatus::Running
@@ -476,7 +429,6 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
 
 /// Find and summarize the Claude session for `cwd` under `root`.
 pub fn summary_for_root(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
-    // Primary: the encoded project directory.
     let encoded = root.join(encode_project_dir(cwd));
     if encoded.is_dir() {
         if let Some(t) = newest_transcript_in(&encoded) {
@@ -485,14 +437,12 @@ pub fn summary_for_root(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
             }
         }
     }
-    // Fallback (encoding drift): scan every project dir and match the recorded cwd.
+
     rescan_by_cwd(root, cwd)
 }
 
-/// Encoding-drift fallback: scan every project dir under `root` and return the newest transcript
-/// whose recorded `cwd` matches `cwd`. The path→dir encoding isn't injective and Claude has
-/// changed it before, so a session can land in a dir name we don't predict; this finds it by the
-/// ground-truth `cwd` recorded inside the transcript. Returns `None` if nothing matches.
+/// Scan recorded working directories when the lossy encoded path lookup cannot identify the
+/// session.
 fn rescan_by_cwd(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
     let want = canonical(cwd);
     let mut best: Option<TranscriptSummary> = None;
@@ -517,12 +467,8 @@ fn rescan_by_cwd(root: &Path, cwd: &Path) -> Option<TranscriptSummary> {
     best
 }
 
-/// Summarize the Claude session for `cwd` — the hot path, used per-lane on every refresh.
-///
-/// The encoded project directory is consulted first (an O(1) lookup). If that dir is
-/// absent/empty — the path→dir encoding isn't injective and Claude has changed it before, so a
-/// live session can land in a dir name we don't predict — we fall back to the same recorded-cwd
-/// rescan [`summary_for_root`] uses, rather than silently dropping the agent from the fleet.
+/// Summarizes the Claude session for `cwd`, falling back to recorded working directories when the
+/// lossy encoded directory lookup finds no transcript.
 pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     let encoded = encode_project_dir(cwd);
 
@@ -533,11 +479,11 @@ pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
         if let Some(s) = newest_transcript_in(&dir).and_then(|t| parse_transcript(&t)) {
             return Some(s);
         }
-        // Encoding drift: the encoded dir is absent/empty — match by recorded cwd instead.
+        // Encoding drift: the encoded dir is absent/empty - match by recorded cwd instead.
         return rescan_by_cwd(&root, cwd);
     }
 
-    // Scan every config dir's encoded project subdir (usually 1-2), keeping the most recent —
+    // Scan every config dir's encoded project subdir (usually 1-2), keeping the most recent -
     // so a work-account session in `~/.claude-work` is detected alongside the default account.
     let default = default_config_base();
     let mut best: Option<TranscriptSummary> = None;
@@ -563,10 +509,8 @@ pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     best
 }
 
-/// Summarize *every* recently-active Claude session for `cwd` — one per transcript — across
-/// all config dirs, newest first, capped at `max`. This is what lets repomon show several
-/// concurrent agents in one worktree (each is a distinct `<session-id>.jsonl`) rather than
-/// only the newest. "Recently active" means the transcript changed within `within`.
+/// Returns recent Claude summaries across config directories newest-first, capped at max and
+/// filtered by transcript modification age.
 pub fn summaries_for(cwd: &Path, within: Duration, max: usize) -> Vec<TranscriptSummary> {
     let encoded = encode_project_dir(cwd);
     let cutoff = Utc::now() - within;
@@ -651,13 +595,7 @@ pub fn transcript_path_for_session(cwd: &Path, session_id: &str) -> Option<PathB
     transcript_location(cwd, session_id).map(|(path, _)| path)
 }
 
-/// Locate one specific Claude session's transcript by id — the direct-lookup counterpart to
-/// [`summaries_for`]'s "newest with content" scan. A caller that already knows exactly which
-/// session it wants (e.g. the repomind orchestrator, whose `claude` was launched with
-/// `--session-id <id>`) can look the file up straight off its known path
-/// (`<config-base>/projects/<encoded-cwd>/<session-id>.jsonl`) instead of scanning and ranking by
-/// recency — so it is never misattributed to some *other* active Claude session on the machine,
-/// however much more recently that one happened to touch its own transcript.
+/// Looks up a specific session by ID without substituting a more recently active session.
 pub fn transcript_for_session(cwd: &Path, session_id: &str) -> Option<TranscriptSummary> {
     let (path, config_dir) = transcript_location(cwd, session_id)?;
     let mut summary = parse_transcript(&path)?;
@@ -678,7 +616,7 @@ fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Whether a user message is Claude Code's injected scaffolding rather than a real prompt — the
+/// Whether a user message is Claude Code's injected scaffolding rather than a real prompt - the
 /// local-command caveat, a slash-command invocation, or local-command stdout. Such messages must
 /// not become the session title/summary.
 fn is_synthetic_user_text(t: &str) -> bool {
@@ -717,7 +655,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// How much of a transcript's tail to read for the chat view — bounds the cost of polling a
+/// How much of a transcript's tail to read for the chat view - bounds the cost of polling a
 /// long session (this file can be many MB).
 const TAIL_BYTES: u64 = 512 * 1024;
 /// Cap per-item text so payloads stay bounded (full messages, not titles).
@@ -818,7 +756,7 @@ fn transcript_items<'a>(
                 }
             }
             Some("user") => {
-                // Real user text only — tool_result carriers return None here.
+                // Real user text only - tool_result carriers return None here.
                 if let Some(t) = user_text(&v) {
                     let t = t.trim().to_string();
                     if !t.is_empty() {
@@ -838,10 +776,8 @@ fn transcript_items<'a>(
     items
 }
 
-/// The last `max_items` conversation items from a transcript: user/assistant messages with
-/// their full unwrapped text, tool calls between messages aggregated into one "tools" item
-/// ("Bash ×2 · Edit"). The mobile client renders these natively instead of a desktop-width
-/// pane capture. Only the file tail is read.
+/// Reads the final conversation items from a transcript tail, preserving message text and
+/// aggregating intervening tool calls.
 pub fn transcript_tail(path: &Path, max_items: usize) -> Vec<crate::model::TranscriptItem> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -943,12 +879,8 @@ mod tests {
 
     #[test]
     fn default_variant_unsets_config_dir_against_env_leak() {
-        // The daemon is commonly launched from a `claude-work` shell, so its own environment may
-        // carry `CLAUDE_CONFIG_DIR=~/.claude-work`. A bare `claude` for the default account would
-        // inherit that and resolve to the wrong account (making "claude-code" and "claude-work"
-        // spawn the *same* account). The default account must UNSET the variable — not pin it to
-        // `~/.claude`, which reads the vestigial `~/.claude/.claude.json` stub (no account →
-        // onboarding) instead of the real default profile at `~/.claude.json`.
+        // The default profile requires an unset CLAUDE_CONFIG_DIR; setting ~/.claude selects a
+        // different profile file.
         let variants = agent_variants();
         let (_, cmd) = variants
             .iter()
@@ -975,7 +907,7 @@ mod tests {
             encode_project_dir(Path::new("/Users/azaleas/Developer/Claude/repomon")),
             "-Users-azaleas-Developer-Claude-repomon"
         );
-        // Dots become dashes too.
+
         assert_eq!(
             encode_project_dir(Path::new("/Users/x/.config/app")),
             "-Users-x--config-app"
@@ -1001,7 +933,6 @@ mod tests {
         let line = r#"{"type":"user","cwd":"/code/x","message":{"content":"hello"}}"#;
         let path = write_transcript(root.path(), "sess.jsonl", &[line]);
 
-        // First parse populates the cache.
         let s1 = parse_transcript(&path).expect("parses");
 
         // Poison the cached summary, then parse again with the file unchanged: a cache hit must
@@ -1043,7 +974,7 @@ mod tests {
         );
 
         // Backdate the cached summary's last_activity past IDLE_AFTER *without* touching the file
-        // (so its mtime — our cache key — is unchanged). The next call is a cache hit that must
+        // (so its mtime - our cache key - is unchanged). The next call is a cache hit that must
         // still report Idle: status decays by the clock, not by a file change.
         {
             let mut c = cache().lock().unwrap();
@@ -1070,7 +1001,7 @@ mod tests {
     #[test]
     fn title_skips_local_command_scaffolding() {
         // The first user message is Claude Code's injected caveat; the title must be the next,
-        // real prompt — not "<local-command-caveat>Caveat: …".
+        // real prompt - not "<local-command-caveat>Caveat: …".
         let root = tempfile::tempdir().unwrap();
         let caveat = r#"{"type":"user","message":{"content":"<local-command-caveat>Caveat: generated while running local commands"}}"#;
         let real = r#"{"type":"user","message":{"content":"Refactor the parser to stream"}}"#;
@@ -1118,7 +1049,7 @@ mod tests {
         let dir = root.path().join(encode_project_dir(cwd));
         let line = r#"{"type":"user","cwd":"/code/pinned","message":{"content":"hi"}}"#;
         // Write the "pinned" session first (older mtime), then an unrelated one that touches its
-        // transcript later (newer mtime) — the scenario that misattributes under a
+        // transcript later (newer mtime) - the scenario that misattributes under a
         // newest-transcript heuristic but must not under a direct id lookup.
         write_transcript(&dir, "pinned-session-id.jsonl", &[line]);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1171,10 +1102,7 @@ mod tests {
 
     #[test]
     fn stale_message_decays_to_idle_despite_fresh_mtime() {
-        // Claude rewrites a transcript's trailer metadata (pr-link, ai-title, …) without adding a
-        // message, bumping the file's mtime. last_activity must anchor on the last real message
-        // timestamp (long ago) so the agent reads Idle — not Waiting off the fresh mtime, which is
-        // what made the notify engine re-fire the same stale "needs you" alert hourly.
+        // Metadata rewrites must not make an old message look freshly active.
         let dir = tempfile::tempdir().unwrap();
         let lines = [
             r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
@@ -1197,7 +1125,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-06-12T10:00:00Z","message":{"content":"add tests"}}"#,
             // Text before tools within one entry keeps its position.
             r#"{"type":"assistant","timestamp":"2026-06-12T10:00:05Z","message":{"content":[{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash"}]}}"#,
-            // Tool-result carrier — not a user message.
+            // Tool-result carrier - not a user message.
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             r#"{"type":"assistant","timestamp":"2026-06-12T10:00:10Z","message":{"content":[{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Edit"}]}}"#,
             r#"{"type":"assistant","timestamp":"2026-06-12T10:01:00Z","message":{"content":[{"type":"text","text":"Done — tests pass."}]}}"#,
@@ -1223,12 +1151,10 @@ mod tests {
             "tools item carries the last tool's timestamp"
         );
 
-        // The limit keeps the newest items.
         let last_two = transcript_tail(&path, 2);
         assert_eq!(last_two.len(), 2);
         assert_eq!(last_two[1].text, "Done — tests pass.");
 
-        // Missing file → empty, not an error.
         assert!(transcript_tail(&dir.path().join("nope.jsonl"), 10).is_empty());
     }
 
@@ -1307,7 +1233,6 @@ mod tests {
             format!(
                 r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
             ),
-            // A later tool-only turn must not erase the question text.
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#
                 .to_string(),
         ];
@@ -1315,7 +1240,7 @@ mod tests {
         let path = write_transcript(dir.path(), "s.jsonl", &refs);
         let s = parse_transcript(&path).unwrap();
         let msg = s.last_message.unwrap();
-        assert_eq!(msg.chars().count(), 201); // 200 kept + ellipsis
+        assert_eq!(msg.chars().count(), 201);
         assert!(msg.starts_with("xxx") && msg.ends_with('…'));
     }
 
@@ -1335,7 +1260,7 @@ mod tests {
     #[test]
     fn ended_turn_survives_the_idle_decay() {
         // The stall detector must distinguish "Idle because the turn ended long ago" (fine)
-        // from "Idle because it froze mid-work" (stale) — `status` alone can't, since both
+        // from "Idle because it froze mid-work" (stale) - `status` alone can't, since both
         // decay to Idle after IDLE_AFTER. `ended_turn` carries the fact through the decay.
         let dir = tempfile::tempdir().unwrap();
 
@@ -1357,7 +1282,6 @@ mod tests {
         assert_eq!(s.status, AgentStatus::Idle);
         assert!(!s.ended_turn, "frozen mid-tool is not a finished turn");
 
-        // And a FRESH finished turn reads Waiting + ended_turn.
         let fresh = [
             r#"{"type":"user","message":{"content":"go"}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,

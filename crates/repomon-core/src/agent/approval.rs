@@ -1,10 +1,5 @@
-//! Approval-policy memory primitives: extract a learnable command pattern from a permission
-//! dialog, and the hardcoded always-escalate sniffer that no learned rule can override.
-//!
-//! Only **Bash** permission dialogs learn patterns — an Edit/Write dialog is file-specific and
-//! generalizing it would approve edits to arbitrary files. The pattern is deliberately coarse
-//! (first two command tokens): "cargo test -p foo" and "cargo test --workspace" are the same
-//! human intent, while "cargo publish" is not.
+//! Learns coarse command patterns from Bash permission dialogs while keeping hardcoded escalation
+//! rules authoritative. File-edit permissions cannot generalize safely across paths.
 
 use super::prompt::PendingDialog;
 

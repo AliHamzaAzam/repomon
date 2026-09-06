@@ -1,9 +1,5 @@
-//! Read-only Antigravity conversation monitor.
-//!
-//! Antigravity 1.1.12 maintains a documented cwd-to-conversation mapping in
-//! `last_conversations.json`. Its transcript databases contain protobuf payloads whose status
-//! contract is not stable, so repomon uses the mapping only for identity and activity. Managed
-//! windows supply the stronger live and attention signals.
+//! Reads Antigravity’s cwd-to-conversation mapping for identity and activity, using managed panes
+//! for live status because transcript payloads lack a stable status contract.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

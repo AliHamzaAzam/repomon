@@ -1,29 +1,6 @@
-//! Readers that turn an agent's on-disk record of a turn into ledger events.
-//!
-//! Every reader is a pure function over one source file: it takes a byte (or timestamp) offset,
-//! returns the events at or after it, and returns the offset to resume from. Nothing here writes,
-//! and nothing here reaches for the fleet: attribution to a repo and a lane happens afterwards,
-//! in [`super::FleetIndex`], so the readers stay testable against fixture files alone.
-//!
-//! Record shapes, as found on disk:
-//!
-//! - **Claude Code**: `<base>/projects/<encoded cwd>/<session>.jsonl`, one JSON object per line.
-//!   A `type: "assistant"` line carries `message.model` and `message.usage` with
-//!   `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`
-//!   and `output_tokens_details.thinking_tokens`. `input_tokens` excludes the cached tokens.
-//!   Turns whose model is `<synthetic>` are API errors the CLI injected, not billable work.
-//! - **Codex**: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. A `session_meta` header carries
-//!   the session id and cwd; each `turn_context` sets the model for the turns that follow; an
-//!   `event_msg` of type `token_count` carries `info.last_token_usage` (the delta for the turn
-//!   just finished) beside `info.total_token_usage` (the running total). `input_tokens` there
-//!   *includes* `cached_input_tokens`, so the reader subtracts to keep the two apart.
-//! - **Antigravity**: `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`.
-//!   The conversation store is protobuf and carries no token counts anywhere, so this reader
-//!   estimates from content length at [`CHARS_PER_TOKEN`] characters per token and marks every
-//!   row estimated.
-//! - **OpenCode**: `~/.local/share/opencode/opencode.db`, read-only. An assistant row's `data`
-//!   JSON carries `modelID`, `path.cwd` and `tokens` with `input`, `output`, `reasoning` and
-//!   `cache.{read,write}`; `input` there excludes the cached tokens.
+//! Reads usage without mutating provider files: Claude and OpenCode cache counters are separate
+//! from input, while Codex cache input must be subtracted; Antigravity estimates remain marked and
+//! attribution is resolved separately.
 
 use std::path::Path;
 
@@ -139,13 +116,8 @@ where
 /// Where a Claude Code subagent's transcripts live, one directory below the session file.
 const SUBAGENTS_DIR: &str = "subagents";
 
-/// One assistant message, gathered from the several lines that carry it.
-///
-/// Claude Code writes one line per content block, so a message with a thinking block and two tool
-/// calls is three lines sharing `message.id` and `requestId`, each repeating the whole `usage`
-/// object. Only the last line's counts are final, so the group keeps the elementwise maximum:
-/// equal to the last line in practice, and never below it if the CLI ever writes them out of
-/// order.
+/// Claude repeats whole-message usage on each content block; elementwise maxima avoid double
+/// counting and tolerate out-of-order blocks.
 struct MessageGroup {
     first_offset: i64,
     at: Option<DateTime<Utc>>,
@@ -158,19 +130,8 @@ struct MessageGroup {
     synthetic: bool,
 }
 
-/// Read a Claude Code transcript from `from_offset`. `account` is the account key the transcript
-/// root belongs to, or `None` for the default account.
-///
-/// Two shapes of file reach this reader. A session transcript sits at `<project>/<session>.jsonl`.
-/// A subagent transcript sits at `<project>/<session>/subagents/agent-<id>.jsonl`, and its turns
-/// belong to the session directory above it: the events are marked `subagent`, and the digest
-/// carries the subagent's counters but neither its headline nor its own prompt, so a subagent's
-/// task can never replace the session's.
-///
-/// A message is only counted as a turn once a later line settles it. The final assistant message
-/// of a file may still gain blocks, so its event is emitted (its tokens are real) while the read
-/// resumes at that message's first line, and the same event is written again with the final
-/// counts once the rest of it lands.
+/// Reads Claude usage from an offset, attributing subagents to their parent without replacing its
+/// headline and replaying the unsettled final message until its counts stabilize.
 pub fn scan_claude_transcript(
     path: &Path,
     from_offset: u64,
@@ -379,15 +340,8 @@ pub fn scan_claude_transcript(
     })
 }
 
-/// Read a Codex rollout from `from_offset`.
-///
-/// A `token_count` event can arrive before the session's first `turn_context` (Codex logs the
-/// running total before it logs which model produced it), or a rare `turn_context` can omit its
-/// `model` field. Either way that row's model would come out empty, so any `token_count` seen
-/// before a model is known is queued in `pending_model_backfill` and rewritten to the first model
-/// this scan finds once one turns up. If none ever does, the `session_meta` model (when the
-/// payload carries one) or [`UNKNOWN_MODEL`] stands in, so an event never lands with an empty
-/// model.
+/// Reads Codex usage from an offset, backfilling early events with the first observed model or a
+/// metadata/unknown fallback so model IDs are never empty.
 pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
     let mut events: Vec<ScannedEvent> = Vec::new();
@@ -744,12 +698,8 @@ const INJECTED_TAGS: &[&str] = &[
     "agent-message",
 ];
 
-/// Plain-text preambles a CLI's own review or approval machinery writes ahead of a quoted
-/// transcript when repomon resumes or supervises a worker: Codex's retry/approval judge call is
-/// the one seen in practice. These carry no XML-style closing tag, so each is paired with the
-/// marker lines that can close its block; the block runs from the opening sentence to whichever
-/// marker appears first, or to the end of the text when the CLI's transcript quote runs to the end
-/// of the turn (an approval request review commonly does, in real Codex rollouts).
+/// These injected preambles lack closing tags, so their blocks end at the first known marker or the
+/// end of the turn.
 const INJECTED_PREAMBLES: &[(&str, &[&str])] = &[(
     "The following is the Codex agent history whose request action you are assessing.",
     &[
@@ -826,12 +776,8 @@ fn strip_injected_blocks(raw: &str) -> String {
     }
 }
 
-/// The first sentence of `line`: everything up to a full stop, question mark or exclamation mark
-/// that ends the line, or that is followed by a space and a capital letter. The terminator is
-/// dropped, since a headline is a label rather than prose.
-///
-/// The capital-letter rule is what keeps an abbreviation ("e.g. the ledger test") from cutting a
-/// sentence in half.
+/// Extract the first sentence without its terminator; requiring an uppercase continuation avoids
+/// splitting lowercase abbreviations.
 fn first_sentence(line: &str) -> &str {
     let bytes = line.as_bytes();
     for (index, byte) in bytes.iter().enumerate() {
@@ -870,10 +816,8 @@ fn cap_chars(text: &str, max: usize) -> String {
     format!("{}...", head.trim_end())
 }
 
-/// A headline for one turn's text, or `None` when nothing an operator wrote survives.
-///
-/// The order is: drop injected blocks, drop slash commands and blank lines, take the first
-/// sentence of the first line that is left, cap it at [`HEADLINE_MAX_CHARS`].
+/// Extracts a bounded first-sentence headline after removing injected commands and blank lines,
+/// returning None for empty content.
 pub fn headline_from_text(raw: &str) -> Option<String> {
     let stripped = strip_injected_blocks(raw);
     let line = stripped
@@ -1251,10 +1195,7 @@ mod tests {
 
     #[test]
     fn codex_scan_never_headlines_an_injected_approval_review_preamble() {
-        // Ground truth from a real `~/.codex/sessions` rollout: repomon's supervision spawns a
-        // one-shot Codex worker to judge an MCP tool-call approval, and that worker's only
-        // `user_message` is this preamble quoting the transcript it is reviewing. None of it is
-        // the operator's own words, so the session must not surface it as a headline.
+        // Quoted review preambles are injected context, not the operator’s task.
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             dir.path(),

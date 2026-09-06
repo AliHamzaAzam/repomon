@@ -1,10 +1,5 @@
-//! Agent runtime and monitors.
-//!
-//! [`tmux`] provides the durable, tmux-backed runtime (spawn/capture/send/kill). The
-//! [`AgentMonitor`] trait observes an agent's session for a worktree; [`ClaudeMonitor`]
-//! reads Claude Code transcripts (rich status incl. "needs you"), while [`AiderMonitor`] and
-//! [`CodexMonitor`] are best-effort (see `docs/agents.md`). For any repomon-spawned agent the
-//! daemon also falls back to "is the tmux window alive?".
+//! Provides platform session runtimes and agent monitors, combining transcript evidence with
+//! managed-window liveness.
 
 pub mod antigravity;
 pub mod approval;
@@ -206,11 +201,8 @@ mod tests {
         assert_eq!(s.status, AgentStatus::Running);
     }
 
-    /// The contract [`crate::agent::prompt`] and the daemon's `status_from_pane` rely on: a
-    /// monitor that only has a file's mtime reports Running on recency AND `ended_turn: true`, so
-    /// a consumer can tell "the file moved" apart from "a turn is genuinely mid flight" and let
-    /// the pane overrule the first. A background task touching that file is otherwise
-    /// indistinguishable from the agent working.
+    /// An mtime-only monitor must mark the turn finished even while reporting recent activity,
+    /// allowing pane evidence to distinguish background writes from an active turn.
     #[test]
     fn mtime_only_running_always_reports_a_finished_turn() {
         let dir = tempfile::tempdir().unwrap();

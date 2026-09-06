@@ -1,3 +1,2 @@
--- The text a session headline was read from, before the extractor stripped the blocks the CLI
--- injected into the turn. Kept so the desktop can show the operator what was really written.
+-- Preserve unfiltered headline input so the UI can show the original text.
 ALTER TABLE usage_sessions ADD COLUMN headline_raw TEXT;

@@ -1,14 +1,4 @@
-//! Portable local IPC: Unix domain sockets on unix, named pipes on Windows.
-//!
-//! Everything that used to talk `tokio::net::UnixListener`/`UnixStream` directly (the daemon's
-//! socket server, the shared [`crate::client::DaemonClient`], tests) goes through this module
-//! instead, so the JSON-RPC framing in [`crate::protocol`] runs unchanged over whichever
-//! transport the platform provides. Only the byte pipe differs per OS; the wire protocol is
-//! identical (and frozen — the iOS companion mirrors it).
-//!
-//! Endpoints are still configured as paths (`config::socket_path`). On unix that path is the
-//! socket file; on Windows it is interpreted as a named-pipe name (see
-//! [`pipe_name_from_path`]).
+//! Carries the same framed daemon protocol over Unix sockets and Windows named pipes.
 
 use std::io;
 use std::path::Path;
@@ -40,13 +30,8 @@ impl Endpoint {
     }
 }
 
-/// Map a configured "socket path" to a Windows named-pipe name.
-///
-/// A value that already names a pipe (`\\.\pipe\...`) is used verbatim — the default
-/// `config::default_socket_path()` on Windows produces exactly that. Anything else (say a
-/// unix-style `socket_path` override carried over in a shared config) is flattened into a pipe
-/// name: path separators and other non-name characters become `-`, and the `\\.\pipe\` prefix
-/// is prepended. Pure string logic so it is unit-testable on every OS.
+/// Preserves explicit Windows pipe names and maps other configured paths into the pipe namespace by
+/// replacing invalid name characters.
 pub fn pipe_name_from_path(path: &Path) -> String {
     const PIPE_PREFIX: &str = r"\\.\pipe\";
     let s = path.to_string_lossy();
@@ -72,19 +57,14 @@ enum ListenerInner {
         /// The per-user security descriptor every instance is created with (see
         /// [`pipe_instance`]): local IPC must not be reachable by other users.
         security: repomon_host::dacl::PipeSecurity,
-        /// The pre-created pipe instance the next client will hit. Windows named pipes have no
-        /// single listening object: each accepted connection consumes one server instance, so
-        /// `accept` creates the following instance *before* handing the connected one out —
-        /// that way there is never a window with no instance for a client to reach.
+        /// Create the next server instance before handing off the connection so clients always have
+        /// a listener to connect to.
         next: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     },
 }
 
-/// Create one server instance of the daemon pipe with the explicit current-user-only DACL
-/// (same policy as the agent hosts' pipes — PROTOCOL.md §3): owner = current user, DACL
-/// protected, generic-all for that SID only. The default named-pipe DACL is not acceptable
-/// for the daemon's control channel. `first` additionally claims the name exclusively
-/// (`FILE_FLAG_FIRST_PIPE_INSTANCE`), mirroring the unix bind conflict.
+/// Create a pipe with a protected current-user-only DACL; the first instance also claims the name
+/// exclusively.
 #[cfg(windows)]
 fn pipe_instance(
     name: &str,
@@ -109,11 +89,8 @@ pub struct IpcListener {
     inner: ListenerInner,
 }
 
-/// Bind a local IPC listener at `endpoint`.
-///
-/// Unix: creates the parent directory and clears a stale socket file from a previous run
-/// before binding. Windows: creates the first pipe instance (exclusively — a second listener
-/// on the same name fails, mirroring the unix bind conflict) and rejects remote clients.
+/// Binds local IPC, rejecting an active listener and remote Windows clients while removing only
+/// stale Unix socket files.
 pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
     match endpoint {
         #[cfg(unix)]
@@ -122,16 +99,8 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
                 let _ = std::fs::create_dir_all(parent);
             }
             if path.exists() {
-                // A stale socket file from a crashed/killed previous run is safe to clear, but a
-                // *live* daemon still listening on it must never be silently evicted: unlinking
-                // out from under it lets a second `repomond` bind the same path while the first
-                // keeps running as an unreachable orphan, invisible to `ps`-level checks and still
-                // polling/stamping the shared tmux server — the two instances' independent
-                // discovery caches then race each other, and whichever client is still connected
-                // to the orphan sees agents flicker or vanish with no way to recover short of
-                // finding and killing it by hand. Windows already refuses this via
-                // `first_pipe_instance`; probe with a real connect so unix matches that guarantee
-                // instead of trusting the path's mere existence.
+                // Probe before unlinking: removing a live socket would orphan its daemon and allow
+                // two daemons to control the same backend.
                 if tokio::net::UnixStream::connect(path).await.is_ok() {
                     return Err(io::Error::new(
                         io::ErrorKind::AddrInUse,
@@ -192,12 +161,8 @@ impl IpcListener {
     }
 }
 
-/// Connect to a local IPC endpoint.
-///
-/// Windows: `ERROR_PIPE_BUSY` (every instance momentarily taken — the accept loop pre-creates
-/// the next instance, so this is a tiny race window) is retried briefly with backoff; other
-/// errors (notably "not found" while the daemon is still starting) surface immediately so
-/// callers' existing connect-retry loops behave exactly as they do on unix.
+/// Connects to local IPC, briefly retrying Windows pipe-busy races while returning other errors to
+/// the caller.
 pub async fn connect(endpoint: &Endpoint) -> io::Result<IpcStream> {
     match endpoint {
         #[cfg(unix)]
@@ -228,9 +193,8 @@ pub async fn connect(endpoint: &Endpoint) -> io::Result<IpcStream> {
     }
 }
 
-/// A connected local IPC stream: `AsyncRead + AsyncWrite + Unpin + Send`, whatever the
-/// platform transport underneath. The `Duplex` variant is an in-memory pair for tests
-/// ([`IpcStream::pair`]), replacing the old `UnixStream::pair()`.
+/// Provides an AsyncRead + AsyncWrite local IPC stream, including an in-memory duplex variant for
+/// tests.
 pub enum IpcStream {
     #[cfg(unix)]
     Unix(tokio::net::UnixStream),
@@ -319,7 +283,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut s = listener.accept().await.unwrap();
             let frame = read_frame(&mut s).await.unwrap().expect("a frame");
-            write_frame(&mut s, &frame).await.unwrap(); // echo it back
+            write_frame(&mut s, &frame).await.unwrap();
         });
 
         let mut client = connect(&ep).await.unwrap();
@@ -351,11 +315,8 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// A second `listen()` on a path a live listener still owns must fail, not evict it — the
-    /// blind `remove_file` this replaces let a slow-to-exit (or merely racing) old daemon get its
-    /// socket silently stolen out from under it, leaving it running forever as an unreachable
-    /// orphan while a client stayed connected to its now-stale state. Unix-only: Windows already
-    /// gets this for free from `first_pipe_instance`.
+    /// A second listener must not evict a live Unix socket owner; Windows enforces this through
+    /// first_pipe_instance.
     #[cfg(unix)]
     #[tokio::test]
     async fn refuses_to_steal_a_live_listeners_socket() {
@@ -375,7 +336,7 @@ mod tests {
     async fn reclaims_a_stale_socket_file_with_no_live_listener() {
         let ep = test_endpoint("stale");
         {
-            // Bind once, then drop without going through `serve`'s graceful-shutdown unlink —
+            // Bind once, then drop without going through `serve`'s graceful-shutdown unlink -
             // `IpcListener` itself has no `Drop` impl that removes the file, so this leaves
             // exactly what a crash leaves: a socket file on disk with nothing listening on it.
             let _dead = listen(&ep).await.unwrap();
@@ -398,12 +359,11 @@ mod tests {
     /// Pipe-name mapping is pure string logic, verified on every OS.
     #[test]
     fn pipe_name_mapping() {
-        // A real pipe name passes through verbatim.
         assert_eq!(
             pipe_name_from_path(Path::new(r"\\.\pipe\repomon-ali")),
             r"\\.\pipe\repomon-ali"
         );
-        // A unix-style path is flattened into a name under \\.\pipe\.
+
         assert_eq!(
             pipe_name_from_path(Path::new("/tmp/repomon-ali.sock")),
             r"\\.\pipe\tmp-repomon-ali.sock"

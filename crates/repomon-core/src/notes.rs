@@ -1,18 +1,12 @@
-//! Per-repo fleet memory: one human-editable markdown file per registered repo.
-//!
-//! The daemon owns a `repo-notes/` directory (under its data dir) holding durable per-repo
-//! knowledge — conventions, build/test commands, gotchas — that the orchestrator folds into
-//! worker prompts. Files are keyed by a sanitized repo name so a human can find and edit
-//! `myrepo.md` directly; repo names are not unique, so on a slug collision every collider
-//! resolves to `<slug>-<id>.md` instead (never the bare name, so notes can't bleed across
-//! repos). Removing a repo leaves its file: knowledge survives re-registration.
+//! Provides the flat-file notes format read during home migration, with collision-aware repository
+//! slugs and bounded content.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::model::Repo;
 
-/// Hard cap on a notes file, enforced on write and (defensively) on read — notes travel
+/// Hard cap on a notes file, enforced on write and (defensively) on read - notes travel
 /// inside worker prompts, so an unbounded file would blow up token budgets.
 pub const MAX_NOTES_BYTES: usize = 8192;
 
@@ -74,10 +68,8 @@ pub fn read(dir: &Path, repo: &Repo, all: &[Repo]) -> Result<Option<String>> {
     Ok(Some(s))
 }
 
-/// Replace the repo's notes wholesale, atomically (temp file + fsync + rename, the
-/// [`crate::config::Config::save_to`] pattern). Rejects content over [`MAX_NOTES_BYTES`].
-/// The previous version, when different, is kept one generation in `<file>.bak`.
-/// Returns the path written.
+/// Atomically replaces the bounded note and returns its path, retaining one backup generation when
+/// content changes.
 pub fn write(dir: &Path, repo: &Repo, all: &[Repo], content: &str) -> Result<PathBuf> {
     use std::io::Write;
     if content.len() > MAX_NOTES_BYTES {

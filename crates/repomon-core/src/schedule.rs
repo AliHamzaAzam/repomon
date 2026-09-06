@@ -1,8 +1,5 @@
-//! Standing-orchestration schedule specs: a tiny, human-first grammar instead of cron.
-//!
-//! Supported: `daily HH:MM`, `weekdays HH:MM`, `weekends HH:MM`, `every <N>m`, `every <N>h`.
-//! Times are the daemon host's local time. Parsing is strict and errors carry examples, since
-//! the spec usually arrives from a human typing `repomon orchestrate --schedule "..."`.
+//! Parses daily, weekday, weekend, and fixed-minute or fixed-hour schedules using the daemon host’s
+//! local time.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Weekday};
 
@@ -92,7 +89,7 @@ fn next_at(
     }
     for _ in 0..14 {
         // DST gaps: from_local_datetime can be ambiguous or skipped; earliest() falls back to
-        // the next valid instant via latest() — either way we land on a real local time.
+        // the next valid instant via latest() - either way we land on a real local time.
         let naive = day.and_time(target);
         if let Some(dt) = Local
             .from_local_datetime(&naive)

@@ -1,6 +1,4 @@
--- Orchestration journal: every orchestrator-initiated action (spawn/send/approve/merge/... plus
--- session_start markers), appended by the MCP layer via journal.append. Durable memory of "what
--- did repomind do and why" that outlives tmux scrollback.
+-- Persist orchestrator actions and session boundaries beyond terminal scrollback.
 CREATE TABLE IF NOT EXISTS orchestration_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     at      TEXT NOT NULL,

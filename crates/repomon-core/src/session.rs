@@ -1,10 +1,5 @@
-//! Work-session detection (Phase 3).
-//!
-//! Events here are commits (agent tool-calls and dirty-state changes aren't retained
-//! historically). Per repo, contiguous commits with no gap over 30 min form an interval;
-//! intervals that overlap in time across repos cluster into one session — `Parallel` if it
-//! spans multiple repos, else `Focused`. Sessions shorter than 10 minutes are dropped as
-//! noise.
+//! Detects work sessions from per-repository commits separated by at most 30 minutes, merging
+//! overlapping intervals across repositories and discarding sessions shorter than 10 minutes.
 
 use std::collections::HashMap;
 
@@ -32,7 +27,6 @@ struct Cluster {
 
 /// Detect work sessions from a set of commits, newest first.
 pub fn detect(commits: &[Commit], repo_names: &HashMap<RepoId, String>) -> Vec<WorkSession> {
-    // Per-repo contiguous intervals (gap <= 30 min).
     let mut by_repo: HashMap<RepoId, Vec<DateTime<Utc>>> = HashMap::new();
     for c in commits {
         by_repo.entry(c.repo_id).or_default().push(c.time);
@@ -65,7 +59,6 @@ pub fn detect(commits: &[Commit], repo_names: &HashMap<RepoId, String>) -> Vec<W
         });
     }
 
-    // Cluster intervals that overlap in time into sessions.
     intervals.sort_by_key(|i| i.from);
     let mut sessions: Vec<WorkSession> = Vec::new();
     let mut cur: Option<Cluster> = None;
@@ -150,7 +143,7 @@ mod tests {
             commit(1, 0, base),
             commit(1, 10, base),
             commit(1, 20, base),
-            commit(1, 80, base), // isolated -> <10min span -> dropped
+            commit(1, 80, base),
         ];
         let names = HashMap::from([(1, "a".to_string())]);
         let sessions = detect(&commits, &names);

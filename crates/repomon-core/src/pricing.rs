@@ -1,13 +1,5 @@
-//! Model prices and cost arithmetic for the usage ledger.
-//!
-//! Cost is never stored: the ledger keeps token counts, and every query re-prices them through a
-//! [`PriceTable`]. A price change therefore re-prices history, and an operator who disagrees with
-//! a built-in rate can correct it from `[usage.price_overrides]` without a rebuild.
-//!
-//! Rates are US dollars per million tokens. Cache-read and cache-write rates are the discounted
-//! and surcharged input rates the providers publish for prompt caching. Every row carries an
-//! `effective_from` instant; [`PriceTable::lookup`] picks the newest row not after the event, so
-//! a price cut applies from its date forward and older events keep the price they were billed at.
+//! Resolves time-effective model prices in USD per million tokens. Usage stores token counts rather
+//! than dollars, and lookup selects the newest rate effective at the event time.
 
 use std::collections::HashMap;
 
@@ -110,15 +102,11 @@ impl PriceTable {
         PriceTable::default()
     }
 
-    /// The rates shipped with repomon: the Claude 5 family and its Opus, Sonnet and Haiku
-    /// siblings, the GPT-5 and Codex models, and Gemini 3.x. Provider list prices as published
-    /// for first-party API access; subscription plans bill differently, which is why the desktop
-    /// labels a subscription account's number "equivalent API cost".
+    /// Provides shipped API-rate fallbacks, including API-equivalent costs for subscription usage.
     pub fn builtin() -> Self {
         let from = builtin_effective_from();
         // (model or family prefix, input, output, cache read, cache write)
         const ROWS: &[(&str, f64, f64, f64, f64)] = &[
-            // Anthropic.
             ("claude-fable-5-1", 10.0, 50.0, 0.25, 12.5),
             ("claude-fable-5", 10.0, 50.0, 1.0, 12.5),
             ("claude-mythos-5-1", 10.0, 50.0, 0.25, 12.5),
@@ -136,7 +124,6 @@ impl PriceTable {
             // rate card.
             ("gpt-5", 1.25, 10.0, 0.125, 1.25),
             ("codex-", 1.25, 10.0, 0.125, 1.25),
-            // Google.
             ("gemini-3-pro", 2.0, 12.0, 0.2, 2.5),
             ("gemini-3-flash", 0.3, 2.5, 0.03, 0.375),
             ("gemini-3", 2.0, 12.0, 0.2, 2.5),
@@ -153,10 +140,8 @@ impl PriceTable {
                 source: RateSource::Builtin,
             });
         }
-        // GPT-6 has no published rate card yet. This copies the GPT-5 row as a best-effort
-        // placeholder rather than leaving the family unpriced. It carries the built-in date like
-        // every other row so a published LiteLLM rate or an undated override always outranks it;
-        // a moving date here would let the placeholder win over the snapshot for recent events.
+        // The built-in GPT-6 row uses placeholder GPT-5 values; retain its fixed effective date so
+        // newer snapshots or overrides win.
         table.insert(ModelPrice {
             model: "gpt-6".to_string(),
             input_per_mtok: 1.25,
@@ -232,16 +217,8 @@ impl PriceTable {
         }
     }
 
-    /// The rates for `model` as of `at`.
-    ///
-    /// Three steps, in order, and the first that hits wins:
-    /// 1. An exact row for `model` itself (newest one not after `at`).
-    /// 2. `model`'s alias (see [`resolve_alias`]), matched the same way (exact, then that alias's
-    ///    own longest family prefix). This runs before step 3 on purpose: an alias exists
-    ///    precisely because `model`'s own name is not what LiteLLM published it under, so its
-    ///    resolved row is a better rate than falling through to a generic family prefix of
-    ///    `model`'s own (unaliased) name.
-    /// 3. `model`'s longest family prefix among the table's own rows.
+    /// Finds the rate effective at `at`, preferring an exact model row, then its alias and alias
+    /// family, then the original model’s longest family prefix.
     pub fn lookup(&self, model: &str, at: DateTime<Utc>) -> Option<&ModelPrice> {
         if let Some(hit) = self.exact_match(model, at) {
             return Some(hit);
@@ -294,10 +271,7 @@ impl PriceTable {
         best
     }
 
-    /// The count of distinct model rows currently priced by each source, keyed by model id: for
-    /// each name in the table, whichever row is newest as of now decides that model's source. An
-    /// override always wins its model's slot the moment it's applied, since `apply_overrides`
-    /// dates it at or after the row it replaces.
+    /// Counts each model under its newest stored rate source.
     pub fn source_counts(&self) -> RateSourceCounts {
         let mut newest: HashMap<&str, &ModelPrice> = HashMap::new();
         for row in &self.rows {
@@ -321,10 +295,7 @@ impl PriceTable {
         counts
     }
 
-    /// What `tokens` cost on `model` at `at`, in dollars. `None` when the model has no price.
-    ///
-    /// A free-tier model id costs zero rather than nothing-known: it has a published rate, and
-    /// that rate is zero, so it is priced instead of being reported as a gap in the table.
+    /// Returns zero for a known free model and None when its price is unknown.
     pub fn cost(&self, model: &str, at: DateTime<Utc>, tokens: &TokenCounts) -> Option<f64> {
         let p = match self.lookup(model, at) {
             Some(p) => p,
@@ -380,10 +351,8 @@ pub struct ModelRateRow {
     pub cache_read_per_mtok: f64,
     pub cache_write_per_mtok: f64,
     pub source: ModelRateSource,
-    /// The raw, possibly-sparse override from `[usage.price_overrides]`, when this model has one.
-    /// This is the operator's own input, not the resolved row above: a partial override (say,
-    /// only `output_per_mtok`) still shows only that one field set here, even though the row's
-    /// other three rates above are filled in from the snapshot or built-in table underneath it.
+    /// Retains the sparse user input rather than the resolved rates so omitted fields remain
+    /// inheritable.
     #[serde(rename = "override")]
     pub price_override: Option<PriceOverride>,
     /// The most recent ledger event for this model, `None` for a model that only exists because
@@ -396,15 +365,8 @@ pub struct ModelRateRow {
     pub tokens_30d: u64,
 }
 
-/// Build the Settings > Usage "Model rates" table: one row per model the ledger has ever seen,
-/// plus one for every model with an override the ledger hasn't seen yet (an operator naming a
-/// family prefix ahead of usage, so it is ready the moment a matching model shows up).
-///
-/// `seen` is `(model, last_seen, tokens_30d)` for every model in the ledger, from whatever source
-/// the caller reads that from (the daemon reads it from `usage_events`). `overrides` is
-/// the raw `[usage.price_overrides]` map, kept separate from `table` because `table` only carries
-/// the fully-resolved row (see [`PriceTable::apply_overrides`]), not the sparse operator input
-/// `ModelRateRow::price_override` reports.
+/// Builds model-rate rows for ledger models and unseen operator overrides, preserving the sparse
+/// override values separately from resolved rates.
 pub fn model_rate_rows(
     table: &PriceTable,
     overrides: &HashMap<String, PriceOverride>,
@@ -455,21 +417,13 @@ pub fn model_rate_rows(
         .collect()
 }
 
-/// Whether `model` is a provider's free tier, whose published rate is zero.
-///
-/// OpenCode names these `<model>-free`. They are priced rather than reported as unpriced, so the
-/// "no published rate" warning stays about models that really would cost money.
+/// Recognizes OpenCode’s free-tier model suffix.
 pub fn is_free_tier(model: &str) -> bool {
     model.ends_with("-free")
 }
 
-/// Model ids a CLI logs that do not (or might not) match a LiteLLM key by name or family prefix,
-/// mapped to the closest LiteLLM key to price them off instead.
-///
-/// This is a name fix, not a rate invention: every target here is a real LiteLLM entry. When
-/// LiteLLM renames or drops one of these, the alias just stops matching and the model falls back
-/// to the family-prefix rule, then to the built-in table, then to unpriced: it never fabricates
-/// a number.
+/// Map CLI model names to published rate keys; unresolved aliases fall through to ordinary lookup
+/// without inventing a rate.
 const ALIASES: &[(&str, &str)] = &[
     // The mythos-5-1 codename has no LiteLLM entry of its own yet; its family's current release
     // (mythos-5) is the closest published rate.
@@ -539,11 +493,7 @@ pub struct RatesStatus {
     pub enabled: bool,
 }
 
-/// The Usage view's pricing footnote and the CLI's `repomon usage rates` summary line: one string
-/// stating where rates came from, so both surfaces agree on the wording.
-///
-/// `now` is threaded through rather than read internally so the "updated Nh ago" phrasing is
-/// deterministic in tests.
+/// Formats a shared rate-source footnote using the supplied time for relative freshness.
 pub fn format_rates_footnote(status: &RatesStatus, now: DateTime<Utc>) -> String {
     if !status.enabled {
         return format!(
@@ -596,11 +546,8 @@ fn humanize_age(age: chrono::Duration) -> String {
     format!("{}d ago", age.num_days())
 }
 
-/// Parse a LiteLLM `model_prices_and_context_window.json` snapshot into price rows.
-///
-/// LiteLLM quotes dollars per token; repomon quotes dollars per million, so every rate is scaled
-/// by a million. Entries without both an input and an output cost are skipped: they are
-/// embeddings, rerankers and audio models, none of which a coding agent bills against.
+/// Parses LiteLLM prices into USD per million tokens, skipping entries without both input and
+/// output costs.
 pub fn parse_litellm_snapshot(
     json: &str,
     effective_from: DateTime<Utc>,

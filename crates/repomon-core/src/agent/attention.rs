@@ -11,12 +11,12 @@ use crate::model::{AgentSession, AgentStatus, Lane};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Attention {
-    /// Nothing — running, rate-limited (auto-continue handles it), idle, or ended.
+    /// Nothing - running, rate-limited (auto-continue handles it), idle, or ended.
     None,
     /// Finished its turn with no open dialog; awaiting the next instruction.
     EndOfTurn,
     /// Finished its turn AND the work looks shippable (worktree clean, a fresh commit): the
-    /// "review / merge?" hint. Only [`agent_attention_in`] produces this — it needs the lane.
+    /// "review / merge?" hint. Only [`agent_attention_in`] produces this - it needs the lane.
     DoneCandidate,
     /// Sitting on a routine permission dialog it raised about its own next tool call.
     Permission,
@@ -52,14 +52,12 @@ impl Attention {
     }
 }
 
-/// How long before the agent's last words a commit still counts as "this turn's work".
-/// (`AgentSession.started_at` mirrors the last activity, so the commit-vs-turn comparison
-/// anchors on `last_activity_at` with this much slack: the commit lands minutes before the
-/// final "done" message.)
+/// Slack between a commit and the agent’s final message, using last_activity_at because started_at
+/// mirrors recent activity.
 const DONE_COMMIT_SLACK: chrono::Duration = chrono::Duration::minutes(30);
 
 /// Derive an agent's attention from its status and any open dialog. Lane-blind: never
-/// produces [`Attention::DoneCandidate`] — use [`agent_attention_in`] when the lane is at
+/// produces [`Attention::DoneCandidate`] - use [`agent_attention_in`] when the lane is at
 /// hand.
 pub fn agent_attention(s: &AgentSession) -> Attention {
     match s.status {
@@ -74,18 +72,12 @@ pub fn agent_attention(s: &AgentSession) -> Attention {
     }
 }
 
-/// A gate verdict counts as "this turn's" when it ran no earlier than slightly before the
-/// agent's last words — the Stop hook fires right after the turn ends, so a fresh verdict's
-/// timestamp lands at/after `last_activity_at`; anything older belongs to a previous turn.
+/// A gate verdict is fresh when it falls within the turn’s activity slack; older verdicts cannot
+/// decide the current turn.
 const GATE_FRESH_SLACK: chrono::Duration = chrono::Duration::minutes(2);
 
-/// [`agent_attention`] refined with the lane's state: an end-of-turn whose work looks done
-/// reads as [`Attention::DoneCandidate`] ("review?") instead of a bare end-of-turn.
-///
-/// Done-ness comes from the strongest available signal: a fresh dxkit stop-gate verdict when
-/// the worktree runs one (`allowed` grants, a block VETOES — the gate explicitly said the
-/// work isn't done, whatever git looks like), else the git heuristic (clean worktree + a
-/// this-turn commit).
+/// Refines end-of-turn attention using a fresh dxkit verdict, falling back to clean-worktree and
+/// this-turn-commit evidence when no verdict exists.
 pub fn agent_attention_in(lane: &Lane, s: &AgentSession) -> Attention {
     match agent_attention(s) {
         Attention::EndOfTurn => match gate_this_turn(s) {
@@ -105,8 +97,8 @@ fn gate_this_turn(s: &AgentSession) -> Option<&crate::agent::gate::GateVerdict> 
     (g.at >= s.last_activity_at - GATE_FRESH_SLACK).then_some(g)
 }
 
-/// The latest gate block for this session — however old, since the next gate run replaces
-/// it — as `Some(net_new_findings)`. Feeds the "⛔ gate N" badge while the agent repairs.
+/// The latest gate block for this session - however old, since the next gate run replaces
+/// it - as `Some(net_new_findings)`. Feeds the "stop gate N" badge while the agent repairs.
 pub fn gate_bounced(s: &AgentSession) -> Option<u32> {
     let g = gate_for_session(s)?;
     (!g.allowed).then_some(g.net_new_findings)
@@ -260,7 +252,7 @@ mod tests {
             s
         };
 
-        // A fresh ALLOWED verdict grants the review hint even on a dirty lane with no commit —
+        // A fresh ALLOWED verdict grants the review hint even on a dirty lane with no commit -
         // the gate ran the tests/scanners; that beats the git heuristic.
         let eot = with_gate(sess(AgentStatus::Waiting, None), gate(true, 0, Some("abc")));
         assert_eq!(
@@ -268,7 +260,7 @@ mod tests {
             Attention::DoneCandidate
         );
 
-        // A fresh BLOCK vetoes the git heuristic — clean + committed, but the gate said no.
+        // A fresh BLOCK vetoes the git heuristic - clean + committed, but the gate said no.
         let bounced = with_gate(
             sess(AgentStatus::Waiting, None),
             gate(false, 0, Some("abc")),
@@ -288,7 +280,6 @@ mod tests {
             Attention::EndOfTurn
         );
 
-        // Another session's verdict is ignored too.
         let other = with_gate(sess(AgentStatus::Waiting, None), gate(true, 0, Some("zzz")));
         assert_eq!(
             agent_attention_in(&lane(false, None), &other),
@@ -314,7 +305,6 @@ mod tests {
     fn done_candidate_needs_ended_turn_plus_clean_plus_fresh_commit() {
         let eot = sess(AgentStatus::Waiting, None);
 
-        // Clean worktree + a commit from this turn → the review hint.
         assert_eq!(
             agent_attention_in(&lane(true, Some(5)), &eot),
             Attention::DoneCandidate
@@ -329,12 +319,12 @@ mod tests {
             agent_attention_in(&lane(true, Some(600)), &eot),
             Attention::EndOfTurn
         );
-        // No commit at all.
+
         assert_eq!(
             agent_attention_in(&lane(true, None), &eot),
             Attention::EndOfTurn
         );
-        // Dialog states pass through untouched.
+
         assert_eq!(
             agent_attention_in(
                 &lane(true, Some(5)),
@@ -363,7 +353,7 @@ mod tests {
             agent_attention(&sess(AgentStatus::Waiting, None)),
             Attention::EndOfTurn
         );
-        // Waiting on a permission dialog = auto-answerable.
+
         assert_eq!(
             agent_attention(&sess(
                 AgentStatus::Waiting,
@@ -371,7 +361,7 @@ mod tests {
             )),
             Attention::Permission
         );
-        // Waiting on a real question = must escalate.
+
         assert_eq!(
             agent_attention(&sess(
                 AgentStatus::Waiting,
