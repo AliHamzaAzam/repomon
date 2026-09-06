@@ -1,35 +1,20 @@
 # Architecture
 
-Follow **Key flows** to trace a fleet request, or use **Crates** to choose where to change the code. The daemon owns state and session work; clients render it.
+Repomon shares a core library between a background daemon and a thin TUI client. The daemon owns state and git/session
+work; the TUI renders cached state and forwards input, keeping interaction responsive and agents alive after the UI
+closes.
 
-**You are here:** implementation reference for contributors, not installation instructions.
+## Contents
 
-## Find your next task
-
-| Task | Go to |
+| Topic | Sections |
 |---|---|
-| Crates | [Open section](#crates) |
-| Usage ledger | [Open section](#usage-ledger) |
-| Key flows | [Open section](#key-flows) |
-| Session backends (tmux on Unix, host processes on Windows) | [Open section](#session-backends-tmux-on-unix-host-processes-on-windows) |
-| Performance posture | [Open section](#performance-posture) |
+| Components | [Crates](#crates), [usage ledger](#usage-ledger) |
+| Runtime | [Key flows](#key-flows), [session backends](#session-backends-tmux-on-unix-host-processes-on-windows) |
+| Performance | [Posture and measurements](#performance-posture) |
 
-<details>
-<summary>Why this guide exists</summary>
-
-repomon is a background **daemon** plus a thin **TUI** client, sharing a **core** library.
-
-The daemon owns all state and all git/session work; the TUI only renders cached state and
-forwards input.
-
-That split is what keeps the UI instant and lets agents outlive the UI.
-
-The agent runtime is abstracted behind a `SessionBackend` trait: a tmux backend on macOS/Linux
-and a host-process backend on Windows (see [Session
-backends](#session-backends-tmux-on-unix-host-processes-on-windows) below).
-
-Local IPC runs over a Unix socket on macOS/Linux and a named pipe on Windows; the JSON-RPC wire
-protocol is identical on both.
+The agent runtime is abstracted behind a `SessionBackend` trait: a tmux backend on macOS/Linux and a host-process
+backend on Windows (see [Session backends](#session-backends-tmux-on-unix-host-processes-on-windows) below). Local IPC
+runs over a Unix socket on macOS/Linux and a named pipe on Windows; the JSON-RPC wire protocol is identical on both.
 
 ```
       ┌───────────────────────── repomon-core ────────────────────────┐
@@ -50,240 +35,158 @@ protocol is identical on both.
                                  socket · framed JSON-RPC
 ```
 
-</details>
-
 ## Crates
 
-Choose the crate that owns the behavior before editing.
-
-<details>
-<summary>Details</summary>
-
-- **repomon-core**: the engine. No UI, no socket server. Holds the data model, the SQLite
-  store (a dedicated writer thread; never blocks the runtime), the gix-backed git reader and
-  `git worktree` shellout, the notify watcher, the repo registry and lane manager, the agent
-  runtime behind the `SessionBackend` trait (tmux on Unix, host processes on Windows) and the
-  agent monitors, the local transport abstraction (Unix socket ⇄ named pipe), the Phase-3
-  analytics/sessions/indexer, service management (launchd on macOS, systemd user units on
-  Linux, Task Scheduler on Windows), and the shared JSON-RPC protocol + framing.
-- **repomon-daemon** (`repomond`): hosts core behind a length-prefixed JSON-RPC endpoint (a
-  Unix socket on macOS/Linux, a named pipe on Windows). Owns the `Ctx` (store, registry, lanes,
-  the `SessionBackend`, event bus, viewport + focus, and the overlay/status caches), the
-  per-connection handling, RPC dispatch, the output streamer, the desktop/remote notification
-  watcher, and the background indexer.
-- **repomon-tui** (`repomon`): the terminal client and headless CLI. A `DaemonClient` over
-  the transport, an async app loop, the four-zoom views, the `repomon attach-host` pop-out
-  attach client (Windows), and the `repomon …` subcommands.
-- **repomon-host** (`repomon-agent-host.exe`, Windows only) is a small per-agent host process:
-  one ConPTY child, a server-side `vt100` screen with scrollback, and a named-pipe control
-  server. It is the Windows equivalent of a tmux window and survives daemon restarts. Its
-  control protocol is frozen in [../crates/repomon-host/PROTOCOL.md](../crates/repomon-host/PROTOCOL.md).
-- **repomon-mcp**: the stdio MCP server library invoked as `repomond mcp` (see "repomind" below).
-  It backs both the orchestrator's full fleet tool surface and the restricted `fleet_status` /
-  `message_send` / `message_inbox` / `message_mark_read` surface managed worker agents get for
-  fleet mail (see [messaging.md](messaging.md)).
-
-</details>
+- **repomon-core**: the engine. No UI, no socket server. Holds the data model, the SQLite store (a
+  dedicated writer thread; never blocks the runtime), the gix-backed git reader and `git worktree`
+  shellout, the notify watcher, the repo registry and lane manager, the agent runtime behind the
+  `SessionBackend` trait (tmux on Unix, host processes on Windows) and the agent monitors, the local
+  transport abstraction (Unix socket ⇄ named pipe), the Phase-3 analytics/sessions/indexer, service
+  management (launchd on macOS, systemd user units on Linux, Task Scheduler on Windows), and the shared
+  JSON-RPC protocol + framing.
+- **repomon-daemon** (`repomond`): hosts core behind a length-prefixed JSON-RPC endpoint (a Unix socket
+  on macOS/Linux, a named pipe on Windows). Owns the `Ctx` (store, registry, lanes, the `SessionBackend`,
+  event bus, viewport + focus, and the overlay/status caches), the per-connection handling, RPC dispatch,
+  the output streamer, the desktop/remote notification watcher, and the background indexer.
+- **repomon-tui** (`repomon`): the terminal client and headless CLI. A `DaemonClient` over the transport,
+  an async app loop, the four-zoom views, the `repomon attach-host` pop-out attach client (Windows), and
+  the `repomon …` subcommands.
+- **repomon-host** (`repomon-agent-host.exe`, Windows only) is a small per-agent host process: one ConPTY
+  child, a server-side `vt100` screen with scrollback, and a named-pipe control server. It is the Windows
+  equivalent of a tmux window and survives daemon restarts. Its control protocol is frozen in
+  [../crates/repomon-host/PROTOCOL.md](../crates/repomon-host/PROTOCOL.md).
+- **repomon-mcp**: the stdio MCP server library invoked as `repomond mcp` (see "repomind" below). It
+  backs both the orchestrator's full fleet tool surface and the restricted `fleet_status` /
+  `message_send` / `message_inbox` / `message_mark_read` surface managed worker agents get for fleet mail
+  (see [messaging.md](messaging.md)).
 
 ## Usage ledger
 
-Keep transcript ingest separate from account quota probing.
+The daemon passively ingests local agent transcripts into `usage_events`, with per-source reader revisions and cursors.
+Summary, timeline, session, and model-rate queries price events at query time, so Settings > Usage rate corrections also
+re-price history. A new reader revision triggers a bounded recount; missing or unreadable sources retain existing events
+and leave the queue. `usage.status.stale_sources` drives desktop progress. The optional account quota probe is separate
+from this ledger.
 
-<details>
-<summary>Details</summary>
-
-The daemon passively ingests local agent transcripts into `usage_events`, with per-source reader
-revisions and cursors.
-
-Summary, timeline, session, and model-rate queries price events at query time, so Settings >
-Usage rate corrections also re-price history.
-
-A new reader revision triggers a bounded recount; missing or unreadable sources retain existing
-events and leave the queue.
-
-`usage.status.stale_sources` drives desktop progress.
-
-The optional account quota probe is separate from this ledger.
-
-The desktop bundle contains its daemon and CLI, portable tmux on macOS/Linux, and the ConPTY
-host on Windows.
-
-Settings > System exposes CLI installation and boot diagnostics.
-
-</details>
+The desktop bundle contains its daemon and CLI, portable tmux on macOS/Linux, and the ConPTY host on Windows. Settings >
+System exposes CLI installation and boot diagnostics.
 
 ## Key flows
 
-Trace the request from a client through the daemon before changing a shared behavior.
+**Fleet refresh.** The TUI calls `lane.list`; the daemon enumerates worktrees (porcelain), computes live state with gix
+off the runtime, overlays agent sessions (Claude transcripts, OpenCode SQLite, Antigravity cache, Aider history, then
+runtime liveness), and returns lanes. The TUI renders cached state immediately on every keystroke; git never runs on the
+UI thread.
 
-<details>
-<summary>Details</summary>
+**Live agents.** The daemon spawns each agent in its own session backend window: the first at `lane-<id>`, additional
+agents sharing a worktree at `lane-<id>-2`, `lane-<id>-3`, … so several run side by side. (On Unix a "window" is a tmux
+window; on Windows it is a host process; see [Session
+backends](#session-backends-tmux-on-unix-host-processes-on-windows).) The TUI tells the daemon which lanes are visible
+(and which agent window the focused lane should stream) via `viewport.set`; a streamer fast-polls only those panes
+(`capture_named` / `capture-pane`) and pushes `event.agent.output`. Input goes back via `agent.send_input` (`send-keys`
+on Unix, a host `send_*` op on Windows), routed to a specific window in a multi-agent lane; `agent.target` + a raw
+attach (`tmux attach`, or `repomon attach-host` on Windows) gives the unmediated session.
 
-**Fleet refresh.** The TUI calls `lane.list`; the daemon enumerates worktrees (porcelain),
-computes live state with gix off the runtime, overlays agent sessions (Claude transcripts,
-OpenCode SQLite, Antigravity cache, Aider history, then runtime liveness), and returns lanes.
+**Change propagation.** A debounced notify watcher (250 ms; `.git/objects` and build/dependency churn like `target` and
+`node_modules` excluded) plus the Claude projects directory feed `event.repo.changed`; the TUI refetches. A 60 s tick is
+the safety net. The watcher is held in the daemon's runtime context and watches/unwatches a tree on `repo.add` /
+`repo.remove`, so a removed repo stops churning fsevents instead of being watched until the next restart.
 
-The TUI renders cached state immediately on every keystroke; git never runs on the UI thread.
+**Desktop notifications.** A `notify_watch` task runs the shared edge-detection over the fleet and fires an alert on
+each meaningful agent transition. Remote clients get an `event.notification` broadcast (and APNs push) while `[remote]`
+is enabled; locally, the daemon fires desktop popups itself only once the TUI stops covering them - it watches the TUI's
+~1 s `lane.list` heartbeat and, after 3 s of silence (the TUI parked in a full-screen attach or closed), takes over so
+an alert still reaches you when you're heads-down in an agent pane.
 
-**Live agents.** The daemon spawns each agent in its own session backend window: the first at
-`lane-<id>`, additional agents sharing a worktree at `lane-<id>-2`, `lane-<id>-3`, … so several
-run side by side. (On Unix a "window" is a tmux window; on Windows it is a host process; see
-[Session backends](#session-backends-tmux-on-unix-host-processes-on-windows).) The TUI tells the
-daemon which lanes are visible (and which agent window the focused lane should stream) via
-`viewport.set`; a streamer fast-polls only those panes (`capture_named` / `capture-pane`) and
-pushes `event.agent.output`.
+**History.** On startup and after `repo.add`, the indexer walks HEAD history into SQLite, so `timeline`, `sessions`, and
+`commit.search` work over history rather than just live HEAD.
 
-Input goes back via `agent.send_input` (`send-keys` on Unix, a host `send_*` op on Windows),
-routed to a specific window in a multi-agent lane; `agent.target` + a raw attach (`tmux attach`,
-or `repomon attach-host` on Windows) gives the unmediated session.
+**repomind.** Repomind is an agent session in a lane of its own: the *controller lane*, the main worktree of the
+repomind home repo (`~/repomind` by default, `[repomind] home`). The daemon ensures that repo on startup and on every
+`orchestrator.start`: it creates the layout and runs `git init -b main` when it is missing, never overwrites a file that
+already exists, registers it like any other repo, and marks its lane `role = "controller"` (`lanes.role`, migration
+0022).
 
-**Change propagation.** A debounced notify watcher (250 ms; `.git/objects` and build/dependency
-churn like `target` and `node_modules` excluded) plus the Claude projects directory feed
-`event.repo.changed`; the TUI refetches.
+Every agent in that lane is a controller: it is launched with `REPOMON_MCP_MODE=orchestrator`, so `repomon-mcp` serves
+it the full fleet catalog rather than the restricted worker one, and `[repomind] max_controllers` caps how many may run
+there at once.
 
-A 60 s tick is the safety net.
+A worker agent (one holding an MCP identity bound to some other lane) cannot spawn into the controller lane, and
+`delete_lane`/`merge_lane` on it are refused outright in the MCP policy layer, before the two-phase confirm and at every
+autonomy level.
 
-The watcher is held in the daemon's runtime context and watches/unwatches a tree on `repo.add` /
-`repo.remove`, so a removed repo stops churning fsevents instead of being watched until the next
-restart.
+The primary controller starts with `orchestrator.start` (Claude by default, or Codex, Antigravity, or OpenCode, via its
+`agent` param or `[repomind] primary_agent`, which falls back to the older `orchestrator_agent`). Only MCP-capable CLIs
+qualify (aider and cursor can't drive the fleet tools, so both are rejected); a Codex/Antigravity/OpenCode-backed
+session degrades to pane-only monitoring, with no parsed transcript chat, no end-of-turn attention, and no session
+pinning (Claude is the only backend with a parseable on-disk transcript).
 
-**Desktop notifications.** A `notify_watch` task runs the shared edge-detection over the fleet
-and fires an alert on each meaningful agent transition.
+The `orchestrator.*` RPCs (`.stop`, `.target`, `.send_input`, `.key`, `.resize`, `.watch`) are now thin aliases onto the
+controller lane's window and are deprecated in favor of the ordinary lane/agent RPCs; the daemon-owned `orchestrator`
+tmux window survives only as an adoption fallback, so a window left by a pre-R1 daemon is still picked up rather than
+duplicated. `repomind.status` reports the home path, its repo and lane, the controller window, the cap, the export
+state, what the home holds, and the state of the boot context.
 
-Remote clients get an `event.notification` broadcast (and APNs push) while `[remote]` is
-enabled; locally, the daemon fires desktop popups itself only once the TUI stops covering them -
-it watches the TUI's ~1 s `lane.list` heartbeat and, after 3 s of silence (the TUI parked in a
-full-screen attach or closed), takes over so an alert still reaches you when you're heads-down
-in an agent pane.
+**Boot context.** A controller starts with no memory of the fleet, so the daemon assembles one before every spawn into
+the controller lane (and on the `repomind.boot` RPC) and writes it to `<home>/.repomind/boot.md`, which is daemon-owned
+and gitignored. `repomind::boot::assemble_boot` is pure: it reads the home and concatenates, in this order, the
+operator's `REPOMIND.md` overlay whole, each `profile/*.md` body with its frontmatter stripped, one status line per
+`plans/active/*.md` (title, status, owner, and the body's `Next step` line), yesterday's and today's journal day files,
+and a fleet snapshot of one line per lane (repo, lane, branch, agent count, most urgent agent state). The snapshot is
+the only live truth in the document; everything else is memory, and the persona in
+`crates/repomon-mcp/assets/repomind.md` stays authoritative for tool semantics and safety.
 
-**History.** On startup and after `repo.add`, the indexer walks HEAD history into SQLite, so
-`timeline`, `sessions`, and `commit.search` work over history rather than just live HEAD.
+The whole document is bounded by `[repomind] boot_budget_tokens` (12k by default, estimated at four characters to a
+token). Over budget it drops whole files from the least important end, the journal first (older day before newer), then
+profile notes, then plan lines, and ends with a `Trimmed: ...` line naming exactly what went, so a controller can tell
+"nothing to say" from "it did not fit". The overlay and the fleet snapshot are never trimmed.
 
-**repomind.** Repomind is an agent session in a lane of its own: the *controller lane*, the main
-worktree of the repomind home repo (`~/repomind` by default, `[repomind] home`).
+Delivery is per backend, because no two of these CLIs take context the same way. Claude gets
+`--append-system-prompt-file <path>` *in addition to* the persona's `--append-system-prompt`, so the boot document is
+appended and never substituted. OpenCode gets the path in the `instructions` list of the `OPENCODE_CONFIG_CONTENT` the
+daemon already synthesizes, preserving the operator's own entries. Codex and Antigravity have neither mechanism, so the
+daemon types one line naming the file into the composer once the session is ready, through the same verified-composer
+injection fleet mail uses (`inject::Payload::VerifiedLine`): it waits for a session with no dialog and no pending
+prompt, gives up after 90 seconds, and writes at most three supervision rows. `repomind::boot::delivery` is the single
+place that maps an agent kind to its mechanism.
 
-The daemon ensures that repo on startup and on every `orchestrator.start`: it creates the layout
-and runs `git init -b main` when it is missing, never overwrites a file that already exists,
-registers it like any other repo, and marks its lane `role = "controller"` (`lanes.role`,
-migration 0022).
+**Journal trim.** Day files older than 90 days are rolled into `journal/archive/YYYY-MM.md` (one section per day, keyed
+by an HTML comment so a re-run cannot duplicate one) and the day file is removed. The rollup runs in `repomind::start`
+and once a day after that, and both the archive write and the day-file removal ride the ordinary export commit.
 
-Every agent in that lane is a controller: it is launched with `REPOMON_MCP_MODE=orchestrator`,
-so `repomon-mcp` serves it the full fleet catalog rather than the restricted worker one, and
-`[repomind] max_controllers` caps how many may run there at once.
+`repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches as a subprocess and
+wires up as a tool server; it connects back to the same daemon socket as an ordinary client and keeps a fleet snapshot
+refreshed by poll-and-diff (`lane.list` on a ~1.5s cadence, woken early on a structural event - a lane created/deleted).
 
-A worker agent (one holding an MCP identity bound to some other lane) cannot spawn into the
-controller lane, and `delete_lane`/`merge_lane` on it are refused outright in the MCP policy
-layer, before the two-phase confirm and at every autonomy level.
+Because the orchestrator session pre-approves its own fleet tool calls (`--allowedTools` on Claude, the approval policy
+on Codex - no permission dialog to intercept, unlike a worker agent), the MCP server's own policy layer - autonomy
+level, a per-session action cap, a send-dedupe window, two-phase confirm tokens for destructive actions - is the *sole*
+gate on what repomind can do.
 
-The primary controller starts with `orchestrator.start` (Claude by default, or Codex,
-Antigravity, or OpenCode, via its `agent` param or `[repomind] primary_agent`, which falls back
-to the older `orchestrator_agent`).
-
-Only MCP-capable CLIs qualify (aider and cursor can't drive the fleet tools, so both are
-rejected); a Codex/Antigravity/OpenCode-backed session degrades to pane-only monitoring, with no
-parsed transcript chat, no end-of-turn attention, and no session pinning (Claude is the only
-backend with a parseable on-disk transcript).
-
-The `orchestrator.*` RPCs (`.stop`, `.target`, `.send_input`, `.key`, `.resize`, `.watch`) are
-now thin aliases onto the controller lane's window and are deprecated in favor of the ordinary
-lane/agent RPCs; the daemon-owned `orchestrator` tmux window survives only as an adoption
-fallback, so a window left by a pre-R1 daemon is still picked up rather than duplicated.
-
-`repomind.status` reports the home path, its repo and lane, the controller window, the cap, the
-export state, what the home holds, and the state of the boot context.
-
-**Boot context.** A controller starts with no memory of the fleet, so the daemon assembles one
-before every spawn into the controller lane (and on the `repomind.boot` RPC) and writes it to
-`<home>/.repomind/boot.md`, which is daemon-owned and gitignored.
-
-`repomind::boot::assemble_boot` is pure: it reads the home and concatenates, in this order, the
-operator's `REPOMIND.md` overlay whole, each `profile/*.md` body with its frontmatter stripped,
-one status line per `plans/active/*.md` (title, status, owner, and the body's `Next step` line),
-yesterday's and today's journal day files, and a fleet snapshot of one line per lane (repo,
-lane, branch, agent count, most urgent agent state).
-
-The snapshot is the only live truth in the document; everything else is memory, and the persona
-in `crates/repomon-mcp/assets/repomind.md` stays authoritative for tool semantics and safety.
-
-The whole document is bounded by `[repomind] boot_budget_tokens` (12k by default, estimated at
-four characters to a token).
-
-Over budget it drops whole files from the least important end, the journal first (older day
-before newer), then profile notes, then plan lines, and ends with a `Trimmed: ...` line naming
-exactly what went, so a controller can tell "nothing to say" from "it did not fit".
-
-The overlay and the fleet snapshot are never trimmed.
-
-Delivery is per backend, because no two of these CLIs take context the same way.
-
-Claude gets `--append-system-prompt-file <path>` *in addition to* the persona's
-`--append-system-prompt`, so the boot document is appended and never substituted.
-
-OpenCode gets the path in the `instructions` list of the `OPENCODE_CONFIG_CONTENT` the daemon
-already synthesizes, preserving the operator's own entries.
-
-Codex and Antigravity have neither mechanism, so the daemon types one line naming the file into
-the composer once the session is ready, through the same verified-composer injection fleet mail
-uses (`inject::Payload::VerifiedLine`): it waits for a session with no dialog and no pending
-prompt, gives up after 90 seconds, and writes at most three supervision rows.
-
-`repomind::boot::delivery` is the single place that maps an agent kind to its mechanism.
-
-**Journal trim.** Day files older than 90 days are rolled into `journal/archive/YYYY-MM.md` (one
-section per day, keyed by an HTML comment so a re-run cannot duplicate one) and the day file is
-removed.
-
-The rollup runs in `repomind::start` and once a day after that, and both the archive write and
-the day-file removal ride the ordinary export commit.
-
-`repomon-mcp` (invoked as `repomond mcp`) is a stdio MCP server the orchestrator agent launches
-as a subprocess and wires up as a tool server; it connects back to the same daemon socket as an
-ordinary client and keeps a fleet snapshot refreshed by poll-and-diff (`lane.list` on a ~1.5s
-cadence, woken early on a structural event - a lane created/deleted).
-
-Because the orchestrator session pre-approves its own fleet tool calls (`--allowedTools` on
-Claude, the approval policy on Codex - no permission dialog to intercept, unlike a worker
-agent), the MCP server's own policy layer - autonomy level, a per-session action cap, a
-send-dedupe window, two-phase confirm tokens for destructive actions - is the *sole* gate on
-what repomind can do.
-
-The daemon's `notify_watch` tick, the same one that fires desktop alerts for lane agents, also
-classifies repomind's own attention (a pending dialog, or - Claude only - an idle end-of-turn)
-each pass and broadcasts it as `event.orchestrator.status`.
-
-</details>
+The daemon's `notify_watch` tick, the same one that fires desktop alerts for lane agents, also classifies repomind's own
+attention (a pending dialog, or - Claude only - an idle end-of-turn) each pass and broadcasts it as
+`event.orchestrator.status`.
 
 ## Session backends (tmux on Unix, host processes on Windows)
 
-Use `SessionBackend` for runtime operations on both platforms.
+Every place the runtime spawns, captures, sends input to, resizes, streams, or kills an agent goes through one trait,
+`SessionBackend` (`crates/repomon-core/src/agent/backend.rs`). There are two implementations and nothing else in the
+daemon knows which is live:
 
-<details>
-<summary>Details</summary>
-
-Every place the runtime spawns, captures, sends input to, resizes, streams, or kills an agent
-goes through one trait, `SessionBackend` (`crates/repomon-core/src/agent/backend.rs`).
-
-There are two implementations and nothing else in the daemon knows which is live:
-
-- **Unix, `TmuxRuntime`.** tmux owns the durable, out-of-process agent runtime; the trait
-  methods render to `tmux` subcommands (`new-window`, `capture-pane`, `send-keys`,
-  `resize-window`, `pipe-pane`, `attach`, `kill-window`). tmux itself is resolved in order: a
-  system install on `PATH`, then a portable tmux binary bundled with the app as a sidecar, so
-  macOS and Linux need no separate tmux install.
+- **Unix, `TmuxRuntime`.** tmux owns the durable, out-of-process agent runtime; the trait methods render
+  to `tmux` subcommands (`new-window`, `capture-pane`, `send-keys`, `resize-window`, `pipe-pane`,
+  `attach`, `kill-window`). tmux itself is resolved in order: a system install on `PATH`, then a portable
+  tmux binary bundled with the app as a sidecar, so macOS and Linux need no separate tmux install.
 - **Windows, `WindowsBackend`.** No tmux. Each agent runs in its own detached host process,
-  `repomon-agent-host.exe`, which owns a ConPTY child plus a server-side `vt100` screen with
-  50 000 lines of scrollback (parity with tmux `history-limit 50000`). The backend is a
-  named-pipe client of those hosts.
+  `repomon-agent-host.exe`, which owns a ConPTY child plus a server-side `vt100` screen with 50 000 lines
+  of scrollback (parity with tmux `history-limit 50000`). The backend is a named-pipe client of those
+  hosts.
 
-Commands are assembled structurally as a `SpawnSpec { program, args, cwd, env }` rather than a
-shell string: the tmux backend renders it through its existing shell-quoting, and the Windows
-host feeds it straight to ConPTY, so there is no `sh -c` or `cmd /c` quoting on Windows.
-
-</details>
+Commands are assembled structurally as a `SpawnSpec { program, args, cwd, env }` rather than a shell string: the tmux
+backend renders it through its existing shell-quoting, and the Windows host feeds it straight to ConPTY, so there is no
+`sh -c` or `cmd /c` quoting on Windows.
 
 ### tmux-parity mapping
-
-Match the backend operation in the table before adding platform-specific code.
 
 | Concept | Unix (tmux) | Windows (host processes) |
 |---|---|---|
@@ -300,82 +203,47 @@ Match the backend operation in the table before adding platform-specific code.
 
 ### Durability and re-adoption (Windows)
 
-Preserve owner verification and scrollback when changing host re-adoption.
-
-<details>
-<summary>Details</summary>
-
-Hosts are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and keep running when the
-daemon dies, the same durability tmux gives on Unix.
-
-On startup `WindowsBackend` scans the registry directory, connects to each pipe, verifies the
-`hello` (owner token + liveness), GCs stale entries whose pipe will not connect, and
-**re-adopts** the surviving hosts with scrollback intact.
-
-This is the Windows equivalent of the daemon rediscovering an existing tmux server.
-
-Liveness on Windows skips the Unix `ps`/`lsof`//proc probe entirely: a host authoritatively
-knows whether its child is alive, so the backend asks it directly.
-
-</details>
+Hosts are spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and keep running when the daemon dies, the same
+durability tmux gives on Unix. On startup `WindowsBackend` scans the registry directory, connects to each pipe, verifies
+the `hello` (owner token + liveness), GCs stale entries whose pipe will not connect, and **re-adopts** the surviving
+hosts with scrollback intact. This is the Windows equivalent of the daemon rediscovering an existing tmux server.
+Liveness on Windows skips the Unix `ps`/`lsof`//proc probe entirely: a host authoritatively knows whether its child is
+alive, so the backend asks it directly.
 
 ### Named-pipe control protocol
 
-Implement against the [frozen host protocol](../crates/repomon-host/PROTOCOL.md).
+Each host serves one pipe, `\\.\pipe\repomon-<session>-<window>`, secured with a per-user DACL. The wire format is
+length-prefixed JSON with request/response ops (`hello`, `capture`, `cursor`, `size`, `alternate_on`, `resize`,
+`send_literal`, `send_text`, `send_key`, `scroll_wheel`, `subscribe_bytes`, `kill`). The full, frozen contract is
+[../crates/repomon-host/PROTOCOL.md](../crates/repomon-host/PROTOCOL.md). Three points worth calling out because clients
+(the daemon backend and the attach client) depend on them:
 
-<details>
-<summary>Details</summary>
-
-Each host serves one pipe, `\\.\pipe\repomon-<session>-<window>`, secured with a per-user DACL.
-
-The wire format is length-prefixed JSON with request/response ops (`hello`, `capture`, `cursor`,
-`size`, `alternate_on`, `resize`, `send_literal`, `send_text`, `send_key`, `scroll_wheel`,
-`subscribe_bytes`, `kill`).
-
-The full, frozen contract is
-[../crates/repomon-host/PROTOCOL.md](../crates/repomon-host/PROTOCOL.md).
-
-Three points worth calling out because clients (the daemon backend and the attach client) depend
-on them:
-
-- **The byte stream is a raw byte channel.** `subscribe_bytes` switches the connection to
-  stream mode; its **first** frame is a full current-screen replay (a client that starts a
-  fresh emulator, applies frame 1, then applies subsequent frames verbatim converges exactly),
-  and every later frame is a raw PTY output chunk.
-- **A client derives the pipe name from config.** The `<window>` half of the pipe name is the
-  tmux/host window id; the `<session>` half is `config.tmux_session` (default `repomon`), the
-  same session name the tmux backend uses. A client that knows the window and the configured
-  session name can compute the pipe without a lookup.
-- **An interactive attach uses two connections.** Once a connection has issued
-  `subscribe_bytes` the host ignores any further client frames on it (disconnect is the only
-  unsubscribe), so an attach client opens a **second** control connection for `resize` /
-  `send_*` while the first streams bytes to the terminal.
-
-</details>
+- **The byte stream is a raw byte channel.** `subscribe_bytes` switches the connection to stream mode;
+  its **first** frame is a full current-screen replay (a client that starts a fresh emulator, applies
+  frame 1, then applies subsequent frames verbatim converges exactly), and every later frame is a raw PTY
+  output chunk.
+- **A client derives the pipe name from config.** The `<window>` half of the pipe name is the tmux/host
+  window id; the `<session>` half is `config.tmux_session` (default `repomon`), the same session name the
+  tmux backend uses. A client that knows the window and the configured session name can compute the pipe
+  without a lookup.
+- **An interactive attach uses two connections.** Once a connection has issued `subscribe_bytes` the host
+  ignores any further client frames on it (disconnect is the only unsubscribe), so an attach client opens
+  a **second** control connection for `resize` / `send_*` while the first streams bytes to the terminal.
 
 ## Performance posture
 
-Keep blocking git, runtime and SQLite work off the UI and async reactor.
-
-<details>
-<summary>Details</summary>
-
 - All git and tmux work runs in `spawn_blocking`; the reactor never blocks.
 - SQLite writes go through one owned connection on a dedicated thread.
-- The output streamer fast-polls only *visible* lanes, on an activity-driven backoff (the
-  focused pane stays fast; idle/background panes back off to a cap) with a per-tick capture cap,
-  and each tmux capture is a single fork; at rest it does nothing.
-- Hot reads are cached so rapid client polls don't re-scan: the `lane.list` overlay (lanes +
-  agent sessions) behind a short TTL invalidated only on structural changes, plus per-worktree
-  gix-status, per-repo `git worktree list`, and per-window pending-prompt caches. A transcript
-  write touches no worktree, so it never triggers a status walk.
+- The output streamer fast-polls only *visible* lanes, on an activity-driven backoff (the focused pane
+  stays fast; idle/background panes back off to a cap) with a per-tick capture cap, and each tmux capture
+  is a single fork; at rest it does nothing.
+- Hot reads are cached so rapid client polls don't re-scan: the `lane.list` overlay (lanes + agent
+  sessions) behind a short TTL invalidated only on structural changes, plus per-worktree gix-status,
+  per-repo `git worktree list`, and per-window pending-prompt caches. A transcript write touches no
+  worktree, so it never triggers a status walk.
 - The TUI renders cached state, so first paint doesn't wait on the daemon.
 
-</details>
-
 ### Measured (release, macOS, 3 fixture repos × 8 commits)
-
-Compare new measurements with these fixture results; they are historical measurements, not device guarantees.
 
 | Gate | Target | Measured |
 |---|---|---|
@@ -384,22 +252,12 @@ Compare new measurements with these fixture results; they are historical measure
 | daemon CPU, monitoring agents (idle) | < 2 % | ~1.35 % avg · median 0 % |
 | daemon CPU, 8-pane Grid live-streaming | < 6 % | ~5 % avg · 2.5 % median |
 
-<details>
-<summary>Details</summary>
+(`hyperfine` wasn't available, so the latency rows were timed with a `perf_counter` harness over fixture repos; the CPU
+rows were sampled live via `ps` CPU-time deltas.) The per-lane Claude status lookup is an O(1) encoded-directory check
+on the hot path; the encoding-drift fallback scan is reserved for explicit use to keep refresh fast.
 
-(`hyperfine` wasn't available, so the latency rows were timed with a `perf_counter` harness over
-fixture repos; the CPU rows were sampled live via `ps` CPU-time deltas.) The per-lane Claude
-status lookup is an O(1) encoded-directory check on the hot path; the encoding-drift fallback
-scan is reserved for explicit use to keep refresh fast.
+The CPU figures are post-optimization. The daemon previously pegged a core (~150 % sustained, all fork/exec overhead
+from a flat-10 Hz multi-fork pane streamer and a per-call worktree-walk storm - the tmux server itself idled at 0.3 %);
+the streamer backoff, single-fork captures, and the overlay/status caches above brought it down to the numbers shown.
 
-The CPU figures are post-optimization.
-
-The daemon previously pegged a core (~150 % sustained, all fork/exec overhead from a flat-10 Hz
-multi-fork pane streamer and a per-call worktree-walk storm - the tmux server itself idled at
-0.3 %); the streamer backoff, single-fork captures, and the overlay/status caches above brought
-it down to the numbers shown.
-
-See [protocol.md](protocol.md) for the wire API and [agents.md](agents.md) for agent
-integration.
-
-</details>
+See [protocol.md](protocol.md) for the wire API and [agents.md](agents.md) for agent integration.
