@@ -13,10 +13,8 @@ export type ModelRateRow = {
  */
 model: string, input_per_mtok: number, output_per_mtok: number, cache_read_per_mtok: number, cache_write_per_mtok: number, source: ModelRateSource, 
 /**
- * The raw, possibly-sparse override from `[usage.price_overrides]`, when this model has one.
- * This is the operator's own input, not the resolved row above: a partial override (say,
- * only `output_per_mtok`) still shows only that one field set here, even though the row's
- * other three rates above are filled in from the snapshot or built-in table underneath it.
+ * Retains the sparse user input rather than the resolved rates so omitted fields remain
+ * inheritable.
  */
 override: PriceOverride | null, 
 /**

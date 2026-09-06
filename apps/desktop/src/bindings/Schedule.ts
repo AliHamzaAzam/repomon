@@ -6,6 +6,6 @@
  */
 export type Schedule = { id: number, spec: string, prompt: string, 
 /**
- * The run's action cap — deliberately lower than an attended session's.
+ * The run's action cap - deliberately lower than an attended session's.
  */
 max_actions: number, created_at: string, last_run_at: string | null, };

@@ -3,6 +3,6 @@ import type { UsageWindow } from "./UsageWindow";
 
 /**
  * An account's usage: an ordered list of limit windows (shortest first). Empty/absent windows
- * mean nothing was readable — clients show nothing rather than zeros.
+ * mean nothing was readable - clients show nothing rather than zeros.
  */
 export type UsageReport = { windows: Array<UsageWindow>, };

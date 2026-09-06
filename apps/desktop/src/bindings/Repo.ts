@@ -11,8 +11,8 @@ export type Repo = { id: number, path: string, name: string, added_at: string, w
  */
 hidden: boolean, 
 /**
- * Manual-order position assigned by a full reorder (`repo.reorder`). `None` keeps the repo
- * in the legacy name order; listings sort positioned repos first, then the rest by name.
+ * Places explicitly positioned repositories first in manual order, then unpositioned
+ * repositories by name.
  */
 position: number | null, 
 /**

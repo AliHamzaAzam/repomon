@@ -5,7 +5,7 @@ import type { Worktree } from "./Worktree";
 import type { WorktreeState } from "./WorktreeState";
 
 /**
- * The materialized `(repo, worktree, agent?)` join — the UI's primary unit.
+ * The materialized `(repo, worktree, agent?)` join - the UI's primary unit.
  */
 export type Lane = { id: number, repo: Repo, worktree: Worktree, state: WorktreeState, 
 /**

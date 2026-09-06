@@ -12,12 +12,12 @@ export type AgentSession = { id: number, agent: string, repo_id: number, worktre
  */
 status: AgentStatus, 
 /**
- * True when detected from a transcript but NOT managed by repomon — i.e. running in
+ * True when detected from a transcript but NOT managed by repomon - i.e. running in
  * another terminal. Overlaid at list time; adopt it to interact from within repomon.
  */
 external: boolean, 
 /**
- * The agent's session id (Claude transcript id), when known — lets adopt resume this
+ * The agent's session id (Claude transcript id), when known - lets adopt resume this
  * exact session even when several run in the same worktree.
  */
 session_id: string | null, 
@@ -27,10 +27,8 @@ session_id: string | null,
  */
 resume_at: string | null, 
 /**
- * True when this session was *inferred* from raw worktree file activity rather than detected
- * from a transcript or live process — i.e. repomon can see the worktree is being worked on
- * but can't identify the specific agent (Claude Code worktree-isolated subagents). The UI
- * renders these with a softer "active" indicator and they don't drive "needs you" alerts.
+ * Marks sessions inferred from worktree file activity rather than an identified transcript or
+ * process, excluding them from needs-you alerts.
  */
 inferred: boolean, 
 /**
@@ -40,25 +38,25 @@ inferred: boolean,
  */
 tmux_window: string | null, 
 /**
- * The agent's most recent message text (truncated) — what it said or asked when it last
+ * The agent's most recent message text (truncated) - what it said or asked when it last
  * ended a turn. Gives needs-you notifications their "why".
  */
 last_message: string | null, 
 /**
  * Set only when the pane is sitting on an interactive dialog (permission prompt, plan
  * approval, option question): the dialog's summary. Clients show approve/menu controls
- * exactly when this is present — a plain end-of-turn `Waiting` has none.
+ * exactly when this is present - a plain end-of-turn `Waiting` has none.
  */
 pending_prompt: string | null, 
 /**
- * The full parsed dialog behind `pending_prompt` — question, body, options, cursor — so
+ * The full parsed dialog behind `pending_prompt` - question, body, options, cursor - so
  * clients can render answer controls without capturing the pane themselves. Overlaid at
  * list time alongside `pending_prompt`; not persisted.
  */
 pending_dialog?: PendingDialog | null, 
 /**
  * Overlaid when the agent looks stuck: its window/process is alive, no dialog is up, it
- * did not end its turn — and neither the pane nor the transcript has moved for the stall
+ * did not end its turn - and neither the pane nor the transcript has moved for the stall
  * window. A watchdog signal, not a status: `status` still reads Running/Idle underneath.
  */
 stale: boolean, 
@@ -73,20 +71,12 @@ stalled_since?: string | null,
  */
 subagent_running?: string | null, 
 /**
- * One short phrase explaining why `status` reads the way it does: "permission dialog: Bash",
- * "subagent running", "spinner on screen", "no transcript activity for 6m". Overlaid at list
- * time and never persisted. Clients put it in a tooltip so a wrong status is reportable
- * rather than merely disbelieved.
+ * A live, unpersisted explanation of the session status for tooltips.
  */
 status_reason?: string | null, 
 /**
- * What this session wants from a human, in the shared attention taxonomy
- * (`crate::agent::attention::Attention::as_str`): "none", "end_of_turn", "permission",
- * "decision". Overlaid at list time and never persisted.
- *
- * It exists so a client can tell the two halves of `Waiting` apart without re-deriving
- * them: an agent that merely ended its turn wants nothing in particular, while one sitting
- * on a dialog or an explicit question wants the operator now.
+ * Exposes the shared attention kind at list time, distinguishing a completed turn from a
+ * prompt that needs the operator without persisting the overlay.
  */
 attention_kind?: string | null, 
 /**

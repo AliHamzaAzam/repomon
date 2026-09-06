@@ -2,20 +2,16 @@
 import type { DirtyState } from "./DirtyState";
 
 /**
- * The live git state of a worktree — the part that changes as work happens.
+ * The live git state of a worktree - the part that changes as work happens.
  */
 export type WorktreeState = { worktree_id: number, head: string, branch: string | null, upstream: string | null, ahead: number, behind: number, dirty: DirtyState, last_commit_at: string | null, locked: boolean, prunable: boolean, 
 /**
- * Newest mtime among the worktree's changed/untracked files — repomon's "file activity"
- * signal. Lets the daemon surface a worktree that's being actively edited by an agent that
- * leaves no transcript or process of its own (e.g. a Claude Code worktree-isolated subagent).
- * `None` when the worktree is clean. Computed live; not persisted.
+ * Carries the newest changed-file mtime as a live, unpersisted activity signal, absent for
+ * clean worktrees.
  */
 last_change_at: string | null, 
 /**
- * True when every commit on this branch is already contained in the repository's default
- * branch, so the worktree is finished work waiting to be cleaned up. `false` for the default
- * branch itself, for a detached head, and when no default branch can be resolved. Computed
- * live; not persisted, and omitted from the wire when false.
+ * Marks non-default attached branches already contained in the default branch, computed live
+ * and omitted when false.
  */
 merged?: boolean, };

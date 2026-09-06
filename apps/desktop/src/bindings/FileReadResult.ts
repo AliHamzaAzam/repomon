@@ -6,11 +6,8 @@
  */
 export type FileReadResult = { content: string, mtime_ms: number, size: number, 
 /**
- * Always `false`: unlike display RPCs (e.g. `lane.diff`'s patch, which caps-and-flags),
- * `file.read` REJECTS a file over its size cap outright rather than truncating it - a
- * truncated read here risks the editor saving the truncated copy back over the real file.
- * Kept for shape symmetry with other file DTOs (and a possible future soft-cap mode); the
- * frontend should not expect this to ever be `true` today.
+ * Always false because file.read rejects oversized files instead of returning truncated
+ * content that an editor could save over the original.
  */
 truncated: boolean, kind: string, 
 /**

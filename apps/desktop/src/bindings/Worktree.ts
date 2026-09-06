@@ -9,6 +9,6 @@ export type Worktree = { id: number, repo_id: number, path: string,
  */
 branch: string | null, head: string, is_main: boolean, 
 /**
- * Last path component — what the UI shows.
+ * Last path component - what the UI shows.
  */
 name: string, };

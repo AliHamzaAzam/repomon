@@ -2,6 +2,6 @@
 import type { SessionKind } from "./SessionKind";
 
 /**
- * A detected window of activity (Phase 3).
+ * Describes a detected window of activity.
  */
 export type WorkSession = { from: string, to: string, kind: SessionKind, repo_ids: Array<number>, repo_names: Array<string>, commit_count: number, };
