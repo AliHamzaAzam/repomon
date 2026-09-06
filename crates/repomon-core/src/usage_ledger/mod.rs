@@ -150,79 +150,6 @@ fn prefix_len(cwd: &Path, root: &Path) -> Option<usize> {
     }
 }
 
-/// One row of the daily rollup table.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UsageDailyRow {
-    /// The UTC day, `YYYY-MM-DD`.
-    pub day: String,
-    pub agent_kind: String,
-    pub model: String,
-    pub account: String,
-    pub repo_id: Option<RepoId>,
-    pub lane_id: Option<LaneId>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub thinking_tokens: u64,
-    /// Of the tokens in this row, how many were estimated rather than reported.
-    pub estimated_tokens: u64,
-    pub events: u64,
-}
-
-/// The UTC day an instant falls in, `YYYY-MM-DD`.
-pub fn day_key(at: DateTime<Utc>) -> String {
-    at.format("%Y-%m-%d").to_string()
-}
-
-/// Fold events into daily rows, one per day, kind, model, account, repo and lane.
-pub fn rollup(events: &[UsageEvent]) -> Vec<UsageDailyRow> {
-    type Key = (
-        String,
-        String,
-        String,
-        String,
-        Option<RepoId>,
-        Option<LaneId>,
-    );
-    let mut by: BTreeMap<Key, UsageDailyRow> = BTreeMap::new();
-    for e in events {
-        let key = (
-            day_key(e.at),
-            e.agent_kind.clone(),
-            e.model.clone(),
-            e.account.clone(),
-            e.repo_id,
-            e.lane_id,
-        );
-        let row = by.entry(key.clone()).or_insert_with(|| UsageDailyRow {
-            day: key.0.clone(),
-            agent_kind: key.1.clone(),
-            model: key.2.clone(),
-            account: key.3.clone(),
-            repo_id: key.4,
-            lane_id: key.5,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            thinking_tokens: 0,
-            estimated_tokens: 0,
-            events: 0,
-        });
-        row.input_tokens += e.input_tokens;
-        row.output_tokens += e.output_tokens;
-        row.cache_read_tokens += e.cache_read_tokens;
-        row.cache_write_tokens += e.cache_write_tokens;
-        row.thinking_tokens += e.thinking_tokens;
-        if e.estimated {
-            row.estimated_tokens += e.total_tokens();
-        }
-        row.events += 1;
-    }
-    by.into_values().collect()
-}
-
 /// The dimension a summary or timeline splits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1119,30 +1046,6 @@ mod tests {
     }
 
     #[test]
-    fn rollup_sums_one_day_per_kind_model_repo_lane_and_account() {
-        let rows = rollup(&[
-            row("claude-code", "claude-sonnet-5", 1, 0, 10, 20, 30),
-            row("claude-code", "claude-sonnet-5", 5, 0, 1, 2, 3),
-            row("codex", "gpt-5.6-sol", 5, 0, 100, 200, 0),
-        ]);
-        assert_eq!(rows.len(), 2, "the two same-model same-day rows merge");
-        let claude = rows.iter().find(|r| r.agent_kind == "claude-code").unwrap();
-        assert_eq!(claude.day, "2026-09-01");
-        assert_eq!(claude.input_tokens, 11);
-        assert_eq!(claude.output_tokens, 22);
-        assert_eq!(claude.cache_read_tokens, 33);
-        assert_eq!(claude.events, 2);
-    }
-
-    #[test]
-    fn rollup_keeps_days_apart() {
-        let mut late = row("claude-code", "claude-sonnet-5", 1, 0, 5, 5, 0);
-        late.at = Utc.with_ymd_and_hms(2026, 9, 2, 1, 0, 0).unwrap();
-        let rows = rollup(&[row("claude-code", "claude-sonnet-5", 1, 0, 5, 5, 0), late]);
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
     fn summary_totals_cache_hit_rate_and_estimated_share() {
         let mut estimated = row("antigravity", "gemini-3-flash", 2, 0, 100, 0, 0);
         estimated.estimated = true;
@@ -1215,7 +1118,15 @@ mod tests {
 
     #[test]
     fn a_free_tier_model_prices_at_zero_without_the_unpriced_flag() {
-        let events = vec![row("opencode", "kimi-k2-thinking-free", 1, 0, 1_000_000, 0, 0)];
+        let events = vec![row(
+            "opencode",
+            "kimi-k2-thinking-free",
+            1,
+            0,
+            1_000_000,
+            0,
+            0,
+        )];
         let s = summarize(&events, GroupBy::Model, &PriceTable::builtin());
         assert_eq!(s.totals.cost_usd, 0.0);
         assert!(s.unpriced_models.is_empty());
@@ -1335,7 +1246,12 @@ mod tests {
 
     #[test]
     fn a_finding_names_a_session_by_its_task_not_its_identifier() {
-        let sessions = vec![session("0f3a-uuid", "claude-sonnet-5", Some("Fix the flake"), 1.0)];
+        let sessions = vec![session(
+            "0f3a-uuid",
+            "claude-sonnet-5",
+            Some("Fix the flake"),
+            1.0,
+        )];
         let f = findings(&[], &sessions, &PriceTable::builtin());
         let retry = f
             .iter()

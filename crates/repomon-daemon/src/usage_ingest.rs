@@ -1130,21 +1130,6 @@ mod tests {
                 .ingest_version,
             repomon_core::usage_ledger::INGEST_VERSION
         );
-        let daily = ctx
-            .store
-            .usage_daily_between("2026-09-01".into(), "2026-09-01".into())
-            .await
-            .unwrap();
-        let rolled: u64 = daily.iter().map(|d| d.output_tokens).sum();
-        let counted: u64 = events
-            .iter()
-            .filter(|e| e.at.format("%Y-%m-%d").to_string() == "2026-09-01")
-            .map(|e| e.output_tokens)
-            .sum();
-        assert_eq!(
-            rolled, counted,
-            "the rollup matches the events it summarizes"
-        );
     }
 
     #[test]
