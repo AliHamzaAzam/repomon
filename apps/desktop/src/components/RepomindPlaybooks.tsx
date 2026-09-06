@@ -95,7 +95,15 @@ export default function RepomindPlaybooks(props: RepomindPlaybooksProps) {
             {(book) => (
               <RowShell title={`Draft, written ${sinceLabel(book.updated_at)}`}>
                 <span class="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden="true" />
-                <span class="min-w-0 flex-1 truncate text-xs text-foreground">{book.name}</span>
+                <button
+                  type="button"
+                  class="focus-ring min-w-0 flex-1 truncate rounded text-left text-xs text-foreground hover:underline"
+                  onClick={() => props.onOpen(`playbooks/drafts/${book.name}.md`)}
+                  title={`Review playbooks/drafts/${book.name}.md`}
+                  aria-label={`Review draft ${book.name}`}
+                >
+                  {book.name}
+                </button>
                 <Show when={book.status === "approved"}>
                   <span class="shrink-0 font-mono text-[10px] text-muted/70">revision</span>
                 </Show>

@@ -40,6 +40,16 @@ function mockDaemon(playbooks: Playbook[], overrides: Record<string, unknown> = 
 }
 
 describe("the playbooks section", () => {
+  it.each(["draft", "approved"])("opens the pending %s text for review without approving it", async (status) => {
+    mockDaemon([playbook({ status, draft_content: status === "approved" ? "pending revision" : null })]);
+    const onOpen = vi.fn();
+    render(() => <RepomindPlaybooks onOpen={onOpen} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Review draft fleet-sweep" }));
+    expect(onOpen).toHaveBeenCalledWith("playbooks/drafts/fleet-sweep.md");
+    expect(daemonCall).not.toHaveBeenCalledWith("playbook.approve", expect.anything());
+    expect(daemonCall).not.toHaveBeenCalledWith("playbook.reject", expect.anything());
+  });
+
   it("splits drafts waiting on a human from the approved ones agents get", async () => {
     mockDaemon([
       playbook(),
