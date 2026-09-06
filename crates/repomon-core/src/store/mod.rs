@@ -76,13 +76,22 @@ const MIGRATIONS: &[(i64, &str)] = &[
         25,
         include_str!("../../migrations/0025_usage_headline_version.sql"),
     ),
-    (26, include_str!("../../migrations/0026_usage_subagents.sql")),
+    (
+        26,
+        include_str!("../../migrations/0026_usage_subagents.sql"),
+    ),
     (
         27,
         include_str!("../../migrations/0027_usage_ingest_version.sql"),
     ),
-    (28, include_str!("../../migrations/0028_usage_events_model.sql")),
-    (29, include_str!("../../migrations/0029_usage_recount_failures.sql")),
+    (
+        28,
+        include_str!("../../migrations/0028_usage_events_model.sql"),
+    ),
+    (
+        29,
+        include_str!("../../migrations/0029_usage_recount_failures.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) —
@@ -2150,22 +2159,34 @@ impl Store {
         .await
     }
 
-    /// Keep old events and the resume offset after a failed recount. Three consecutive failed
-    /// attempts retire this cursor for the current reader; success resets the persisted counter.
+    /// Keep old events and the resume offset after a failed recount. At most one strike per
+    /// minute counts toward retiring this cursor; success resets the persisted counter.
     pub async fn fail_usage_recount(
         &self,
         source_path: String,
         error: String,
         version: u32,
     ) -> Result<()> {
-        let now = to_iso(&Utc::now());
+        self.fail_usage_recount_at(source_path, error, version, Utc::now())
+            .await
+    }
+
+    async fn fail_usage_recount_at(
+        &self,
+        source_path: String,
+        error: String,
+        version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let cutoff = to_iso(&(now - chrono::Duration::seconds(60)));
+        let now = to_iso(&now);
         self.call(move |c| {
             c.execute(
                 "UPDATE usage_ingest_cursors SET error = ?2, scanned_at = ?3,
                     ingest_version = CASE WHEN recount_failures + 1 >= 3 THEN ?4 ELSE ingest_version END,
                     recount_failures = CASE WHEN recount_failures + 1 >= 3 THEN 0 ELSE recount_failures + 1 END
-                 WHERE source_path = ?1 AND ingest_version < ?4",
-                params![source_path, error, now, version],
+                 WHERE source_path = ?1 AND ingest_version < ?4 AND scanned_at <= ?5",
+                params![source_path, error, now, version, cutoff],
             )?;
             Ok(())
         })
@@ -2175,9 +2196,8 @@ impl Store {
     /// How many sources an older reader wrote and ingest has yet to re-read.
     pub async fn usage_sources_below_ingest_version(&self, version: u32) -> Result<u64> {
         self.call(move |c| {
-            let mut stmt = c.prepare(
-                "SELECT COUNT(*) FROM usage_ingest_cursors WHERE ingest_version < ?1",
-            )?;
+            let mut stmt =
+                c.prepare("SELECT COUNT(*) FROM usage_ingest_cursors WHERE ingest_version < ?1")?;
             let n: i64 = stmt.query_row(params![version as i64], |row| row.get(0))?;
             Ok(n.max(0) as u64)
         })
@@ -2296,7 +2316,13 @@ impl Store {
             c.execute(
                 "UPDATE usage_sessions SET headline = ?1, headline_raw = ?2, headline_version = ?3
                  WHERE agent_kind = ?4 AND session_id = ?5",
-                params![headline, headline_raw, version as i64, agent_kind, session_id],
+                params![
+                    headline,
+                    headline_raw,
+                    version as i64,
+                    agent_kind,
+                    session_id
+                ],
             )?;
             Ok(())
         })
@@ -2825,8 +2851,7 @@ fn usage_event_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::Usag
 }
 
 /// The `usage_ingest_cursors` columns, in the order [`usage_cursor_from_row`] reads them.
-const USAGE_CURSOR_COLS: &str =
-    "source_path, offset, mtime, scanned_at, error, ingest_version";
+const USAGE_CURSOR_COLS: &str = "source_path, offset, mtime, scanned_at, error, ingest_version";
 
 fn usage_cursor_from_row(row: &Row) -> rusqlite::Result<crate::usage_ledger::UsageCursor> {
     Ok(crate::usage_ledger::UsageCursor {
@@ -3246,7 +3271,11 @@ mod tests {
         let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(actions, vec!["spawn_agent", "merge_lane"]);
         assert!(rows.iter().all(|r| r.id > first));
-        assert_eq!(s.journal_after(0, 2).await.unwrap().len(), 2, "limit applies");
+        assert_eq!(
+            s.journal_after(0, 2).await.unwrap().len(),
+            2,
+            "limit applies"
+        );
     }
 
     #[tokio::test]
@@ -4629,7 +4658,10 @@ mod tests {
         let after: i64 = c21
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert!(after >= 22, "user_version must advance past 22, got {after}");
+        assert!(
+            after >= 22,
+            "user_version must advance past 22, got {after}"
+        );
         assert!(has_lane_role(&c21));
     }
 
@@ -5256,42 +5288,85 @@ mod tests {
         s.set_usage_cursor(path.clone(), 512, 99, None, 0)
             .await
             .unwrap();
-        for _ in 0..2 {
-            s.fail_usage_recount(path.clone(), "unreadable".into(), 1)
-                .await
-                .unwrap();
+        let start = s
+            .usage_cursor(path.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .scanned_at;
+        for seconds in [0, 59, 60, 60, 119, 120] {
+            s.fail_usage_recount_at(
+                path.clone(),
+                "unreadable".into(),
+                1,
+                start + chrono::Duration::seconds(seconds),
+            )
+            .await
+            .unwrap();
         }
+        let cursor = s.usage_cursor(path.clone()).await.unwrap().unwrap();
+        assert_eq!(cursor.ingest_version, 0);
+        assert_eq!(cursor.scanned_at, start + chrono::Duration::seconds(120));
         drop(s);
         let s = Store::open(&db).unwrap();
-        s.fail_usage_recount(path.clone(), "still unreadable".into(), 1)
-            .await
-            .unwrap();
-        let cursor = s.usage_cursor(path.clone()).await.unwrap().unwrap();
-        assert_eq!(cursor.ingest_version, 1);
-        assert_eq!(cursor.offset, 512);
-        assert_eq!(cursor.error.as_deref(), Some("still unreadable"));
-        // A later reader revision gets its own full retry budget.
-        s.fail_usage_recount(path.clone(), "retry".into(), 2)
-            .await
-            .unwrap();
-        s.fail_usage_recount(path.clone(), "retry".into(), 2)
-            .await
-            .unwrap();
+        s.fail_usage_recount_at(
+            path.clone(),
+            "too soon".into(),
+            1,
+            start + chrono::Duration::seconds(179),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             s.usage_cursor(path.clone())
                 .await
                 .unwrap()
                 .unwrap()
                 .ingest_version,
-            1
+            0
         );
+        s.fail_usage_recount_at(
+            path.clone(),
+            "third strike".into(),
+            1,
+            start + chrono::Duration::seconds(180),
+        )
+        .await
+        .unwrap();
+        let cursor = s.usage_cursor(path.clone()).await.unwrap().unwrap();
+        assert_eq!(cursor.ingest_version, 1);
+        assert_eq!(cursor.offset, 512);
+        assert_eq!(cursor.error.as_deref(), Some("third strike"));
+
+        // A successful read clears the two strikes accumulated for the next reader version.
+        for seconds in [240, 300] {
+            s.fail_usage_recount_at(
+                path.clone(),
+                "retry".into(),
+                2,
+                start + chrono::Duration::seconds(seconds),
+            )
+            .await
+            .unwrap();
+        }
         s.set_usage_cursor(path.clone(), 1024, 100, None, 2)
             .await
             .unwrap();
-        for _ in 0..2 {
-            s.fail_usage_recount(path.clone(), "new failure".into(), 3)
-                .await
-                .unwrap();
+        let reset = s
+            .usage_cursor(path.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .scanned_at;
+        for seconds in [60, 120] {
+            s.fail_usage_recount_at(
+                path.clone(),
+                "new failure".into(),
+                3,
+                reset + chrono::Duration::seconds(seconds),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 s.usage_cursor(path.clone())
                     .await
@@ -5301,9 +5376,14 @@ mod tests {
                 2
             );
         }
-        s.fail_usage_recount(path.clone(), "third failure".into(), 3)
-            .await
-            .unwrap();
+        s.fail_usage_recount_at(
+            path.clone(),
+            "third failure".into(),
+            3,
+            reset + chrono::Duration::seconds(180),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             s.usage_cursor(path).await.unwrap().unwrap().ingest_version,
             3
@@ -5414,13 +5494,28 @@ mod tests {
             init(&mut conn).unwrap();
             // Reopening an already-migrated database is idempotent.
             run_migrations(&mut conn).unwrap();
-            let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
             assert!(version >= 28);
             let mut stmt = conn.prepare("EXPLAIN QUERY PLAN SELECT model, MAX(at), SUM(CASE WHEN at >= ?1 THEN input_tokens + output_tokens + cache_read_tokens + cache_write_tokens ELSE 0 END) FROM usage_events GROUP BY model ORDER BY model ASC").unwrap();
-            let plan: Vec<String> = stmt.query_map(["2026-08-01T00:00:00Z"], |r| r.get(3)).unwrap().map(|r| r.unwrap()).collect();
-            assert!(plan.iter().any(|line| line.contains("idx_usage_events_model")), "{plan:?}");
-            assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
-            let count: i64 = conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0)).unwrap();
+            let plan: Vec<String> = stmt
+                .query_map(["2026-08-01T00:00:00Z"], |r| r.get(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("idx_usage_events_model")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(count, i64::from(existing));
         }
     }
