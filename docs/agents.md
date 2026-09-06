@@ -248,6 +248,61 @@ rate limit, or stall. Agent-to-agent injection is off by default. Operator and r
 is on by default. Inbox access works even when injection is disabled or unsupported. See
 `docs/messaging.md` for addressing, threading, limits, and UI behavior.
 
+## Fleet mail and MCP wiring by agent kind
+
+Fleet mail and the orchestrator role both ride on the restricted MCP surface the daemon exposes
+(`message_send`, `message_inbox`, `message_mark_read`, `fleet_status`). Mail is addressed by
+`lane-X/slot`, never by kind, so any wired agent can mail any other; see `docs/messaging.md` for
+the address grammar. What differs per kind is how the MCP server gets registered and whether the
+kind can run as an orchestrator.
+
+| Kind | Worker fleet mail | Orchestrator | Transcript |
+|------|-------------------|--------------|------------|
+| Claude Code (`claude`) | yes, `--mcp-config` | yes | full JSONL under `~/.claude/projects/` |
+| Codex (`codex`) | yes, `-c mcp_servers.repomon...` | yes | pane view only |
+| Antigravity (`agy`) | yes, `~/.gemini/config/mcp_config.json` | yes | pane view only |
+| OpenCode (`opencode`) | yes, `OPENCODE_CONFIG_CONTENT` | yes | pane view only |
+| Cursor (`cursor-agent`) | yes, `~/.cursor/mcp.json` | no | pane view only |
+| Aider (`aider`) | no, Aider has no MCP client | no | mtime only |
+| Custom (`[agents]` entries) | routed by the binary's dialect, see below | no | none |
+
+Every wired kind satisfies four pillars on both the spawn and the adopt path: a registration
+mechanism for the MCP server, `REPOMON_MCP_MODE=agent`, `REPOMON_MCP_SOCKET`, and
+`REPOMON_MCP_IDENTITY_TOKEN` in the process environment. The three environment variables are set
+for every kind, Aider and unknown custom agents included, so a future MCP-capable version or an
+operator wrapper picks them up without changes here. No token or socket path is ever written to a
+config file on disk; the registered command only names the `repomond mcp` executable.
+
+All kinds can be adopted. Claude Code, OpenCode and Antigravity resume their session (`--resume`,
+`--session`, `--conversation`); Codex, Cursor, Aider and custom agents re-launch fresh in the
+worktree because they have no resume flag.
+
+### Custom agents
+
+An `[agents]` entry is classified by its binary name before flags are applied, so a custom
+command inherits the wiring of the agent it wraps:
+
+```toml
+[agents]
+claude-yolo = "claude --dangerously-skip-permissions"   # Claude Code wiring
+my-agy      = "agy --mode plan"                         # Antigravity wiring
+my-cursor   = "cursor-agent --approve-mcps"             # Cursor wiring
+exotic-tool = "my-exotic-agent"                         # unknown binary: no MCP wiring
+```
+
+### Cursor notes
+
+The CLI is `cursor-agent` (`-p <prompt>` for headless runs, `--approve-mcps` to auto-approve MCP
+tools, `cursor-agent mcp list` to inspect registrations). Registration goes into the global
+`~/.cursor/mcp.json` (or the path in `REPOMON_CURSOR_MCP_CONFIG`) with the standard `mcpServers`
+shape; a project-level `.cursor/mcp.json` also works. Cursor cannot act as an orchestrator.
+
+### Aider notes
+
+The core Aider CLI has no MCP client, so Aider workers get no fleet mail. Community wrappers
+(`mcpm-aider`, `AiderDesk`) exist but need a wrapper repomon cannot know about; the environment
+variables are still set so such a wrapper can use them.
+
 ## External sessions (running in another terminal)
 
 Because status comes from the transcript, a `claude` you start in any other terminal inside a
