@@ -1,11 +1,5 @@
-//! The local-IPC JSON-RPC server (a Unix domain socket on unix, a named pipe on Windows —
-//! see `repomon_core::transport`).
-//!
-//! Each connection runs three cooperating tasks: a reader (so `read_frame`, which isn't
-//! cancel-safe, always runs to completion), an event forwarder that drains the event bus, and a
-//! single writer that owns the write half — so responses and pushed notifications are serialized
-//! (never interleave mid-frame) but a slow RPC dispatch can never stall event draining, which is
-//! what used to overflow the broadcast and drop `event.agent.bytes` (terminal glitches).
+//! Serves local framed JSON-RPC over Unix sockets or Windows pipes. Independent reading and event
+//! forwarding keep slow RPCs from blocking terminal events; one writer serializes complete frames.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,10 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::{Ctx, rpc};
 
-/// How long the reader will wait on a silent socket before tearing itself down. A half-open client
-/// (gone away but still holding the fd) otherwise parks the reader task forever, leaking one task
-/// per reconnect. Generous — well past the TUI's 1s `lane.list` poll, so a healthy idle client is
-/// never dropped; the connection task simply re-accepts on the next request.
+/// Bounds silent-reader lifetime so abandoned connections cannot accumulate tasks.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bind the local IPC endpoint and serve until shutdown is requested. `socket_path` is the
@@ -60,12 +51,8 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);
     let reader_ctx = ctx.clone();
     tokio::spawn(async move {
-        // `read_frame` isn't cancel-safe, so we only ever drop it *between* whole frames: the
-        // select races the next frame against shutdown and an idle ceiling, both of which can only
-        // fire while we're parked waiting for the first byte of a frame, never mid-frame.
-        // Stops on clean EOF, read error, the connection task dropping the receiver, daemon
-        // shutdown, or a client that goes silent while holding the socket half-open (idle timeout)
-        // — without which a wedged client would park this task forever, leaking one per reconnect.
+        // Cancellation may interrupt a partial frame, so shutdown or timeout must abandon this
+        // reader permanently rather than resume parsing the same stream.
         loop {
             let frame = tokio::select! {
                 _ = reader_ctx.shutdown.notified() => break,
@@ -101,13 +88,10 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
         }
     });
 
-    // Off until a `subscribe` request turns it on.
     let forwarding = Arc::new(AtomicBool::new(false));
 
-    // Event-forwarder task: drains the event bus PROMPTLY, independent of RPC dispatch. In the old
-    // single-select loop a slow `lane.list` overlay (or a large response write) stalled event
-    // draining, overflowing the broadcast and silently dropping `event.agent.bytes` — the terminal
-    // dropped-characters glitch. A dedicated drainer keeps the bus empty so nothing is lost.
+    // Drain events independently of RPC dispatch so slow overlays or response writes do not
+    // overflow the broadcast buffer.
     let forwarder = {
         let mut events = ctx.events.subscribe();
         let forwarding = forwarding.clone();
@@ -143,8 +127,6 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
         })
     };
 
-    // RPC loop: dispatch requests and hand responses to the writer. Event forwarding runs in its own
-    // task above, so a slow dispatch here no longer stalls it.
     while let Some(frame) = in_rx.recv().await {
         let req: Request = match serde_json::from_slice(&frame) {
             Ok(r) => r,

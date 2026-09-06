@@ -1,19 +1,5 @@
-//! Deterministic coverage for the "claude CLI not on PATH" (-32021) error path.
-//!
-//! This lives in its own file (its own test binary/process) rather than alongside the other
-//! `plugin.*`/`ext.*` coverage in `tests/integration.rs`. `claude_cli()`'s cache
-//! (`static CLAUDE_CLI` in `repomon-daemon/src/rpc.rs`) is process-global and, by design, only
-//! ever caches a *successful* detection (see the -32021 fix: a miss re-probes so installing the
-//! CLI later doesn't need a daemon restart). That means once any test in a given process
-//! successfully detects a real `claude` binary, every later `claude_cli()` call in that same
-//! process returns the cached handle immediately, `REPOMON_CLAUDE_BIN` override or not. On a
-//! machine that actually has `claude` on PATH (as this one does, since this daemon is developed
-//! from inside Claude Code), running this test alongside `tests/integration.rs`'s
-//! `extension_rpcs_list_toggle_and_fan_out` / `plugin_details_returns_cli_text_or_structured_error`
-//! (both of which exercise `claude_cli()` against the real system binary) made the -32021
-//! assertion here flaky-to-always-failing depending on test execution order. A separate file
-//! gives this test a pristine `CLAUDE_CLI` static regardless of what else is on PATH or what
-//! order tests run in.
+//! Isolates missing-CLI discovery because successful CLAUDE_CLI discovery is cached for the process
+//! lifetime.
 
 use std::time::Duration;
 

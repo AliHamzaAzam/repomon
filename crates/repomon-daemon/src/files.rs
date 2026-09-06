@@ -1,14 +1,6 @@
-//! Worktree-scoped file I/O for the upcoming in-app file editor.
-//!
-//! `file.list` (D1) lists one directory level of a lane's worktree; `file.read`/`file.write`
-//! (D2) read and atomically write individual files within it. All three are **local-only** — see
-//! `remote::remote_method_allowed`'s doc comment, which withholds them for the same reason it
-//! already withholds `fs.browse`, doubly so now that `file.write` touches the host filesystem.
-//!
-//! Path handling mirrors `ext::skill_path_allowed`: every caller-supplied path is resolved
-//! through [`worktree_path_allowed`] before any filesystem call, which canonicalizes both the
-//! worktree root and the candidate (via `ext::canonical_prefix`, symlink-safe and tolerant of a
-//! not-yet-existing tail) and requires strict prefix containment.
+//! Implements local worktree file operations. Canonical path containment, including symlink
+//! resolution, prevents access outside the lane root; new files validate their existing parent
+//! path.
 
 use std::collections::HashSet;
 use std::io;
@@ -39,21 +31,8 @@ pub const LARGE_FILE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 /// How many leading bytes to sniff for a null byte when classifying binary vs. text.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// Resolve `rel` (a caller-supplied path, relative to `root`) to an absolute path guaranteed to
-/// live inside `root`, or `None` if it doesn't. `rel = ""` resolves to `root` itself (used for a
-/// `file.list` with no `path`). Two layers, both required:
-///
-/// 1. Reject an absolute `rel`, or one with a literal `..` component, before joining anything.
-///    `PathBuf::join` silently **discards the base** when handed an absolute second argument, so
-///    skipping this would let a caller-supplied `/etc/passwd` sail straight through the
-///    containment check below unchanged.
-/// 2. Canonicalize both `root` and the joined candidate (`ext::canonical_prefix`, which
-///    tolerates a not-yet-existing tail — needed because `file.write` may be creating a new
-///    file, and per the task this also covers "canonicalize the parent" since the walk stops at
-///    the nearest existing ancestor, normally the parent directory) and require the target's
-///    resolution to literally start with the root's. This is what actually catches a symlink
-///    escape (a committed symlink inside the worktree pointing outside it), which layer 1 can't
-///    see.
+/// Resolves a relative worktree path only after rejecting absolute paths and parent traversal and
+/// verifying canonical containment, including symlinks and nonexistent tails.
 pub fn worktree_path_allowed(root: &Path, rel: &str) -> Option<PathBuf> {
     let candidate = Path::new(rel);
     if candidate.is_absolute()
@@ -73,16 +52,8 @@ pub fn worktree_path_allowed(root: &Path, rel: &str) -> Option<PathBuf> {
     }
 }
 
-/// One level of `dir` (assumed already validated by [`worktree_path_allowed`] and inside `root`),
-/// gitignore-aware and capped at [`LIST_CAP`]. Sorted directories-first, then case-insensitively
-/// by name — same convention as `browse_dir`.
-///
-/// **Gitignore approach:** `repomon-core`'s only gix status walk (`reader::dirty_state`) iterates
-/// tracked/changed files across the whole tree via `gix::status()` — it isn't a one-level
-/// directory lister and by default excludes ignored entries entirely rather than flagging them,
-/// so reusing it here isn't straightforward. Instead this always excludes `.git` (independent of
-/// gitignore) and classifies the rest with one batched `git check-ignore --stdin` per listing
-/// (see [`check_ignored`]) rather than a shell-out per entry.
+/// Lists one validated directory level, excluding .git, flagging ignored entries with one batched
+/// probe, and capping results sorted directories-first by name.
 pub fn list_dir(root: &Path, dir: &Path) -> io::Result<FileListResult> {
     let mut raw = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -129,12 +100,8 @@ pub fn list_dir(root: &Path, dir: &Path) -> io::Result<FileListResult> {
     Ok(FileListResult { entries, truncated })
 }
 
-/// Batch-classify already-collected worktree-relative paths as git-ignored via one
-/// `git check-ignore --stdin`, instead of a shell-out per entry. Best-effort: any failure (git
-/// missing, `root` not a git repo, non-UTF8 output, ...) reports nothing ignored. This flag is
-/// informational (dims an entry in the tree) rather than a security boundary — the containment
-/// check in [`worktree_path_allowed`] is the actual boundary — so failing open here can't expose
-/// anything that check wouldn't already gate.
+/// Batch-classifies ignored paths, returning no ignored entries on failure because this display
+/// hint does not enforce path containment.
 pub(crate) fn check_ignored(root: &Path, rel_paths: &[String]) -> HashSet<String> {
     use std::io::Write;
     use std::process::Stdio;
@@ -383,10 +350,7 @@ pub fn read_file_raw(path: &Path) -> Result<FileReadRawResult, ReadError> {
     Ok(FileReadRawResult { base64, mime, size })
 }
 
-/// Read the HEAD version of a worktree path for git diff and editor gutter markers.
-/// Executes `git show HEAD:<path>` in the lane worktree at `root`.
-/// Returns `missing` for untracked or newly added files, `binary` by null-byte sniff (or image extension),
-/// and `text` for valid UTF-8, capped at READ_CAP_BYTES.
+/// Returns the bounded HEAD version of a file with its content classification.
 pub fn diff_base(root: &Path, rel: &str) -> Result<FileDiffBaseResult, ReadError> {
     diff_base_capped(root, rel, READ_CAP_BYTES)
 }
@@ -404,10 +368,7 @@ fn diff_base_capped(root: &Path, rel: &str, cap: u64) -> Result<FileDiffBaseResu
 
     let arg = format!("HEAD:{norm_rel}");
 
-    // Check the blob's size before reading it: `git cat-file -s` doesn't materialize the object's
-    // content, so a path that resolves to a huge blob at HEAD gets rejected here without ever
-    // being fully read into memory the way `git show` below would. A non-zero exit here means the
-    // same thing it means for `git show` below - untracked or newly added, not an error.
+    // Check blob size before materializing content; a missing blob is handled by the read path.
     let size_child = background_command("git")
         .arg("-C")
         .arg(root)
@@ -476,9 +437,8 @@ fn diff_base_capped(root: &Path, rel: &str, cap: u64) -> Result<FileDiffBaseResu
 #[derive(Debug)]
 pub enum WriteError {
     Io(io::Error),
-    /// `expected_mtime_ms` was given and didn't match what's on disk (`actual_ms = None` when
-    /// the file no longer exists at all — also a conflict, not a fresh create, since the caller
-    /// believed it existed).
+    /// The expected modification time differs from disk, including a file deleted since the caller
+    /// read it.
     Conflict {
         expected_ms: u64,
         actual_ms: Option<u64>,
@@ -492,7 +452,7 @@ impl From<io::Error> for WriteError {
     }
 }
 
-/// Write a worktree file atomically (sibling temp file + rename — the same pattern
+/// Write a worktree file atomically (sibling temp file + rename - the same pattern
 /// `ensure_antigravity_mcp_registration` uses for config saves), optionally guarded by an
 /// optimistic-concurrency check against the mtime the editor last read.
 pub fn write_file(
@@ -899,21 +859,18 @@ mod tests {
     fn read_file_detects_binary_and_image_kinds() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Null byte sniffed as binary
         let bin_path = dir.path().join("blob.bin");
         std::fs::write(&bin_path, [b'a', b'b', 0u8, b'c']).unwrap();
         let bin_res = read_file(&bin_path).unwrap();
         assert_eq!(bin_res.kind, "binary");
         assert_eq!(bin_res.content, "");
 
-        // Image extension detected as image
         let img_path = dir.path().join("logo.png");
         std::fs::write(&img_path, [0x89, b'P', b'N', b'G']).unwrap();
         let img_res = read_file(&img_path).unwrap();
         assert_eq!(img_res.kind, "image");
         assert_eq!(img_res.content, "");
 
-        // Text file detected as text
         let txt_path = dir.path().join("hello.txt");
         std::fs::write(&txt_path, "hello text").unwrap();
         let txt_res = read_file(&txt_path).unwrap();
@@ -968,7 +925,7 @@ mod tests {
         assert!(!small_read.large);
 
         let large_path = dir.path().join("large.txt");
-        // 3 MiB file: exceeds 2 MiB threshold, under 8 MiB cap
+
         std::fs::write(&large_path, vec![b'a'; 3 * 1024 * 1024]).unwrap();
         let large_read = read_file(&large_path).unwrap();
         assert!(large_read.large);
@@ -984,7 +941,7 @@ mod tests {
         assert_eq!(read.content, "hello\n");
         assert_eq!(read.mtime_ms, written.mtime_ms);
         assert_eq!(read.size, written.size);
-        // Atomic write leaves no temp file behind.
+
         assert!(!dir.path().join("note.txt.repomon-tmp").exists());
     }
 
@@ -1003,7 +960,7 @@ mod tests {
             }
             other => panic!("expected Conflict, got is_ok={}", other.is_ok()),
         }
-        // Rejected write must not have touched the file.
+
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
     }
 
@@ -1023,7 +980,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Initialize git repo so check_ignored works
         let ok = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -1041,7 +997,6 @@ mod tests {
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(root.join("src/nested/deep.txt"), "deep\n").unwrap();
 
-        // Ignored directories and files
         std::fs::create_dir_all(root.join("target/debug")).unwrap();
         std::fs::write(root.join("target/debug/app"), "bin").unwrap();
 
@@ -1092,7 +1047,6 @@ mod tests {
         git_run(&["add", "hello.txt", "binary.dat"]);
         git_run(&["commit", "-m", "initial commit"]);
 
-        // 1. diff_base returns committed text content
         let base1 = diff_base(root, "hello.txt").unwrap();
         assert_eq!(base1.kind, "text");
         assert_eq!(base1.content, Some("original line\n".to_string()));
@@ -1103,12 +1057,10 @@ mod tests {
         assert_eq!(base2.kind, "text");
         assert_eq!(base2.content, Some("original line\n".to_string()));
 
-        // 3. Binary file returns binary kind with None content
         let base_bin = diff_base(root, "binary.dat").unwrap();
         assert_eq!(base_bin.kind, "binary");
         assert_eq!(base_bin.content, None);
 
-        // 4. Untracked file returns missing kind
         std::fs::write(root.join("new.txt"), "untracked\n").unwrap();
         let base_missing = diff_base(root, "new.txt").unwrap();
         assert_eq!(base_missing.kind, "missing");

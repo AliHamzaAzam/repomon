@@ -1,14 +1,5 @@
-//! Ingest: turn what the agents already wrote to disk into ledger rows.
-//!
-//! Nothing here talks to an agent or a network. Each pass lists the source files, skips the ones
-//! whose size and modification time match the cursor from last time, reads the rest from their
-//! stored offset, attributes each turn to a repo and lane by its working directory, and writes
-//! the events, the session digests and the new cursors. Because the unique key on
-//! `(source_path, source_offset)` rejects a row it already holds, a full re-read is harmless.
-//!
-//! All file work runs on `spawn_blocking`, and each pass reads at most
-//! [`repomon_core::config::UsageConfig::max_files_per_scan`] files, so a first run over years of
-//! transcripts never holds the RPC loop or the store thread.
+//! Read agent files on blocking workers and publish attributed events, digests, and cursors
+//! atomically per source; replay preserves identity and raises partial token counts monotonically.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -160,10 +151,8 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
     for (projects, account) in claude_roots {
         for dir in read_dir(&projects) {
             for entry in read_dir(&dir) {
-                // A session's subagents get their own transcripts, one directory below its file:
-                // `<project>/<session>/subagents/agent-<id>.jsonl`. They are the larger half of
-                // the spend on a fleet that delegates, so the ledger reads them as sources of
-                // their own; the reader folds each back into the session named by the directory.
+                // Subagent transcripts live below the parent session directory and contribute to
+                // that parent's usage.
                 if entry.is_dir() {
                     for file in read_dir(&entry.join(CLAUDE_SUBAGENTS_DIR)) {
                         if file.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -346,10 +335,7 @@ async fn stale_batch(
     Ok((sources, retired))
 }
 
-/// One rotated window of `window` sources out of `sorted` (already newest-first), starting at
-/// `offset`. Wraps around the end so the walk keeps making forward progress instead of stalling at
-/// the tail. Identical to a plain `take(window)` whenever everything fits in one window (the
-/// common case), which is the walk's original, un-rotated behavior.
+/// Rotate and wrap the bounded source window so older files eventually receive a scan.
 fn rotated_window(sorted: &[(SystemTime, Source)], window: usize, offset: usize) -> Vec<Source> {
     let total = sorted.len();
     if total == 0 {
@@ -556,10 +542,8 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         })
         .await
         .map_err(|e| repomon_core::Error::Other(e.to_string()))?;
-        // A source an older reader wrote is re-read from the start whatever its fingerprint says,
-        // because the correction is to how the file was counted rather than to the file. Only a
-        // bounded number per pass, so a version bump converges over a few minutes instead of one
-        // long stall; the rest keep their cursors and are picked up on a later tick.
+        // Recount outdated reader versions regardless of file fingerprints, preserving deferred
+        // cursors until their bounded turn.
         let stale = cursor
             .as_ref()
             .is_some_and(|c| c.ingest_version < INGEST_VERSION);
@@ -685,18 +669,8 @@ const REINGEST_BATCH: usize = 25;
 /// over several ingest ticks. The batch limits file count, not the duration of each reread.
 const HEADLINE_REDIGEST_BATCH: usize = 25;
 
-/// Recompute the headline for sessions whose stored digest predates
-/// [`repomon_core::usage_ledger::HEADLINE_VERSION`], a bounded batch at a time. Only the headline
-/// and its raw tooltip text change here: events, cursors and every other session field are
-/// untouched, so this never re-attributes or re-prices anything, and it is safe to call from both
-/// the periodic ingest tick and `usage.ingest_now`.
-///
-/// A session whose source can be re-read authoritatively gets its headline overwritten outright,
-/// `None` included: a full re-read settles the question, so a stale headline that turns out to be
-/// nothing but an injected preamble must be allowed to lose it. A session whose source is missing,
-/// or that does not resurface in a fresh read, is marked current without touching its content
-/// instead of being retried forever, which would starve the rest of the backlog out of the bounded
-/// batch; a later incremental ingest pass still corrects it for real if the source changes again.
+/// Upgrade stale headlines in bounded batches, accepting authoritative null headlines and retiring
+/// missing sources without changing their content to prevent backlog starvation.
 pub async fn redigest_stale_headlines(ctx: &Arc<Ctx>) -> repomon_core::Result<usize> {
     use repomon_core::usage_ledger::HEADLINE_VERSION;
     let stale = ctx
@@ -741,10 +715,8 @@ pub async fn redigest_stale_headlines(ctx: &Arc<Ctx>) -> repomon_core::Result<us
     Ok(updated)
 }
 
-/// Re-read one source file from the start and return the headline it now computes for one
-/// session: `Some((None, None))` when the session is found but genuinely has no real headline
-/// (settled, and worth writing over a stale one), or `None` when the file cannot be read or the
-/// session does not resurface in a fresh scan (try again another tick rather than guessing).
+/// Return an authoritative headline pair, including an empty pair, or None when the source/session
+/// is unavailable and the caller must preserve its stored content.
 fn rescan_headline(
     path: &Path,
     agent_kind: &str,
@@ -1102,8 +1074,8 @@ mod tests {
             .join("claude/projects/-repos-demo/sess-claude-1.jsonl")
             .to_string_lossy()
             .to_string();
-        // What the pre-fix reader left behind: a row per content-block line, at offsets the
-        // current reader no longer produces, and a cursor saying the whole file was read.
+        // Seed obsolete per-content-block offsets with a completed cursor to verify replay replaces
+        // the stored event set.
         ctx.store
             .record_usage_events(vec![stale_claude_event(&path, 4096)])
             .await
@@ -1603,8 +1575,7 @@ mod tests {
         );
     }
 
-    /// A digest stamped with an old `headline_version` is what a session looked like under a
-    /// pre-fix extractor: a real headline field holding text the current rules would strip.
+    /// A stale headline version must trigger extraction under the current rules.
     fn stale_session_meta(
         session_id: &str,
         source_path: &str,

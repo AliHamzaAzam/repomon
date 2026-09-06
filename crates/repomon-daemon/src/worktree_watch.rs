@@ -1,8 +1,5 @@
-//! Worktree filesystem watcher for active lanes.
-//!
-//! Debounces worktree changes at 250ms using `notify-debouncer-full`.
-//! Filters out `.git/` internals and gitignored files/directories,
-//! invalidates the lane's file index cache, and broadcasts `event.file.changed`.
+//! Debounces active-worktree changes, excludes git internals and ignored paths, and invalidates
+//! file indexes before broadcasting.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

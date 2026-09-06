@@ -1,13 +1,5 @@
-//! File-first per-repo notes: `fleet/<repo>/notes.md` in the repomind home.
-//!
-//! Repo notes used to live only in the daemon's `repo-notes/` app-support directory, readable
-//! by nothing but the `repo_notes` MCP tools. They now live in the home instead, so a controller
-//! with basic-memory (or any agent that can read a file) sees the same conventions and gotchas
-//! the daemon folds into every worker prompt.
-//!
-//! The file carries frontmatter in the home's note conventions; the body is what agents read and
-//! write, so the 8 KB cap and the MCP semantics are unchanged from the app-support era. Notes are
-//! a full replace, never an append log, which is why there is no merge here.
+//! Stores per-repository notes with frontmatter metadata and a body capped at 8 KiB; writes replace
+//! the entire body.
 
 use std::path::{Path, PathBuf};
 
@@ -256,7 +248,6 @@ mod tests {
         );
         assert!(legacy.exists(), "the old file must not be deleted");
 
-        // Idempotent: a second start migrates nothing.
         assert!(migrate(&home, legacy_dir.path(), &all).unwrap().is_empty());
     }
 

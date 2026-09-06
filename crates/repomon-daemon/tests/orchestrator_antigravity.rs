@@ -1,7 +1,5 @@
-//! The Antigravity orchestrator backend, exercised through the daemon's own RPC surface: a start
-//! with `agent: "antigravity"` must record the antigravity backend with no session id,
-//! `orchestrator.transcript` must read as an empty chat (antigravity's on-disk session format is not
-//! parsed — the pane stream is the view), and `orchestrator.stop` cleanly stops the window.
+//! Tests Antigravity orchestration through RPC, including empty transcript responses and window
+//! shutdown.
 
 use std::process::Command;
 use std::time::Duration;
@@ -99,7 +97,6 @@ async fn antigravity_backend_starts_degrades_transcript_and_stops() {
         "antigravity can't pin a session id — must be null, got: {status}"
     );
 
-    // MCP config should have been written
     assert!(mcp_cfg.exists(), "mcp_config.json should be registered");
 
     // The transcript reads as an empty chat for an antigravity backend.

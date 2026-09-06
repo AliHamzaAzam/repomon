@@ -41,7 +41,7 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
     let old_path = std::env::var_os("PATH");
     let old_tmux = std::env::var_os("REPOMON_TMUX");
     let empty_dir = tempfile::tempdir().unwrap();
-    // Point PATH at an empty dir so no binaries exist on PATH
+
     unsafe {
         std::env::set_var("PATH", empty_dir.path());
         std::env::remove_var("REPOMON_TMUX");
@@ -89,7 +89,6 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
         assert_eq!(res["agent_host"], json!(null));
     }
 
-    // Every agent should have detected: false
     let agents = res["agents"].as_array().expect("agents array");
     assert!(!agents.is_empty());
     for agent in agents {

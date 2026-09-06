@@ -564,8 +564,6 @@ mod tests {
         );
     }
 
-    // ---- delivery integration --------------------------------------------------------------
-
     struct ScriptedBackend {
         sent_keys: StdMutex<Vec<(String, String)>>,
         sent_text: StdMutex<Vec<(String, String)>>,

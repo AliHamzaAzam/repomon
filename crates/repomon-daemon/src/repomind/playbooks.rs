@@ -1,18 +1,6 @@
-//! File-first playbooks: `playbooks/<name>.md` for approved ones, `playbooks/drafts/<name>.md`
-//! for everything a controller has written but no human has blessed.
-//!
-//! The approval gate is the whole point, and it is now visible on disk. A controller's
-//! `playbook_save` can only ever create a file under `drafts/`; moving that file up one level is
-//! what approval means, whether the move comes from `repomon playbooks approve`, the desktop
-//! panel, or the operator's own `mv`. `search` reads the approved directory and nothing else, so
-//! an unapproved draft can never be fed back to an agent as guidance.
-//!
-//! A revision of an approved playbook lands as a draft under the same name, beside the approved
-//! file rather than over it: the approved text stays live until a human approves the revision.
-//!
-//! Unlike the SQLite era there is no draft expiry sweep here. Deleting a file out of the
-//! operator's own git repo behind their back is a different act from dropping a hidden row, and
-//! the home's history makes an abandoned draft cheap to keep.
+//! Keeps draft playbooks out of search until approval. Revising an approved playbook leaves the
+//! published version live until promotion; drafts in the user repository do not expire
+//! automatically.
 
 use std::path::{Path, PathBuf};
 
@@ -229,11 +217,7 @@ pub fn rejected_path(home: &Path, name: &str) -> PathBuf {
         .join(format!("{name}.md"))
 }
 
-/// Reject a draft by moving its file into `playbooks/rejected/` with `status: rejected`.
-///
-/// The counterpart to [`approve`], and deliberately the same shape: a move, not a delete. The
-/// approved file (if the draft was a revision of one) is left exactly as it was, so rejecting a
-/// revision means the live playbook simply keeps standing.
+/// Moves a rejected draft into the rejected directory while leaving any approved version unchanged.
 pub fn reject(home: &Path, name: &str) -> Result<PathBuf> {
     let draft = draft_path(home, name);
     let Some((fm, body)) = read_doc(&draft)? else {
@@ -279,7 +263,6 @@ pub fn delete(home: &Path, name: &str) -> Result<()> {
 pub fn migrate(home: &Path, rows: &[Playbook]) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for row in rows {
-        // The approved half, when the row has one.
         if row.status == "approved" {
             let path = approved_path(home, &row.name);
             if !path.exists() {
@@ -529,7 +512,7 @@ mod tests {
         assert_eq!(md::field(&fm, "status").as_deref(), Some("rejected"));
         assert!(md::field(&fm, "rejected").is_some());
         assert_eq!(body, "sweep the fleet\n", "the text survives the move");
-        // Gone from every surface an agent can reach.
+
         assert!(list(&home).unwrap().is_empty());
         assert!(search(&home, "sweep", 10).unwrap().is_empty());
     }

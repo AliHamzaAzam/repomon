@@ -1,7 +1,5 @@
-//! The OpenCode orchestrator backend, exercised through the daemon's own RPC surface: a start
-//! with `agent: "opencode"` must record the opencode backend with no session id,
-//! `orchestrator.transcript` must read as an empty chat (opencode's on-disk session format is not
-//! parsed — the pane stream is the view), and `orchestrator.stop` cleanly stops the window.
+//! Tests OpenCode orchestration through RPC, including empty transcript responses and window
+//! shutdown.
 
 use std::process::Command;
 use std::time::Duration;

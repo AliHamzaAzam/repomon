@@ -1,11 +1,5 @@
-//! The remote-access WebSocket server — how companion apps (iOS) reach the daemon.
-//!
-//! Speaks the exact same JSON-RPC protocol as the Unix socket (`socket.rs`), with WebSocket
-//! text frames replacing the 4-byte length prefix: one frame = one envelope. Auth is a bearer
-//! token checked **before** the WebSocket upgrade completes (`Authorization: Bearer …` header,
-//! or `?token=…` for clients that can't set headers); a bad token is rejected with 401 and no
-//! connection state. Bind this to a private address — typically the machine's Tailscale IP —
-//! never the open internet.
+//! Serves JSON-RPC over WebSocket text frames on a private interface, checking header or query
+//! bearer tokens before upgrade and rejecting invalid tokens with HTTP 401.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,8 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
 use crate::{Ctx, rpc};
 
-/// Max concurrent remote connections — a coarse DoS backstop (auth precedes the upgrade, so this
-/// only bounds authenticated clients/reconnect churn).
+/// Bounds concurrent accepted connections, including handshakes awaiting authentication.
 const MAX_REMOTE_CONNS: usize = 64;
 
 /// WebSocket frame/message limits for the bridge. Matches the Unix socket's `MAX_FRAME_BYTES` so a
@@ -45,93 +38,55 @@ impl Drop for ConnGuard {
     }
 }
 
-/// Methods the remote WebSocket bridge may invoke. **Default-deny**: anything not listed here
-/// (including any future RPC) is rejected over the network, so the bridge can't be used to reach
-/// past what's listed. Paired devices get full fleet control: read the fleet, drive existing
-/// agents, and now spawn/stop/adopt agents and create/delete/merge lanes too. Still blocked:
-/// daemon lifecycle (`daemon.shutdown`), host diagnostics (`system.doctor`, local machine health),
-/// config/secrets (`config.get` can carry the remote token, `config.set`), host terminal + filesystem
-/// access (`terminal.open/close/target`, `fs.browse`), and credential minting (`remote.*`, local-only).
-/// The worktree file-editor RPCs (`file.list`/`file.read`/`file.read_raw`/`file.write`, D1/D2) join `fs.browse` in
-/// that filesystem-access group for the same reason — deliberately absent below, not merely
-/// unlisted, and doubly so for `file.write` since it can overwrite files on the host.
-/// `commit.show` (item 6) is local-only too: unlike the already-allowed `lane.diff` (scoped to
-/// one lane's current diff), a caller-chosen `oid` can walk the *entire* repo history one commit
-/// at a time — a materially broader read surface than what's on the allowlist below.
-/// The local Unix socket is unaffected.
+/// Default-deny remote RPCs: permit explicit fleet control while keeping lifecycle, secrets,
+/// credentials, host files, policy grants, and arbitrary commit-history reads local.
 fn remote_method_allowed(method: &str) -> bool {
     matches!(
         method,
-        // health check
         "ping"
-        // reads
+
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
         | "agent.capture" | "agent.transcript" | "agent.transcript_page"
         | "usage.get" | "daemon.status"
-        // Manual `usage.refresh` is local-only because it starts a host probe.
-        // Ledger reads. `usage.ingest_now`, `usage.export`, and `usage.refresh_rates` stay
-        // local-only: each drives an on-demand host action (a disk scan, a file write, a network
-        // fetch) rather than just reading what the daemon already has.
+        // Allow remote usage reads while keeping host mutations and probes local.
         | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"
         | "usage.status" | "usage.rates" | "usage.models"
-        // terminal-window *names* only ({lane_id, id} pairs) — open/close/target stay blocked
+        // terminal-window *names* only ({lane_id, id} pairs) - open/close/target stay blocked
         | "terminal.list_all"
-        // event stream + per-client streaming hint
+
         | "subscribe" | "viewport.set"
-        // drive an existing agent. agent.prompt is a read (fresh pane capture parsed for the
-        // on-screen dialog); agent.answer is strictly safer than the already-allowed blind
-        // agent.key — it re-captures and verifies the dialog before steering; agent.watch_bytes
-        // is a read-only byte stream of a pane the client could already agent.capture.
-        // agent.fit is the ONLY remote door to pane sizing: it reflows the shared pane to the
-        // caller's grid only while no live TUI viewport owns the window, and always answers
-        // with the authoritative grid. The blind agent.resize stays local-only — an
-        // unconditional remote resize is exactly what squeezed the TUI's mediated view.
+        // agent.fit arbitrates shared pane size; unrestricted agent.resize remains local so remote
+        // clients cannot displace a local viewport.
         | "agent.send_input" | "agent.signal" | "agent.key" | "agent.scroll"
         | "agent.target" | "agent.fit"
         | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
-        // full fleet control: spawn/stop/adopt an agent, and manage the lanes they run in.
-        // agent.detect is a read (the spawn sheet's agent picker) — it's the only remote door to
-        // the configured agent list, since config.get stays blocked. lane.create's `path` param
-        // is optional, so no fs.browse is needed; the repo picker is the already-allowed
-        // repo.list.
+        // agent.detect exposes selectable agents without granting access to config secrets.
         | "agent.spawn" | "agent.stop" | "agent.adopt" | "agent.detect"
         | "lane.create" | "lane.delete" | "lane.merge"
         | "lane.diff" | "lane.focus"
-        // repomind orchestrator: read (status/transcript) + interact (send_input/key) are safe like
-        // the agent equivalents above. start/stop spawn/kill the orchestrator's claude — a remote
-        // process-spawn with caller-chosen autonomy/max_agents/prompt, so strictly higher privilege
-        // than the already-allowed agent.spawn (which targets a known, already-configured agent
-        // rather than an arbitrary claude invocation). Remote tokens may chat with a running
-        // repomind but cannot start or stop it.
+        // Remote clients may interact with a running orchestrator, but starting or stopping one
+        // grants broader process and autonomy control.
         | "orchestrator.status" | "orchestrator.transcript"
         | "orchestrator.send_input" | "orchestrator.key"
-        // orchestrator.watch gates the read-only pane stream (event.orchestrator.output) — the
-        // repomind analog of the already-allowed agent.watch_bytes, and per-connection state
-        // since the phone-loop work, so a phone toggling its view can never stop the TUI's
-        // stream. orchestrator.resize stays blocked: an unmediated remote resize is exactly
-        // what squeezed the TUI's view before agent.fit.
+        // The orchestrator watch is per connection; unmediated resize remains local.
         | "orchestrator.watch"
         // repomind home: read-only metadata about the home repo and its controller lane (where it
         // lives, which lane and window carry it, the controller cap). No file content and no
         // writes; every repomind RPC that touches the home's files stays local-only.
         | "repomind.status"
-        // benign metadata
+
         | "agent.pin" | "session.rename"
-        // companion self-registration for push
+
         | "push.register" | "push.unregister"
-        // supervision: read-only lane observability (supervision.get, supervision.audit,
-        // supervision.status, same posture as lane.diff), and manual nudge (supervision.nudge,
-        // strictly weaker than the already-allowed agent.send_input).
-        // supervision.set stays local-only: grants standing auto-approval authority, so policy
-        // mutation stays local-only like config.set.
+        // Supervision observation and manual nudges do not grant standing approval authority;
+        // policy changes remain local.
         | "supervision.get" | "supervision.audit" | "supervision.status" | "supervision.nudge"
     )
 }
 
-/// Bind the WebSocket bridge and serve until shutdown is requested. The set of valid tokens lives
-/// in `ctx.remote_tokens` (seeded from the store's paired devices plus the legacy config token, and
-/// refreshed on every pair/revoke), so no token is passed in here.
+/// Serves the WebSocket bridge until shutdown, authenticating against the live paired-device and
+/// shared-token cache.
 pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("remote bridge listening on ws://{bind}");
@@ -139,7 +94,7 @@ pub async fn serve_remote(ctx: Arc<Ctx>, bind: &str) -> std::io::Result<()> {
 }
 
 /// Serve the WebSocket bridge on an already-bound listener. Split out from `serve_remote` so tests
-/// can bind an exclusive ephemeral port and hand the live listener in — with no bind-then-rebind
+/// can bind an exclusive ephemeral port and hand the live listener in - with no bind-then-rebind
 /// window for a concurrent test to race on.
 pub async fn serve_remote_on(ctx: Arc<Ctx>, listener: TcpListener) -> std::io::Result<()> {
     serve_remote_on_with_timeout(ctx, listener, HANDSHAKE_TIMEOUT).await
@@ -183,14 +138,12 @@ pub async fn serve_remote_on_with_timeout(
 /// How often a live connection re-stamps its device's `last_seen_at` (throttled, per connection).
 const LAST_SEEN_THROTTLE: Duration = Duration::from_secs(60);
 
-/// Upper bound on the handshake request head we'll buffer before giving up — a WS upgrade request
+/// Upper bound on the handshake request head we'll buffer before giving up - a WS upgrade request
 /// is a few hundred bytes; anything past this is not a client we serve.
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 
-/// Deadline for the entire pre-upgrade handshake (head read through the 101 write). Auth precedes
-/// the upgrade, so a peer that connects and then dribbles or stays silent would otherwise hold its
-/// `MAX_REMOTE_CONNS` slot forever without ever authenticating; the deadline drops it so a burst of
-/// idle connections can't starve the cap.
+/// Bound the entire pre-upgrade handshake so a partial request cannot occupy an unauthenticated
+/// slot indefinitely.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn handle_conn(
@@ -215,7 +168,7 @@ async fn handle_conn(
     let (mut sink, mut source) = ws.split();
 
     // This connection's per-device session, carrying its identity (device name) and its own
-    // viewport/focus/fit state. The guard drops it from `ctx.sessions` on every exit path below —
+    // viewport/focus/fit state. The guard drops it from `ctx.sessions` on every exit path below -
     // each `break`, every `?` early return, and a panic.
     let sess = ctx
         .open_session(crate::conn::ConnKind::Remote {
@@ -230,7 +183,7 @@ async fn handle_conn(
         let _ = ctx.store.remote_device_seen(name).await;
     }
 
-    // Every connection holds an event receiver, but only forwards once subscribed —
+    // Every connection holds an event receiver, but only forwards once subscribed -
     // mirroring the Unix-socket connection loop.
     let mut events = ctx.events.subscribe();
     let mut forwarding = false;
@@ -295,19 +248,12 @@ async fn handle_conn(
             }
             event = events.recv() => match event {
                 Ok(value) => {
-                    // Passive revocation: a device that stays silent still holds a live event
-                    // receiver, so the request-arm's revocation check never runs for it. Re-check
-                    // the token on every forward and drop the connection the moment it's gone —
-                    // otherwise a revoked-but-quiet device keeps receiving event.agent.bytes/output
-                    // forever. Sync std RwLock read, no await held.
+                    // Recheck tokens during forwarding so a revoked silent client cannot retain its
+                    // event stream.
                     if !token_present(&ctx, &conn_token) {
                         break;
                     }
-                    // Per-connection filtering: `event.agent.bytes` reaches only the connections
-                    // that watch its window, and `event.agent.output` only the connections whose
-                    // viewport covers its lane/window (the bus broadcasts both to every subscriber);
-                    // every other topic forwards unchanged. Sync std-Mutex reads, dropped before the
-                    // await.
+                    // Filter against this connection’s requested streams before awaiting delivery.
                     let deliver = {
                         let watched = sess.watched_bytes.lock().unwrap();
                         let out = sess.output_filter.lock().unwrap();
@@ -339,16 +285,8 @@ where
     sink.send(Message::text(text)).await
 }
 
-/// Run the entire pre-upgrade handshake: read the bounded request head, authenticate (constant
-/// time, BEFORE any upgrade), validate the WebSocket upgrade, and write the Title-Case 101. Returns
-/// `Ok(Some(identity))` on success; `Ok(None)` when the client was cleanly refused (a 400/401/426
-/// was written here); `Err` on an I/O error, malformed/oversized head, or EOF. The caller wraps
-/// this in a deadline and drops the socket for any non-`Some` outcome.
-///
-/// Hand-rolled (rather than tokio-tungstenite's server path) so the 101 uses Title-Case header
-/// names (`Connection`, `Upgrade`, `Sec-WebSocket-Accept`): tungstenite serializes them through the
-/// `http` crate's `HeaderMap`, which canonicalizes names to lowercase, and iOS 27's CFNetwork
-/// rejects that lowercase 101 outright ("bad response from the server").
+/// Authenticate before upgrading; emit Title-Case response headers because iOS CFNetwork rejects
+/// the lowercase form produced by HeaderMap.
 async fn negotiate(
     ctx: &Arc<Ctx>,
     stream: &mut TcpStream,
@@ -359,10 +297,9 @@ async fn negotiate(
         return Ok(None);
     };
 
-    // Constant-time token check, before the upgrade. The matching entry's identity (device name,
-    // `None` for the legacy shared token) and the token itself are captured for the session.
+    // Authenticate before upgrading and retain the matched token and device identity for revocation
+    // checks.
     let Some(identity) = authorize(&req, ctx) else {
-        // 401 with Title-Case headers, then terminate the connection.
         write_simple_response(stream, 401, "Unauthorized", &[]).await?;
         return Ok(None);
     };
@@ -404,11 +341,8 @@ async fn negotiate(
     Ok(Some(identity))
 }
 
-/// Read the HTTP request head (up to and including the terminating CRLFCRLF) from a freshly
-/// accepted socket, bounded by `MAX_HANDSHAKE_BYTES`. A WebSocket client sends nothing before the
-/// 101, so a well-behaved peer never writes bytes past the head; if it does, that's a protocol
-/// violation and we error (there's no way to feed a tail to `from_raw_socket`, and tungstenite's
-/// own server rejects junk-after-request identically).
+/// Read a bounded request head and reject trailing bytes because from_raw_socket cannot consume an
+/// already-read tail.
 async fn read_handshake_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
@@ -530,9 +464,8 @@ async fn write_simple_response(
     stream.shutdown().await
 }
 
-/// Match the handshake's presented token against the auth cache. On a hit, returns
-/// `Some((token, device_name))` — `device_name` is `None` for the legacy shared config token — so
-/// the connection learns the identity it authenticated as. `None` means no valid token (→ 401).
+/// Returns the matched token and optional device name from the auth cache, or None for an
+/// unauthorized handshake.
 fn authorize(req: &http::Request<()>, ctx: &Ctx) -> Option<(String, Option<String>)> {
     let presented = presented_token(req)?;
     let tokens = ctx.remote_tokens.read().unwrap();
@@ -544,7 +477,7 @@ fn authorize(req: &http::Request<()>, ctx: &Ctx) -> Option<(String, Option<Strin
     None
 }
 
-/// Whether a token is still in the auth cache — the live-revocation check on each request.
+/// Whether a token is still in the auth cache - the live-revocation check on each request.
 fn token_present(ctx: &Ctx, token: &str) -> bool {
     ctx.remote_tokens
         .read()
@@ -553,10 +486,8 @@ fn token_present(ctx: &Ctx, token: &str) -> bool {
         .any(|(t, _)| constant_time_eq(token.as_bytes(), t.as_bytes()))
 }
 
-/// The token a handshake request carries: `Authorization: Bearer <token>` or a `token=<token>`
-/// query parameter (for clients that can't set headers on a WS dial). The query value is taken
-/// verbatim (no percent-decoding): minted tokens are URL-safe by construction, so a raw `%` never
-/// appears in a legitimate token and decoding would only widen the input we accept.
+/// Reads the bearer header or raw query token without percent-decoding because minted tokens are
+/// URL-safe.
 fn presented_token(req: &http::Request<()>) -> Option<String> {
     req.headers()
         .get("authorization")
@@ -667,9 +598,8 @@ mod tests {
         // minting stay blocked over the bridge even under full fleet control.
         for m in [
             "agent.resize",
-            // agent.add/remove/set_default mutate the persisted custom-agent config
-            // (~/.config/repomon/config.toml) — a write channel into the launch commands for
-            // every future spawn. Remote control of what binary runs is strictly local-only.
+            // Keep custom-agent configuration local because it controls which binaries later spawns
+            // execute.
             "agent.add",
             "agent.remove",
             "agent.set_default",
@@ -679,23 +609,15 @@ mod tests {
             "repo.discover",
             "config.get",
             "config.set",
-            // per-repo notes stay local-only for now: the write side injects text into every
-            // future worker prompt for that repo, too much leverage for the bridge until a
-            // deliberate Phase 6 decision allowlists it.
+            // Repository notes remain local because their contents enter worker prompts.
             "repo.notes.get",
             "repo.notes.set",
-            // the orchestration journal is local-only like the notes it complements: append is
-            // an unauthenticated write channel into every future recap, and query exposes the
-            // full action history — neither belongs on the bridge without a deliberate decision.
+            // Journal writes influence recaps and reads expose the complete action history; both
+            // remain local.
             "journal.append",
             "journal.query",
-            // playbooks stay local-only: save is a write channel into future orchestrator
-            // prompts (post-approval), and approve is the human gate itself — neither belongs
-            // on the bridge.
-            // standing-run schedules mint unattended orchestrator processes — strictly
-            // local-only.
-            // approval policy shapes what the daemon auto-approves — the definition of a
-            // permission bypass. Strictly local-only.
+            // Keep playbook approval, unattended schedules, and automatic-approval policy local
+            // because they grant future execution authority.
             "approval.record",
             "approval.allow",
             "approval.remove",
@@ -709,12 +631,8 @@ mod tests {
             "playbook.approve",
             "playbook.reject",
             "playbook.delete",
-            // The fleet-mail RPC surface stays
-            // local-only: the sending identity derives from the Unix-socket caller's registered
-            // MCP token (local daemon only), and fleet-mail delivery targets managed sessions by
-            // lane address — a remote caller with no local session context has no meaningful
-            // identity to send from. Reads are also excluded because the content is internal
-            // agent coordination; force_send and delete additionally mutate that coordination.
+            // Fleet mail requires a local registered sending identity and contains internal agent
+            // coordination.
             "message.send",
             "message.inbox",
             "message.mark_read",
@@ -725,8 +643,7 @@ mod tests {
             "terminal.close",
             "terminal.target",
             "fs.browse",
-            // worktree file-editor RPCs (D1/D2) — filesystem access, same local-only reasoning
-            // as fs.browse just above, doubly so for file.write (it overwrites host files).
+            // File access remains local, including writes that overwrite host files.
             "file.list",
             "file.read",
             "file.read_raw",
@@ -737,11 +654,8 @@ mod tests {
             "file.delete",
             "file.search",
             "file.diff_base",
-            // commit.show (item 6) shells out to `git show` for one caller-chosen oid at a time -
-            // a much broader read surface than lane.diff (which is scoped to one lane's *current*
-            // diff): a remote caller could walk an entire repo's commit history, one commit's
-            // full patch at a time, over the bridge. Local-only until a deliberate decision opens
-            // it up, same reasoning as the filesystem-access group just above.
+            // Caller-chosen commit IDs expose arbitrary repository history, beyond the allowed
+            // current lane diff.
             "commit.show",
             "daemon.shutdown",
             // system.doctor is intentionally local-only (machine health / dependency check of the host)
@@ -750,18 +664,15 @@ mod tests {
             "orchestrator.resize",
             "orchestrator.start",
             "orchestrator.stop",
-            // Every repomind RPC that writes stays local-only: the home repo is the fleet's
-            // memory, and the export/boot side of it (R2, R3) rewrites files on disk. Only the
-            // read-only `repomind.status` above is on the bridge.
+            // Repomind exports and boot regeneration write home files and remain local.
             "repomind.export",
             "repomind.boot",
             // repomind.instruct types into a controller pane holding the full fleet catalog:
             // broader authority than the bridge's agent.send_input on one worker.
             "repomind.instruct",
-            // supervision.set grants standing auto-approval authority — strictly local-only.
+            // supervision.set grants standing auto-approval authority - strictly local-only.
             "supervision.set",
-            // upcoming local-only credential-minting RPCs (task A2) — must never be reachable
-            // over the remote bridge.
+            // Credential minting must remain local.
             "remote.pair",
             "remote.devices",
             "remote.revoke",

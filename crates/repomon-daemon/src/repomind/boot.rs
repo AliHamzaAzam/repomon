@@ -1,19 +1,5 @@
-//! The boot context: one bounded markdown document a controller reads before it does anything.
-//!
-//! A fresh controller starts with no memory of the fleet. Rather than make it call tools to find
-//! out what is going on, the daemon assembles the home's standing knowledge into
-//! `.repomind/boot.md` and hands it to the agent at spawn (see `rpc.rs` for the per-backend
-//! delivery). The document is daemon-owned: rewritten on every spawn, gitignored by R1's
-//! `.gitignore`, and never hand-edited.
-//!
-//! Two properties make it safe to hand to any backend:
-//!
-//! - **Bounded.** A hard token budget ([`DEFAULT_BUDGET_TOKENS`]) with a coarse
-//!   four-characters-per-token estimate. Over budget, whole files are dropped from the least
-//!   important end (journal, then profile, then plans) and the document ends by naming them, so
-//!   a controller can tell the difference between "nothing to say" and "it did not fit".
-//! - **Pure.** [`assemble_boot`] reads the home and nothing else, so every ordering and trimming
-//!   rule is testable against a tempdir home without a daemon.
+//! Builds the bounded daemon-owned boot document. Whole files are included by priority, with
+//! omitted files listed when the size limit is reached.
 
 use std::path::{Path, PathBuf};
 
@@ -128,10 +114,8 @@ pub fn assemble_boot(home: &Path, fleet: &[FleetLane], budget_tokens: usize) -> 
     });
     let mut journal = journal_pieces(home);
 
-    // Least important first: the journal (and its older day before its newer one), then profile
-    // notes from the end of the list, then plans. The overlay and the fleet snapshot are never
-    // trimmed: the first is the operator's own instructions and the second is the only live
-    // truth in the document.
+    // Drop old journal entries before profiles and plans; retain the live fleet instructions when
+    // trimming boot context.
     let mut order: Vec<(Section, String)> = Vec::new();
     order.extend(journal.iter().map(|p| (Section::Journal, p.name.clone())));
     order.extend(
@@ -252,13 +236,8 @@ pub fn ready_target<'a>(
         .find(|s| s.tmux_window.as_deref() == Some(window) && crate::mail::injection_eligible(s))
 }
 
-/// Announce the boot document to a backend with no launch-time context mechanism, by typing one
-/// line into its composer once the session is ready.
-///
-/// Backgrounded on purpose: a spawn must return as soon as the window exists, and the CLI behind
-/// it takes seconds to draw a composer. Delivery goes through the same verified injection fleet
-/// mail uses, so it can never type over a busy composer, and it gives up quietly rather than
-/// retrying forever into a window that never became ready.
+/// Queues bounded verified delivery of the boot-document path after the composer becomes ready,
+/// allowing spawn to return without typing over busy input.
 pub fn announce_typed_line(
     ctx: std::sync::Arc<crate::Ctx>,
     lane_id: repomon_core::model::LaneId,
@@ -319,10 +298,8 @@ pub fn announce_typed_line(
     });
 }
 
-/// Regenerate `.repomind/boot.md` from the live fleet and the home's own files, and record what
-/// it produced. Called on every spawn into the controller lane and by the `repomind.boot` RPC;
-/// a spawn must never fail because the boot document could not be written, so callers log
-/// rather than propagate.
+/// Regenerates the live boot-context file and returns its content without requiring callers to
+/// block spawning on export failure.
 pub async fn regenerate(ctx: &crate::Ctx) -> repomon_core::Result<BootRun> {
     let (home, budget) = {
         let cfg = ctx.config.read().await;

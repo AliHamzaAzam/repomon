@@ -1,11 +1,5 @@
-//! Two `orchestrator.start` calls racing on separate connections must resolve to a single
-//! orchestrator: one spawn, both responses describing the same session. Before the handler held
-//! the session lock across its check → spawn → record sequence, the second caller could observe
-//! "not running" mid-spawn and either spawn a duplicate `orchestrator` window (tmux happily
-//! allows duplicate names) or take the adopt branch on the first caller's fresh window and
-//! overwrite its just-recorded session id. Kept in its own integration binary: like
-//! `orchestrator.rs`, it mutates process env (`XDG_CONFIG_HOME`), which is only safe when no
-//! other test shares the process.
+//! Concurrent starts must preserve one orchestrator session; this test owns its process so
+//! config-environment changes cannot race other tests.
 
 use std::process::Command;
 use std::time::Duration;
@@ -81,11 +75,8 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", cfg_home.path());
     }
-    // A harmless long-lived stand-in for `claude`: the window must OUTLIVE both racing starts
-    // (unlike `orchestrator.rs`'s instantly-exiting `true`) or the second caller's adopt/spawn
-    // decision races the first window's death instead of the lock. `sh -c 'sleep 30' repomon-test`
-    // swallows the appended Claude flags as positional params — including the multi-line
-    // `--append-system-prompt` persona, which stays one single-quoted argument.
+    // Keep the harmless stand-in alive through both starts so the test exercises locking rather
+    // than racing process exit.
     {
         let mut cfg = ctx.config.write().await;
         cfg.agents.insert(
@@ -124,9 +115,7 @@ async fn concurrent_starts_spawn_exactly_one_orchestrator() {
         .expect("start b must report the spawned session's id");
     assert_eq!(ida, idb, "both starts must resolve to one session");
 
-    // Repomind now runs in the controller lane, so the window is that lane's (`lane-<id>`), not
-    // the old daemon-owned `orchestrator` name. The invariant is unchanged: exactly one window,
-    // and it is the one both callers were told about.
+    // Both racing callers must receive the same single controller window.
     let window = sa["window"].as_str().expect("a start reports its window");
     assert_eq!(sb["window"], json!(window), "both starts name one window");
     let windows = ctx.backend.list_windows().unwrap();

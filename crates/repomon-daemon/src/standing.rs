@@ -1,10 +1,5 @@
-//! Standing orchestrations: bounded, headless repomind runs the daemon fires on a schedule
-//! (and, config-gated, as needs-you triage). A run is `claude -p <prompt>` wired to the fleet
-//! MCP server with `REPOMON_MCP_UNATTENDED=1` and a low action cap, wall-clock-limited; its
-//! output is journaled (`action = standing_run` / `triage_run`) and delivered through the
-//! existing notification paths. Unattended runs are deliberately MORE conservative than
-//! attended ones: the MCP policy refuses merge/delete outright, and the wall clock kills a
-//! wedged run.
+//! Runs scheduled or triage orchestration with unattended MCP restrictions, action and time caps,
+//! and journaled results; unattended policy refuses merge and delete.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +19,7 @@ const TICK: Duration = Duration::from_secs(30);
 const LOCAL_TTL: Duration = Duration::from_secs(3);
 
 /// The scheduler loop. Runs execute inline (one at a time, oldest schedule first): standing
-/// runs are minutes-scale and serializing them is a feature — a pileup of concurrent
+/// runs are minutes-scale and serializing them is a feature - a pileup of concurrent
 /// unattended orchestrators is exactly what the bounds exist to prevent.
 pub async fn standing_watch(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
@@ -35,9 +30,8 @@ pub async fn standing_watch(ctx: Arc<Ctx>) {
     }
 }
 
-/// One scheduler pass at `now` (injected for tests). A schedule is due when its spec's next
-/// firing after `last_run_at` (or `created_at`) is not in the future; `last_run_at` is stamped
-/// BEFORE the run so a slow run can't double-fire.
+/// Runs due schedules at the supplied time, stamping last_run_at before execution to prevent
+/// duplicate firing during a slow run.
 pub async fn scheduler_tick(ctx: &Arc<Ctx>, now: DateTime<Local>) {
     let Ok(scheds) = ctx.store.list_schedules().await else {
         return;
@@ -135,10 +129,8 @@ pub async fn run_standing(
     }
 }
 
-/// Resolve the headless run command. A config custom agent runs verbatim with the prompt
-/// appended (the `agent.spawn` semantics — this is also the test seam); claude and its account
-/// variants get the full `-p` composition against a per-run MCP config with the unattended
-/// guardrail env.
+/// Builds the unattended command with per-run MCP configuration, appending the prompt verbatim for
+/// custom agents.
 fn build_run_command(
     cfg: &repomon_core::Config,
     socket: &std::path::Path,

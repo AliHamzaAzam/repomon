@@ -45,16 +45,8 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
     serde_json::to_value(v).map_err(internal)
 }
 
-/// Rebuild [`Ctx::remote_tokens`] from the store's paired devices plus the legacy `[remote] token`
-/// from config (device name `None`). The single choke point for the auth cache: startup seeding
-/// and every pair/revoke funnel through here, so the handshake callback always reads a current set.
-///
-/// **Concurrency:** this is read-then-write (read the store's device list, then overwrite the cache)
-/// and is NOT internally serialized. Two overlapping refreshes race — an auth-cache refresh race
-/// where a `remote.pair`'s post-mutation read lands after a concurrent `remote.revoke`'s write,
-/// re-adding a just-revoked token. Callers MUST hold [`Ctx::remote_mutate_lock`] across their store
-/// mutation and this refresh so the mutate+rebuild is atomic (see the `remote.pair`/`remote.revoke`
-/// handlers and the startup seed).
+/// Rebuild the authentication cache from paired devices and the configured token while the caller
+/// holds `remote_mutate_lock` across both the store mutation and this refresh.
 pub async fn refresh_remote_tokens(ctx: &Ctx) -> Result<(), RpcError> {
     let devices = ctx.store.remote_device_list().await.map_err(internal)?;
     let config_token = ctx.config.read().await.remote.token.clone();
@@ -71,10 +63,7 @@ pub async fn refresh_remote_tokens(ctx: &Ctx) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// The pairing URL the companion app scans: `repomon://<bind>?name=<urlencoded>#<token>`. The
-/// device name is a QUERY item and the fragment is the bare token — both the current app and
-/// the legacy phone build take the entire fragment as the token, so splicing `&name=` into the
-/// fragment corrupted the stored token and every named pairing 401'd at the handshake.
+/// Builds a pairing URL with the encoded device name in the query and the bare token in the fragment.
 async fn remote_pair_url(ctx: &Ctx, dev: &RemoteDevice) -> String {
     let bind = ctx
         .config
@@ -91,8 +80,7 @@ async fn remote_pair_url(ctx: &Ctx, dev: &RemoteDevice) -> String {
     )
 }
 
-/// Minimal percent-encoding for a device name spliced into a URL fragment. Keeps the unreserved
-/// set and escapes everything else; avoids a urlencoding dependency for one short field.
+/// Percent-encodes the device-name query value while preserving URL-unreserved bytes.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -111,12 +99,8 @@ fn percent_encode(s: &str) -> String {
 /// client can re-render instead of re-fetching.
 const DIALOG_CHANGED: i64 = -32010;
 
-/// `file.write` found the on-disk mtime didn't match the caller's `expected_mtime_ms` (or the
-/// file vanished entirely). The frontend must treat this as a save conflict — offer to re-read,
-/// merge, or force — never as a generic failure to retry blindly. `error.data` carries both
-/// mtimes (`actual_mtime_ms` is `null` when the file no longer exists) so the client can render
-/// the conflict without a second RPC round-trip. Same "distinct code + structured data" shape as
-/// `DIALOG_CHANGED` above.
+/// A save conflict carries expected and actual mtimes, with null for a missing file; clients must
+/// offer reread, merge, or force instead of retrying blindly.
 const FILE_CONFLICT: i64 = -32011;
 const FILE_ALREADY_EXISTS: i64 = -32009;
 const FILE_DIR_NOT_EMPTY: i64 = -32008;
@@ -316,9 +300,8 @@ fn default_depth() -> usize {
 struct LaneId {
     lane_id: repomon_core::model::LaneId,
 }
-/// `to` on `message.send`: a single canonical address (the historical, still-default shape) or a
-/// list of addresses. Either shape may contain wildcard tokens (`lane-X/*`, `*`) — see
-/// [`classify_token`]. Declared `untagged` so existing string-`to` callers are unaffected.
+/// Accepts one destination or a destination list, including wildcard tokens, without changing the
+/// single-address wire shape.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 enum MessageTo {
@@ -340,9 +323,8 @@ impl MessageTo {
             .any(|item| !matches!(classify_token(item), AddressToken::Literal(_)))
     }
 
-    /// `Some(address)` when `to` is a single, non-wildcard address — the exact shape
-    /// `message.send` accepted before A6. That case keeps returning a bare `FleetMessage`
-    /// unchanged; anything else (a list, or a bare wildcard) returns a fan-out summary.
+    /// Identifies a single non-wildcard destination, whose response is a bare FleetMessage rather
+    /// than a fan-out summary.
     fn as_legacy_single(&self) -> Option<&str> {
         match self {
             MessageTo::Single(value)
@@ -361,9 +343,9 @@ enum AddressToken {
     /// A canonical address handled exactly as before: `operator`, `repomind`, `@label`, or
     /// `lane-X[/slot]`. Resolved later by [`resolve_message_address`].
     Literal(String),
-    /// `lane-X/*` — every active agent session in lane X, minus the sender.
+    /// `lane-X/*` - every active agent session in lane X, minus the sender.
     LaneWildcard(repomon_core::model::LaneId),
-    /// `*` — every active agent session in the fleet, minus the sender.
+    /// `*` - every active agent session in the fleet, minus the sender.
     GlobalWildcard,
 }
 
@@ -408,10 +390,8 @@ fn expand_wildcard_targets(
     out
 }
 
-/// Expand `to` into the literal address list to fan a send out to: wildcard tokens are resolved
-/// against `lanes` (self-excluded), plain tokens pass through unchanged, and duplicates collapse
-/// to a single delivery. `lanes` may be empty when `to` has no wildcard token — callers only need
-/// to fetch it when [`MessageTo::has_wildcard`] is true.
+/// Expands wildcard mail targets excluding the sender, while preserving explicit self-targets and
+/// deduplicating recipients.
 fn expand_message_targets(
     to: &MessageTo,
     lanes: &[Lane],
@@ -785,10 +765,7 @@ async fn skill_roots(ctx: &Ctx) -> Result<Vec<PathBuf>, RpcError> {
     Ok(roots)
 }
 
-/// Translate `files::ReadError` into the RPC-level error `file.read` returns. Both cases are
-/// deliberate rejections (see `files::read_file`'s doc comment for why this RPC never truncates),
-/// so both are `invalid_params` rather than `internal` — the caller gave a request this RPC
-/// can't safely satisfy, not the daemon hitting an unexpected failure.
+/// Maps binary or oversized reads to parameter errors and filesystem failures to internal errors.
 fn file_read_error(e: crate::files::ReadError) -> RpcError {
     match e {
         crate::files::ReadError::Binary => RpcError::invalid_params("binary file"),
@@ -872,7 +849,7 @@ struct AgentAnswer {
     #[serde(default)]
     window: Option<String>,
     /// When set, the answer is sent only if the pane's current dialog still summarizes to
-    /// this exact string — the client's stale-view guard.
+    /// this exact string - the client's stale-view guard.
     #[serde(default)]
     expect_summary: Option<String>,
 }
@@ -935,7 +912,7 @@ struct AgentSetDefault {
     #[serde(default)]
     name: Option<String>,
 }
-/// A partial config update from the Settings view — only the present fields are applied.
+/// A partial config update from the Settings view - only the present fields are applied.
 #[derive(Deserialize)]
 struct ConfigSet {
     #[serde(default)]
@@ -1035,10 +1012,7 @@ struct ConfigSet {
     usage_price_override_reset: Option<String>,
 }
 
-/// A sparse per-model rate correction from the Settings > Usage inline editor or
-/// `repomon usage rates set`. Every rate field is optional; a field left blank in the editor (or
-/// omitted from the CLI flags) is not sent at all, so it neither sets nor clears that field on an
-/// existing override; see the `config.set` handler for `usage_price_override_upsert`.
+/// Applies a sparse price override without setting or clearing omitted fields.
 #[derive(Deserialize)]
 struct UsagePriceOverrideUpsert {
     model: String,
@@ -1121,8 +1095,8 @@ struct RemoteRevoke {
 }
 #[derive(Deserialize)]
 struct SessionRename {
-    /// Opaque primary identity: a transcript id for legacy callers or `win:<window>` for a
-    /// managed session.
+    /// Identifies a managed session by win:<window> or accepts a transcript ID from compatibility
+    /// callers.
     session_id: String,
     /// Transcript identity retained as an alias for managed sessions. Mirroring the mutation to
     /// both keys preserves old labels and lets a resumed transcript keep its name after the tmux
@@ -1326,7 +1300,7 @@ struct Browse {
 }
 #[derive(Deserialize, Default)]
 struct OrchestratorStart {
-    /// Override the orchestrator agent — a Claude account (e.g. `claude-work`), a custom agent
+    /// Override the orchestrator agent - a Claude account (e.g. `claude-work`), a custom agent
     /// name, or `codex`; falls back to `orchestrator_agent` in config, then bare `claude`.
     /// Anything else (no MCP client → can't drive the fleet) is rejected with invalid_params.
     #[serde(default)]
@@ -1540,10 +1514,8 @@ fn announce_message_stored(ctx: &Ctx, message: &repomon_core::model::FleetMessag
     ctx.wake_mail_delivery();
 }
 
-/// Resize a shared agent pane and notify every byte-watching renderer when its authoritative grid
-/// actually changed. The caller still receives its normal RPC response; this additive event closes
-/// the gap for other viewers, whose xterm instances would otherwise keep parsing repaint bytes at
-/// the old width until their own container happened to resize.
+/// Resizes the shared pane and emits its changed authoritative grid so all byte-stream renderers
+/// interpret subsequent output at the correct width.
 async fn resize_agent_grid(
     ctx: &Ctx,
     lane_id: repomon_core::model::LaneId,
@@ -1638,10 +1610,8 @@ pub async fn dispatch(
     method: &str,
     params: Option<Value>,
 ) -> Result<Value, RpcError> {
-    // Agent-driving calls stamp this connection's last-interaction beat, which `agent.fit`'s
-    // remote-vs-remote arbitration reads (last-interaction-wins). Done here on the method name so
-    // the per-handler code needn't thread `sess`. `agent.fit` is deliberately absent: it stamps
-    // itself only when it actually applies a resize (see its handler).
+    // Stamp interaction centrally for remote resize arbitration; agent.fit stamps only when it
+    // applies a resize.
     if matches!(
         method,
         "agent.send_input"
@@ -1654,14 +1624,10 @@ pub async fn dispatch(
         *sess.last_interaction.lock().await = Some(std::time::Instant::now());
     }
     match method {
-        // ---- system ----
-        // The local TUI calls this just before parking in a full-screen tmux attach (where it
-        // stops sending its lane.list heartbeat). `socket` special-cases the method to age out
-        // `local_watcher_seen` so the daemon takes over desktop popups on its very next tick
-        // instead of waiting out LOCAL_TTL — closing the handoff gap. The dispatch is a no-op ack.
+        // `socket` ages out local watcher ownership before this acknowledgement so daemon
+        // notifications resume during a full-screen attach.
         "watcher.park" => to_value(()),
 
-        // ---- repos ----
         "repo.list" => to_value(ctx.registry.list().await.map_err(internal)?),
         "repo.add" => {
             let p: RepoAdd = parse(params)?;
@@ -1676,7 +1642,7 @@ pub async fn dispatch(
                 let _ = w.watch_path(&repo.path);
             }
             ctx.broadcast(crate::pubsub::topic::REPO_ADDED, json!({ "repo": repo }));
-            // Index the new repo's history in the background.
+
             let indexer = Indexer::new(ctx.store.clone(), ctx.registry.clone());
             let repo_for_index = repo.clone();
             tokio::spawn(async move {
@@ -1766,9 +1732,7 @@ pub async fn dispatch(
                 .await
                 .map_err(|_| RpcError::invalid_params(format!("no repo {}", p.repo_id)))?;
             let all = ctx.registry.list().await.map_err(internal)?;
-            // File-first since R2: the home's `fleet/<repo>/notes.md`, not the app-support
-            // `repo-notes/` directory (which start-up migration copied across and then left
-            // alone).
+
             let home = ctx.config.read().await.repomind_home();
             let repo_name = repo.name.clone();
             let (content, path) = tokio::task::spawn_blocking(move || {
@@ -1839,7 +1803,6 @@ pub async fn dispatch(
             }))
         }
 
-        // ---- orchestration journal ----
         "journal.append" => {
             let p: JournalAppend = parse(params)?;
             let id = ctx
@@ -1874,7 +1837,6 @@ pub async fn dispatch(
             to_value(json!({ "entries": entries }))
         }
 
-        // ---- approval policy ----
         "approval.record" => {
             use repomon_core::agent::approval;
             let p: ApprovalRecord = parse(params)?;
@@ -1943,7 +1905,6 @@ pub async fn dispatch(
             to_value(json!({ "rules": rules }))
         }
 
-        // ---- standing-orchestration schedules ----
         "schedule.add" => {
             let p: ScheduleAdd = parse(params)?;
             let spec = repomon_core::schedule::parse_spec(&p.spec)
@@ -2005,7 +1966,6 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- playbooks ----
         "playbook.save" => {
             let p: PlaybookSave = parse(params)?;
             let name = p.name.trim();
@@ -2026,8 +1986,8 @@ pub async fn dispatch(
                     p.content.len()
                 )));
             }
-            // File-first since R2: a save can only ever write `playbooks/drafts/<name>.md`.
-            // Approval is the file moving up a level, so the gate is visible in the home.
+            // Save only drafts; publication requires approval to move the file into the live
+            // directory.
             let home = ctx.config.read().await.repomind_home();
             let name = name.to_string();
             let content = p.content.clone();
@@ -2153,7 +2113,6 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- lanes ----
         "lane.list" => to_value(lanes_with_agents(ctx).await?),
         "lane.get" => {
             let p: LaneId = parse(params)?;
@@ -2163,7 +2122,6 @@ pub async fn dispatch(
             to_value(one.into_iter().next().unwrap())
         }
 
-        // ---- durable fleet messages ----
         "message.send" => {
             let p: MessageSend = parse(params)?;
             let sender = message_sender(ctx, p.identity_token, p.source).await?;
@@ -2173,7 +2131,6 @@ pub async fn dispatch(
                 .await
                 .message_sender_refreshes_hops(sender.address.as_str());
             if let Some(single) = p.to.as_legacy_single() {
-                // Exact pre-A6 behavior: one address in, one `FleetMessage` out.
                 let to = single.to_string();
                 let recipient = resolve_message_address(ctx, &to).await?;
                 let message = ctx
@@ -2318,12 +2275,8 @@ pub async fn dispatch(
         }
         "lane.create" => {
             let mut p: CreateLaneParams = parse(params)?;
-            // Defense-in-depth: a remote caller must not pin the worktree to an arbitrary host path.
-            // The remote allowlist grants `lane.create` but deliberately withholds `fs.browse`, so a
-            // paired device has no legitimate way to have picked a path — it's expected to let the
-            // daemon derive the template worktree location. Strip any supplied `path` (rather than
-            // hard-erroring) so a harmless client that fills it in still succeeds, while a hostile
-            // one can't write outside the managed worktree root. The local Unix socket is unaffected.
+            // Remote callers cannot choose host paths: `lane.create` derives the managed worktree
+            // location because the bridge withholds filesystem browsing.
             if !sess.is_local() && p.path.take().is_some() {
                 tracing::warn!(
                     "remote lane.create supplied a path; ignoring it (deriving template)"
@@ -2421,12 +2374,8 @@ pub async fn dispatch(
             }
             Ok(result)
         }
-        // commit.show: item 6, one commit's full metadata + patch for GitExplorerPanel's
-        // commit-detail view (Branch/History rows becoming clickable). LOCAL-ONLY — see
-        // remote.rs's remote_method_allowed, which withholds this alongside the worktree
-        // file-editor RPCs: unlike lane.diff (scoped to one lane's current diff), a caller-chosen
-        // oid can walk the *entire* repo history one commit at a time, a much broader read surface
-        // than the already-allowed reads.
+        // Keep `commit.show` local-only: a caller-selected oid exposes arbitrary repository
+        // history, beyond the bridge's lane-scoped diff access.
         "commit.show" => {
             let p: CommitShowParams = parse(params)?;
             let max_patch_chars = p.max_patch_chars.min(MAX_PATCH_CHARS_CEILING);
@@ -2444,10 +2393,8 @@ pub async fn dispatch(
             to_value(show)
         }
 
-        // ---- worktree files, for the in-app editor (D1 file.list, D2 file.read/file.write) ----
-        // LOCAL-ONLY: see `remote::remote_method_allowed`'s doc comment, which withholds these
-        // three the same way it already withholds `fs.browse` — doubly so here since `file.write`
-        // touches the host filesystem.
+        // Worktree file operations are local-only because they expose and modify the host
+        // filesystem.
         "file.list" => {
             let p: FileList = parse(params)?;
             let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
@@ -2694,7 +2641,6 @@ pub async fn dispatch(
             to_value(res)
         }
 
-        // ---- extensions (Claude Code config: marketplaces, plugins, skills) ----
         "ext.list" => {
             let p: ExtList = parse(params)?;
             let account = p.account.clone().unwrap_or_else(|| "default".to_string());
@@ -3075,7 +3021,6 @@ pub async fn dispatch(
             .await
         }
 
-        // ---- skills (create/read/write/delete SKILL.md, path-guarded) ----
         "skill.create" => {
             let p: SkillCreate = parse(params)?;
             let is_global = matches!(p.scope, ExtScope::Global);
@@ -3197,7 +3142,6 @@ pub async fn dispatch(
             Ok(json!({ "ok": true, "fanout": fanout }))
         }
 
-        // ---- commits (computed live via gix) ----
         "commit.today" => {
             let range = today_range();
             to_value(commits_in_range(ctx, range, None).await?)
@@ -3246,7 +3190,6 @@ pub async fn dispatch(
             to_value(commits)
         }
 
-        // ---- dashboard (Phase 3, from the indexed store) ----
         "timeline" => {
             let p: TimelineParams = parse(params)?;
             let range = TimeRange {
@@ -3282,7 +3225,6 @@ pub async fn dispatch(
             to_value(session::detect(&commits, &names))
         }
 
-        // ---- agents (tmux-backed runtime) ----
         "agent.detect" => {
             let cfg = ctx.config.read().await;
             let default = cfg.default_agent.clone();
@@ -3526,8 +3468,8 @@ pub async fn dispatch(
                 if let Some(b) = p.sort_repos_by_activity {
                     cfg.sort_repos_by_activity = b;
                 }
-                // An explicit sort mode supersedes the legacy boolean; keep the boolean in sync
-                // so TUI builds that only know the toggle still see the right behavior.
+                // Synchronize the boolean fallback so clients that read only that field see the
+                // explicit sort mode.
                 if let Some(mode) = p.sort_mode {
                     match mode.as_str() {
                         "default" | "activity" | "manual" => {
@@ -3676,11 +3618,8 @@ pub async fn dispatch(
                 None
             };
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            // Resolve the chosen name to a command AND the kind whose flag dialect we translate
-            // launch options for: a config custom wins (kind inferred from the command it runs, so
-            // a claude wrapper still gets claude flags), then an autodetected Claude variant (e.g.
-            // claude-work → `CLAUDE_CONFIG_DIR=… claude`, still Claude under the hood), else the
-            // kind's default binary.
+            // Prefer configured commands, then discovered account variants; infer the underlying
+            // kind so wrappers receive the correct flag dialect.
             let (command, kind) = {
                 let cfg = ctx.config.read().await;
                 if let Some(c) = cfg.agents.get(&p.agent) {
@@ -3696,9 +3635,8 @@ pub async fn dispatch(
                     (k.command().to_string(), k)
                 }
             };
-            // Translate --mode/--model/--effort into the kind's flags (and, for claude `ultracode`,
-            // a `/effort` input to inject). A no-op (byte-identical to the legacy command) when no
-            // options are requested.
+            // Apply backend-specific launch options without changing the command when no options
+            // are requested.
             let plan = apply_launch_options(
                 command,
                 &kind,
@@ -4073,11 +4011,8 @@ pub async fn dispatch(
                     .map_err(internal)?;
             }
             reset_managed_session_labels(ctx, &managed_session_key(&window)).await;
-            // The one moment the daemon KNOWS which transcript runs in this window: stamp
-            // the sticky binding deterministically instead of leaving it to first-contact
-            // guessing — `--resume` doesn't touch the resumed .jsonl until the first
-            // exchange, so the binder could otherwise pair a newer external transcript onto
-            // the adopted window and the stamp would wedge it there.
+            // Stamp an adopted session immediately because `--resume` may not update its transcript
+            // until the first exchange, leaving recency-based discovery ambiguous.
             if let Some(sid) = p.session_id.clone() {
                 ctx.known_managed_sessions.lock().await.insert(sid.clone());
                 let tmux = ctx.backend.clone();
@@ -4117,10 +4052,8 @@ pub async fn dispatch(
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
             if p.include_state {
-                // A capture is useful as a terminal checkpoint only when no raw PTY chunk crossed
-                // it. Retry short active bursts until the stream cursor is stable, then return the
-                // exact cursor represented by the repaint. The desktop discards queued chunks at
-                // or below this cursor before resuming incremental rendering.
+                // Retry captures crossed by raw PTY output so the repaint has an exact stream
+                // cursor; clients discard queued chunks through that cursor.
                 let mut state = None;
                 let mut checkpoint = None;
                 let mut stable = false;
@@ -4225,11 +4158,8 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
         "agent.watch_bytes" => {
-            // The embedded renderer's feed: stream one pane's raw PTY bytes as
-            // `event.agent.bytes`. Refcounted per window and per connection: a window has one
-            // shared backend stream, this session joins/leaves its
-            // readership, and delivery is filtered per connection at the forwarding loops. A new
-            // `on` NEVER stops another session's watch; `on:false` releases only THIS session's.
+            // Share one backend byte stream per window, but track readership per connection so one
+            // client cannot stop another client's watch.
             let p: AgentWatchBytes = parse(params)?;
             if p.on {
                 let window = p
@@ -4247,10 +4177,8 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?;
                 sess.watched_bytes.lock().unwrap().insert(window.clone());
-                // The ack carries the pane's grid so a remote emulator renders at exactly
-                // this size instead of resizing the real pane (which would squeeze a
-                // simultaneously attached TUI's mediated view). The stream cursor is additive,
-                // so existing clients that only read the grid remain compatible.
+                // Return the pane grid so a remote emulator can match it without resizing a
+                // simultaneously attached TUI.
                 let tmux = ctx.backend.clone();
                 let dims = tokio::task::spawn_blocking(move || tmux.size_named(&window))
                     .await
@@ -4262,22 +4190,15 @@ pub async fn dispatch(
                     "sequence": stream.sequence,
                 }));
             }
-            // `on:false`. With an explicit window, release just that one. WITHOUT a window (the
-            // TUI's stop path always sends `{lane_id, on:false}` — even when it watched a
-            // non-default window), release every window THIS session watches that belongs to the
-            // lane, matched by the WatchEntry.lane field. Resolving a default window name here
-            // would orphan the real watch.
+            // Without an explicit window, release this connection's watches for the entire lane;
+            // resolving a default would orphan non-default window watches.
             let targets: Vec<String> = match &p.window {
                 Some(window) => vec![window.clone()],
                 None => {
                     let map = ctx.bytes_watches.lock().await;
                     let mut watched = sess.watched_bytes.lock().unwrap();
-                    // Purge names whose registry entry already died (EOF-cleaned: the window
-                    // closed). There is nothing left to unwatch, but they must not linger in
-                    // `watched_bytes` either — a later window-name reuse would otherwise deliver
-                    // bytes this session never asked for. Lane-independent on purpose: a dead
-                    // entry's lane is unknowable (the entry is gone), and a dead name is stale for
-                    // every lane.
+                    // Remove dead registry names across all lanes so reusing a window name cannot
+                    // deliver bytes to an unsubscribed connection.
                     watched.retain(|w| map.contains_key(w));
                     watched
                         .iter()
@@ -4405,10 +4326,8 @@ pub async fn dispatch(
             let p: AgentStop = parse(params)?;
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
-            // Kill the window and reconcile the window-liveness caches synchronously (the same
-            // helper the orphan reaper uses), so an immediately-following `lane.get` can never
-            // read this agent back as still live while waiting out `resolve_windows`'s
-            // total-vanish debounce. See `reap::kill_and_forget`.
+            // Reconcile liveness immediately after killing the window so the next lane.get cannot
+            // revive it from the vanish debounce.
             crate::reap::kill_and_forget(ctx, &window).await;
             let _ = ctx
                 .store
@@ -4443,10 +4362,8 @@ pub async fn dispatch(
             let window = p
                 .window
                 .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
-            // This is the pre-attach hook (the TUI calls it right before `tmux attach`). The
-            // mediated view sizes the window to its pane with `agent.resize` (which sets
-            // window-size manual); restore client-follow so the attaching real terminal renders the
-            // agent at full size. The TUI re-fits it on return.
+            // Restore client-follow before a real terminal attaches; the mediated TUI returns the
+            // window to manual sizing on return.
             let w = window.clone();
             let available = tokio::task::spawn_blocking(move || {
                 let _ = tmux.follow_client_named(&w);
@@ -4470,11 +4387,8 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
         "agent.fit" => {
-            // The arbitrated resize for mediated viewers: reflow the pane to the caller's grid
-            // only when no other session with a fresher claim owns the window's size (a Local/TUI
-            // focus always wins; a remote peer wins only while its focus beat is fresh AND it drove
-            // the agent more recently than the caller). Always answers with the authoritative grid,
-            // so a refused caller renders pinned at the shared size instead of fighting.
+            // Respect viewport ownership and return the authoritative grid even when refusing a
+            // resize, so clients render at the shared size.
             let p: AgentResize = parse(params)?;
             let window = p
                 .window
@@ -4497,7 +4411,7 @@ pub async fn dispatch(
             }
             let (cols, rows) = repomon_core::agent::tmux::clamp_pane_size(p.cols, p.rows);
             resize_agent_grid(ctx, p.lane_id, &window, cols, rows).await?;
-            // The applied fit is this connection's most recent agent-driving act — stamp it so a
+            // The applied fit is this connection's most recent agent-driving act - stamp it so a
             // later remote peer's fit yields to us (last-interaction-wins). Denied fits don't stamp.
             *sess.last_interaction.lock().await = Some(now);
             Ok(json!({ "applied": true, "cols": cols, "rows": rows }))
@@ -4508,7 +4422,7 @@ pub async fn dispatch(
             let lane = p.lane_id;
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
             let (up, ticks, col, row) = (p.up, p.ticks.min(40), p.col, p.row);
-            // Only forward to a full-screen agent (alternate screen) — it owns its scrollback, so
+            // Only forward to a full-screen agent (alternate screen) - it owns its scrollback, so
             // it can scroll itself. A plain shell would just get junk on its command line; the
             // caller falls back to the capture-based scroll when `forwarded` is false.
             let forwarded = tokio::task::spawn_blocking(move || -> repomon_core::Result<bool> {
@@ -4566,7 +4480,6 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- plain terminals (a shell per worktree, several allowed) ----
         "terminal.open" => {
             let p: LaneId = parse(params)?;
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
@@ -4615,7 +4528,7 @@ pub async fn dispatch(
             to_value(terms)
         }
         "terminal.list_all" => {
-            // Every lane's open plain terminals — what the Grid tiles. Fleet-wide (unlike
+            // Every lane's open plain terminals - what the Grid tiles. Fleet-wide (unlike
             // `terminal.list`) so one call covers every visible lane.
             let tmux = ctx.backend.clone();
             let wins = tokio::task::spawn_blocking(move || tmux.list_windows().unwrap_or_default())
@@ -4656,7 +4569,6 @@ pub async fn dispatch(
             Ok(json!({ "target": target, "available": available, "attach": attach }))
         }
 
-        // ---- interactive repo browser ----
         "fs.browse" => {
             let p: Browse = parse(params)?;
             let added: std::collections::HashSet<PathBuf> = ctx
@@ -4674,7 +4586,6 @@ pub async fn dispatch(
                 .and_then(to_value)
         }
 
-        // ---- subscription is handled in the socket layer ----
         "subscribe" => Ok(Value::Null),
         // Liveness probe for remote clients (the WS bridge) and a cheap connectivity check.
         "ping" => Ok(json!("pong")),
@@ -4731,7 +4642,7 @@ pub async fn dispatch(
             Ok(page)
         }
         // Push-notification device registration (the iOS companion).
-        // ---- remote devices (LOCAL SOCKET ONLY — blocked over the bridge by the allowlist) ----
+        // ---- remote devices (LOCAL SOCKET ONLY - blocked over the bridge by the allowlist) ----
         "remote.pair" => {
             let p: RemotePair = parse(params)?;
             // Serialize the store mutation and the cache rebuild together (see
@@ -4753,7 +4664,7 @@ pub async fn dispatch(
         }
         "remote.devices" => {
             let devices = ctx.store.remote_device_list().await.map_err(internal)?;
-            // Never expose the token here — this is the listing surface.
+            // Never expose the token here - this is the listing surface.
             let out: Vec<Value> = devices
                 .iter()
                 .map(|d| {
@@ -4803,7 +4714,7 @@ pub async fn dispatch(
         }
         "viewport.set" => {
             let mut p: ViewportSet = parse(params)?;
-            // Only real terminal windows are streamable extras — anything else is dropped so a
+            // Only real terminal windows are streamable extras - anything else is dropped so a
             // client can't point the capture loop at arbitrary windows.
             p.windows
                 .retain(|w| TmuxRuntime::parse_term_window(w).is_some());
@@ -4814,10 +4725,8 @@ pub async fn dispatch(
                     visible_lanes.contains(&lane) && seen_fit_windows.insert(window.clone())
                 })
             });
-            // This handler is the single writer of the viewport fields, so it also rewrites the
-            // std-Mutex `output_filter` snapshot the event-forward loops read to filter
-            // `event.agent.output` (they must not await; see `ConnSession::output_filter`). Build
-            // it from the SAME values written to the tokio fields below so the two never diverge.
+            // Publish the same viewport values to both snapshots so event forwarders can filter
+            // without awaiting the Tokio lock.
             *sess.output_filter.lock().unwrap() = (
                 p.lane_ids.iter().copied().collect(),
                 p.windows.iter().cloned().collect(),
@@ -4836,7 +4745,6 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- daemon ----
         "daemon.status" => {
             let repos = ctx.registry.list().await.map_err(internal)?.len();
             let lanes = ctx.lanes.list().await.map_err(internal)?.len();
@@ -4864,7 +4772,6 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- system / machine health ----
         "system.doctor" => {
             let cfg = ctx.config.read().await;
             let platform = repomon_core::model::DoctorPlatform::current();
@@ -5028,11 +4935,8 @@ pub async fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- repomind orchestrator (a single daemon-owned `claude` session) ----
-        // `.stop`/`.target`/`.send_input`/`.key`/`.watch`/`.resize` below are deprecated thin
-        // aliases onto the controller lane's window; each logs `warn_deprecated_orchestrator_rpc`
-        // once per process lifetime naming its `agent.*`/`lane.*` replacement (docs/protocol.md).
-        // `.status`/`.transcript`/`.start` are not aliases and stay as they are.
+        // Deprecated orchestrator aliases warn once per process; status, transcript, and start
+        // retain their own contracts.
         "orchestrator.status" => {
             // A window killed externally would otherwise still read as running; reconcile first.
             reconcile_orchestrator(ctx).await;
@@ -5044,11 +4948,8 @@ pub async fn dispatch(
                 headline.as_deref(),
             ))
         }
-        // Repomind's conversation as structured TranscriptItems, so a client (the iOS app) can render
-        // it as a chat instead of mirroring the raw pane. Pinned to the orchestrator's own
-        // `session_id` when known (captured at spawn via `--session-id`); an adopted session (whose
-        // id this process never captured) falls back to the newest $HOME transcript with real
-        // content across accounts — see `pick_orchestrator_transcript_in`.
+        // Pin the transcript to the captured session id; adopted windows without one use the newest
+        // home transcript containing real activity.
         "orchestrator.transcript" => {
             let p: OrchestratorTranscript = parse(params)?;
             reconcile_orchestrator(ctx).await;
@@ -5056,10 +4957,8 @@ pub async fn dispatch(
             let Some(session) = orch.as_ref() else {
                 return Ok(json!([]));
             };
-            // A backend without a parseable transcript reads as an empty chat — deliberately NOT
-            // the recency-heuristic fallback below, which would misattribute some other live
-            // Claude session's transcript as this orchestrator's. Clients render the live pane
-            // stream (`event.orchestrator.output`) instead.
+            // Return an empty chat for backends without transcript support; the recency fallback
+            // could misattribute another Claude session.
             if !session.backend.has_transcript() {
                 return Ok(json!([]));
             }
@@ -5092,18 +4991,8 @@ pub async fn dispatch(
             // Clear a session whose window died externally so a restart actually re-spawns instead
             // of no-op'ing on a corpse.
             reconcile_orchestrator(ctx).await;
-            // Hold the session lock across the ENTIRE check → adopt/spawn → record sequence.
-            // Releasing it between the is-running check and the record (as this handler once did)
-            // let two concurrent starts — a real scenario: the TUI's command-center auto-start and
-            // `repomon orchestrate` both fire at startup on separate connections — both observe
-            // "not running" and race the spawn: the loser then either failed its own `new-session`
-            // outright, spawned a duplicate `orchestrator` window (tmux allows duplicate names),
-            // or took the adopt branch on the winner's fresh window and overwrote its
-            // just-recorded session id/autonomy. Holding a tokio Mutex across the awaits below is
-            // fine — it merely serializes concurrent start/stop/status for the ~tens of ms a tmux
-            // spawn takes. Nothing in this region re-locks `ctx.orchestrator` (the audit:
-            // `reconcile_orchestrator` runs above, before the guard; config is a separate RwLock;
-            // `orchestrator_attention` is only ever taken after — never while holding — it).
+            // Hold the session lock across check, adopt/spawn, and record to prevent duplicate
+            // starts or overwritten identity; this region must not re-lock the orchestrator.
             let mut orch = ctx.orchestrator.lock().await;
             // Already tracking a live session: idempotent no-op (don't spawn a second window).
             if orch.is_some() {
@@ -5118,7 +5007,6 @@ pub async fn dispatch(
             let (cfg_agent, cfg_model, customs) = {
                 let cfg = ctx.config.read().await;
                 (
-                    // `[repomind] primary_agent` when set, else the older `orchestrator_agent`.
                     cfg.repomind_primary_agent(),
                     cfg.orchestrator_model.clone(),
                     cfg.agents.clone(),
@@ -5130,13 +5018,8 @@ pub async fn dispatch(
             // consulted everywhere a Claude-only capability would otherwise be assumed. Errors out
             // (guard drops, nothing recorded) on an agent that can't run the orchestrator at all.
             let backend = resolve_orchestrator_backend(&agent, &customs)?;
-            // A window may survive a daemon restart (tmux outlives us), or simply still be
-            // running from an earlier Start/Spawn — adopt it instead of spawning a duplicate.
-            // Two candidates, newest convention first: the controller lane's actual live window
-            // (resolved, not the possibly-stale record — a later Spawn can have overwritten the
-            // record with a window whose session has since ended, while this one is still up),
-            // then the legacy daemon-owned `orchestrator` window a pre-R1 daemon would have left
-            // behind.
+            // Adopt the controller's resolved live window first, then the legacy orchestrator
+            // window, because either can survive a daemon restart.
             let adopt_candidates: Vec<String> = crate::repomind::primary_window(ctx, home.lane_id)
                 .await
                 .map_err(internal)?
@@ -5157,11 +5040,8 @@ pub async fn dispatch(
             }
             {
                 if let Some(window) = adopted {
-                    // Adopting a window from a previous daemon lifetime: we don't know what
-                    // autonomy — or session id — it was actually launched with (that lived in the
-                    // prior process's memory, not anywhere persisted), so record both as unknown
-                    // rather than asserting the caller's (possibly different) requested value or a
-                    // freshly-minted id that isn't actually this window's.
+                    // An adopted window's launch identity and autonomy are unknown, so do not
+                    // substitute the caller's requested values.
                     let session = crate::OrchestratorSession {
                         agent: agent.clone(),
                         model: model.clone(),
@@ -5188,7 +5068,7 @@ pub async fn dispatch(
                     let mcp_path =
                         write_orchestrator_mcp_config(&socket, &p.autonomy, p.max_agents)
                             .map_err(internal)?;
-                    // Minted fresh for this genuine spawn (never for adopt — see above) so the
+                    // Minted fresh for this genuine spawn (never for adopt - see above) so the
                     // transcript picker can pin `orchestrator.transcript`/the end-of-turn check
                     // to this exact session.
                     let session_id = mint_session_id();
@@ -5202,7 +5082,7 @@ pub async fn dispatch(
                     );
                     (command, Some(session_id))
                 }
-                // Codex takes its MCP registration inline (`-c` overrides — no config file) and
+                // Codex takes its MCP registration inline (`-c` overrides - no config file) and
                 // has no session pinning; the transcript/end-of-turn paths gate on
                 // `backend.has_transcript()` instead of a session id.
                 crate::OrchestratorBackend::Codex => (
@@ -5253,10 +5133,8 @@ pub async fn dispatch(
                     "REPOMON_MCP_MODE".into(),
                     repomon_mcp::MCP_MODE_ORCHESTRATOR.into(),
                 ),
-                // Blanked, not inherited: the controller window is an ordinary lane window and
-                // would otherwise pick up whatever identity the daemon's own environment carries
-                // (a daemon started from inside a managed agent's shell has one), letting the
-                // controller send fleet mail as that agent. An empty token reads as "no identity".
+                // Clear inherited worker identity so a controller started from an agent shell
+                // cannot send fleet mail as that worker.
                 ("REPOMON_MCP_IDENTITY_TOKEN".into(), String::new()),
             ]);
             let tmux = ctx.backend.clone();
@@ -5307,10 +5185,7 @@ pub async fn dispatch(
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
             Ok(status)
         }
-        // ---- repomind home ----
-        // Read-only: where the home repo lives, which lane and window carry the controller, and
-        // the controller cap. Deliberately does NOT ensure the home (that is a write); a home
-        // that has not been created yet reports `exists: false`.
+        // Status must not initialize the home because this is a read-only RPC.
         "repomind.status" => {
             let (home, max_controllers) = {
                 let cfg = ctx.config.read().await;
@@ -5372,13 +5247,8 @@ pub async fn dispatch(
                 },
             })
         }
-        // Local-only (see `remote::remote_method_allowed`): it types into a live agent pane with
-        // the full fleet catalog behind it, which is a broader authority than the bridge's
-        // `agent.send_input` on one worker.
-        //
-        // Delivery goes through the same verified injection as fleet mail and the boot line, so
-        // it can never type over a busy composer, and it refuses outright when no controller is
-        // running rather than silently dropping the instruction on the floor.
+        // Keep controller instructions local-only and use verified injection so a request cannot
+        // overwrite a busy composer.
         "repomind.instruct" => {
             let p: RepomindInstruct = parse(params)?;
             let text = collapse_instruction(&p.text);
@@ -5393,7 +5263,7 @@ pub async fn dispatch(
                 .ok_or_else(|| {
                     RpcError::invalid_params("the repomind home has no controller lane yet")
                 })?;
-            // Resolved for liveness first: a stale record (the earlier lane-window staleness —
+            // Resolved for liveness first: a stale record (the earlier lane-window staleness -
             // `agent.spawn` overwrote it, and that window's session has since ended) must not
             // report a controller as running when nothing live answers to that name.
             let primary = crate::repomind::primary_window(ctx, lane_id)
@@ -5403,7 +5273,7 @@ pub async fn dispatch(
                     RpcError::invalid_params("no controller is running in the repomind home")
                 })?;
             // `lanes_with_agents`, not the bare `ctx.lanes.list()`: only the overlay actually
-            // populates `agent_sessions` (live tmux/transcript scan) — the core `Lanes::list()`
+            // populates `agent_sessions` (live tmux/transcript scan) - the core `Lanes::list()`
             // always returns it empty, which otherwise makes every session lookup below fail.
             let lanes = lanes_with_agents(ctx).await?;
             let lane = lanes.iter().find(|l| l.id == lane_id);
@@ -5496,14 +5366,11 @@ pub async fn dispatch(
         }
         "orchestrator.stop" => {
             warn_deprecated_orchestrator_rpc("orchestrator.stop", "agent.stop");
-            // Take the session lock BEFORE the kill so a stop can't interleave with a concurrent
-            // `orchestrator.start` (which holds this lock across its spawn): stop either runs
-            // first against nothing, or kills the fully-recorded window — never a window that a
-            // mid-flight start is about to record (which would leave an untracked orphan running).
+            // Hold the session lock across kill so a concurrent start cannot record a window after
+            // stop has already removed it.
             let mut orch = ctx.orchestrator.lock().await;
-            // Resolved without re-taking `ctx.orchestrator` (this scope holds it): the tracked
-            // session's window, else whatever the controller lane last recorded, else the legacy
-            // daemon-owned window.
+            // Resolve the tracked, controller-lane, or fallback window without re-taking the
+            // orchestrator lock held here.
             let window = match orch.as_ref() {
                 Some(session) => session.window.clone(),
                 None => ctx
@@ -5514,12 +5381,7 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             let kill = window.clone();
             let _ = tokio::task::spawn_blocking(move || tmux.kill_named(&kill)).await;
-            // Unlike `agent.stop` (see `reap::kill_and_forget`), no cache reconciliation is needed
-            // after this kill: `prompt_cache` only ever holds lane-window sniffs (`overlay_agents`
-            // keys it by lane candidates, which the orchestrator window deliberately isn't), and
-            // while `last_good_windows` does carry `orchestrator`, every consumer of the resolved
-            // list filters to `lane-*` and orchestrator liveness is always probed directly via
-            // `has_named`. Dropping the entry anyway is cheap hygiene, not correctness.
+
             ctx.last_good_windows
                 .lock()
                 .await
@@ -5640,7 +5502,7 @@ pub async fn dispatch(
                 .map_err(internal)?;
             Ok(Value::Null)
         }
-        // ---- supervision ----
+
         "supervision.get" => {
             let p: SupervisionGet = parse_opt(params)?;
             let defaults = ctx.config.read().await.supervision.clone();
@@ -5712,7 +5574,7 @@ pub async fn dispatch(
             let p: SupervisionAudit = parse_opt(params)?;
             let limit = p.limit.unwrap_or(50).min(200);
             // A worker's own MCP identity forces the filter to its own lane, ignoring (or
-            // rejecting, on conflict) any explicit `lane_id` — mirrors the ownership check
+            // rejecting, on conflict) any explicit `lane_id` - mirrors the ownership check
             // `message.mark_read` does around resolving the caller's identity.
             let lane_id = if let Some(token) = p.identity_token {
                 let identity = message_sender(ctx, Some(token), None).await?;
@@ -5832,41 +5694,29 @@ pub async fn dispatch(
     }
 }
 
-/// The optional `attach` field of the `agent.target` / `terminal.target` /
-/// `orchestrator.target` responses: the exact command a client should run in a real terminal
-/// to attach to `target`, so clients stop hard-coding `tmux … attach` themselves. Additive —
-/// older clients keep deriving the tmux invocation from `target` alone.
+/// Returns the backend-specific real-terminal attach command for the resolved target.
 fn attach_json(backend: &dyn repomon_core::SessionBackend, target: &str) -> Value {
     let cmd = backend.attach_command(target);
     json!({ "program": cmd.program, "args": cmd.args })
 }
 
-/// Overlay live agent sessions onto lanes: rich status from the monitors (Claude transcript,
-/// Aider history, …), falling back to "is the repomon-spawned tmux window alive?" for any
-/// other kind. Reads run off the runtime thread.
-/// How far back a transcript can have last changed and still count as a live session, and the
-/// cap on how many concurrent sessions to surface per worktree.
+/// Retain recent transcripts within this window before applying process and binding evidence.
 const SESSION_WINDOW_HOURS: i64 = 6;
 const MAX_SESSIONS_PER_LANE: usize = 8;
 /// How recently a worktree's files must have changed to infer an *active* (but unidentified)
-/// agent in it — the fallback that surfaces Claude Code worktree-isolated subagents, which leave
+/// agent in it - the fallback that surfaces Claude Code worktree-isolated subagents, which leave
 /// no transcript or process of their own. Short, so the indicator tracks actual work.
 const ACTIVITY_WINDOW_SECS: i64 = 90;
 /// Extra grace before an inferred (file-activity) session is dropped, so a brief lull between a
 /// subagent's edits doesn't read as a finish and flap the session present→absent→present (which,
 /// with subagent notifications on, would fire an Idle on each lull).
 const INFERRED_GRACE_SECS: i64 = 30;
-/// A transcript written this recently means its session is writing *right now* — proof of
+/// A transcript written this recently means its session is writing *right now* - proof of
 /// liveness independent of the process probe. Such sessions are never truncated, a backstop so an
 /// actively-working agent can't vanish even if the probe momentarily misses it.
 const RECENTLY_ACTIVE_SECS: i64 = 60;
 
-/// TTL for the cached lane overlay. The notify watcher recomputes a fresh overlay every ~2s
-/// (and every state-transition event it emits is preceded by that fresh recompute, so
-/// event-triggered client refreshes always read current data). Keeping the TTL just under
-/// Recomputing the overlay from scratch takes ~10-30ms depending on lane and window counts. A 500ms
-/// TTL ensures frequent client polls (1-2s heartbeat) always receive fresh status updates while
-/// coalescing sub-second burst requests into a single recomputation.
+/// Coalesce burst requests for 500 ms while allowing ordinary client polls to see a fresh overlay.
 const OVERLAY_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A pane sniff captured for one transcript-derived status must not be reused after the base
@@ -5879,10 +5729,8 @@ fn sniff_cache_status_matches(
     cached_status.is_none_or(|cached| cached == current_status)
 }
 
-/// The full lane list with live agent sessions overlaid — what `lane.list` serves — from a
-/// short-TTL cache so a stream of per-second client polls collapses into ~1 scan per TTL. Stale
-/// concurrent callers may each recompute (bounded, rare); we accept that over single-flight to
-/// avoid a leader-failure deadlock. Structural changes call [`Ctx::invalidate_overlay`].
+/// Returns lanes with live sessions through a short-TTL cache invalidated by structural changes,
+/// allowing concurrent stale callers to recompute.
 pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
     {
         let cache = ctx.overlay_cache.lock().await;
@@ -5896,14 +5744,11 @@ pub(crate) async fn lanes_with_agents(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> 
 }
 
 /// Recompute the overlay from scratch and refresh the cache. Used by callers that must never read a
-/// stale snapshot — notably `notify_watch`, whose edge detection would miss a transition if two
+/// stale snapshot - notably `notify_watch`, whose edge detection would miss a transition if two
 /// ticks reused the same cached list.
 pub(crate) async fn lanes_with_agents_fresh(ctx: &Ctx) -> Result<Vec<Lane>, RpcError> {
-    // Single-flight: only one overlay scan runs at a time. Callers that arrived together (two
-    // clients polling `lane.list`, or the notify watcher landing on the same instant) queue on this
-    // lock; whoever waited then finds the leader's just-written cache below and reuses it instead of
-    // running its own tmux/transcript/gix scan. The `_fresh` contract still holds — the value is at
-    // most one in-flight scan old (well under the notify watcher's 2s tick and 30s debounce).
+    // Serialize overlay scans and recheck the cache after waiting so concurrent callers reuse the
+    // completed scan.
     let _flight = ctx.overlay_flight.lock().await;
     {
         let cache = ctx.overlay_cache.lock().await;
@@ -5993,10 +5838,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         .await
         .unwrap_or_default();
     let tmux = ctx.backend.clone();
-    // Distinguish a *failed* probe from a genuinely empty server: on failure reuse the last-good
-    // window set for this tick (a transient tmux fork/connection fault must not momentarily drop
-    // every managed agent — that flips sessions to `external`, detaches the focused TUI, and fires
-    // stale notifications). A real empty result still clears.
+    // Reuse the last successful windows on probe failure to avoid detaching live agents; a
+    // successful empty result still clears them.
     let fresh: Result<Vec<agent::WindowMeta>, String> =
         match tokio::task::spawn_blocking(move || tmux.list_windows_meta()).await {
             Ok(Ok(w)) => Ok(w),
@@ -6007,7 +5850,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         tracing::warn!("tmux list-windows failed; reusing last-good window set this overlay: {e}");
     }
     // A tick that ran on the last-good snapshot pairs against binding info that lags any
-    // stamps by a generation — good enough to display, but never persist first-contact
+    // stamps by a generation - good enough to display, but never persist first-contact
     // bindings computed from it (they could overwrite fresh stamps with crossed pairs).
     let probe_ok = fresh.is_ok();
     let windows = {
@@ -6015,10 +5858,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         let mut empty_misses = ctx.window_empty_misses.lock().await;
         resolve_windows(fresh, &mut last_good, &mut empty_misses)
     };
-    // If a managed (`lane-…`) window vanished since the last overlay — an agent `/exit`ed or was
-    // stopped — the cached live-process count is now stale-high and would keep the dead session in
-    // the lane's `×N` count for up to the cache TTL. Drop the cache so `live_cwds_cached` recomputes
-    // fresh on the very next line, and the gone agent disappears within one refresh.
+    // A vanished managed window makes the process count stale-high; invalidate it before computing
+    // live sessions.
     let managed_now: std::collections::HashSet<String> = windows
         .iter()
         .filter(|w| w.name.starts_with("lane-"))
@@ -6030,14 +5871,13 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             *ctx.live_cwds.lock().await = None;
             // Also drop the sticky-high counts so a `/exit`ed managed agent disappears within one
             // refresh instead of being held for the grace (tmux closes the window as its process
-            // dies, so this is the genuine-exit signal — see `live_cwds_cached`).
+            // dies, so this is the genuine-exit signal - see `live_cwds_cached`).
             ctx.cwds_sticky.lock().await.clear();
         }
         *prev = managed_now;
     }
-    // A `/exit`ed session leaves a recently-modified transcript behind but is no longer
-    // running. claude's cwd is the worktree, so the number of live claude processes there
-    // bounds how many sessions are actually running — keep that many of the most recent.
+    // Live processes bound transcript-backed sessions because an exited agent leaves its recent
+    // transcript behind.
     let live = live_cwds_cached(ctx).await;
 
     // Usage-limit pauses (from the auto-continue watcher): when a managed lane is paused and
@@ -6056,10 +5896,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         // and as the routing target for keys/captures.
         let lane_windows = TmuxRuntime::lane_windows_meta(&windows, lane.id);
         let managed_n = lane_windows.len();
-        // Live `claude` processes whose cwd is this worktree bound how many of its sessions are
-        // running (a `/exit`ed one leaves a recent transcript but no process). But never drop a
-        // transcript that pairs to a live managed window — keep at least one per window — so a
-        // freshly-spawned second agent isn't hidden for up to ~10s by the cached process count.
+        // Retain at least one transcript per live managed window even when the cached process count
+        // has not seen a new agent.
         let alive = live.as_ref().and_then(|m| {
             // A canonicalize failure (worktree path momentarily unreadable) must NOT degrade to a
             // key miss → count 0 → `truncate(0)` that drops the lane's sessions. Skip filtering
@@ -6067,10 +5905,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let key = lane.worktree.path.canonicalize().ok()?;
             Some(m.get(&key).copied().unwrap_or(0))
         });
-        // `summaries` is newest-first. Keep as many as the worktree has live `claude` processes
-        // (or managed windows), so a `/exit`ed session — no live process — is dropped rather than
-        // lingering. `fresh` (sessions writing right now) is a backstop that keeps an
-        // actively-working agent even if the process probe momentarily misses it.
+        // Keep newest transcripts up to the live-process or managed-window count, with active
+        // writes protecting sessions missed by a probe.
         let now = chrono::Utc::now();
         let fresh = summaries
             .iter()
@@ -6078,18 +5914,15 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             .count();
         let keep = sessions_to_keep(summaries.len(), alive, managed_n, fresh);
         // A transcript bound to a live window IS a live agent regardless of what the process
-        // count says — never truncate it away in favor of a newer unbound one.
+        // count says - never truncate it away in favor of a newer unbound one.
         let bound: std::collections::HashSet<String> = lane_windows
             .iter()
             .filter_map(|w| w.session.clone())
             .collect();
         let summaries = select_kept_summaries(summaries, &bound, keep, now);
         if !summaries.is_empty() {
-            // Pair transcripts with windows by sticky identity (`@repomon_session`), falling
-            // back to the oldest-with-oldest heuristic only on first contact — see
-            // `pair_transcripts_to_windows`. The old purely positional zip re-bound windows
-            // whenever two agents swapped activity rank, which moved names, panes, and usage
-            // accounts between rows.
+            // Preserve durable session stamps; unbound transcripts require pane evidence before
+            // claiming a window.
             let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
             if !pairing.new_bindings.is_empty() || !pairing.duplicate_stamps.is_empty() {
                 stamp_batches.push((
@@ -6125,11 +5958,9 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         lane.agent_sessions.push(session);
                     }
                     None => {
-                        // An unbound summary is ONLY a real external session if there are actual external
-                        // processes running outside tmux (alive > managed_n), or if the process probe was
-                        // unavailable (alive == None) and the transcript is actively fresh.
-                        // Furthermore, a session that was previously managed and whose window died is an
-                        // exited managed agent, NOT an external session.
+                        // Only expose unbound sessions when external processes exist or an
+                        // unavailable process probe leaves fresh transcript evidence; exited
+                        // managed sessions stay excluded.
                         let was_managed = session
                             .session_id
                             .as_deref()
@@ -6163,11 +5994,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     }
                 }
             }
-            // Agents spawned into this worktree get their own windows but haven't written a
-            // transcript yet (claude creates the .jsonl a beat after launch). Surface EVERY
-            // unpaired live window as a window-only placeholder right away — a lane can hold
-            // several transcript-less agents at once, and hiding all but one made them
-            // invisible and uninteractable until an older agent exited.
+            // Surface every unpaired live window immediately, even before its transcript exists.
             for window in pairing.unpaired {
                 let kind = window_meta_kind(&lane_windows, &window)
                     .unwrap_or_else(|| lane_meta_kind(&metas, lane.id));
@@ -6188,10 +6015,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 lane.agent_sessions.push(session);
             }
         } else if let Some(changed) = lane.state.last_change_at {
-            // No identified agent, but a *non-main* worktree's files changed very recently — infer
-            // an active agent we can't name (e.g. a Claude Code worktree-isolated subagent, which
-            // runs inside its parent's process and leaves no transcript or process here). The main
-            // checkout is excluded so hand-edits there don't masquerade as an agent.
+            // Infer unnamed activity only in non-main worktrees so ordinary edits to the main
+            // checkout do not masquerade as an agent.
             let active = !lane.worktree.is_main
                 && (chrono::Utc::now() - changed).num_seconds()
                     < ACTIVITY_WINDOW_SECS + INFERRED_GRACE_SECS;
@@ -6271,11 +6096,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         sess.last_activity_at,
                         now,
                     ) {
-                        // The reset time named in the pause has already arrived, or the
-                        // transcript shows real output newer than when the pause was first
-                        // detected: the agent has resumed, whatever a lingering pane capture
-                        // still shows. Leave the session's genuine transcript/pane status alone
-                        // instead of relabeling it rate-limited.
+                        // A passed reset deadline or newer transcript activity overrides stale
+                        // quota text remaining in the pane.
                     } else {
                         sess.status = AgentStatus::RateLimited;
                         sess.resume_at = rl.reset_at;
@@ -6285,15 +6107,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
     }
 
-    // Persist the sticky bindings established this tick — but only where the pane PROVES
-    // the pairing: each candidate transcript's last-message fingerprint must be visible in
-    // exactly one of its lane's unclaimed panes (`confirmed_stamps`). Activity rank alone
-    // mis-stamped when several transcripts were fresh at once (live incident: two agents'
-    // names swapped and stayed swapped), and a wrong sticky stamp wedges until superseded.
-    // An unconfirmed candidate simply returns next tick — the pairing stamps itself once
-    // the agent's turn is visible on screen. Rare (once per agent lifetime), so the capture
-    // forks don't touch steady-state ticks. Skipped when the window probe failed
-    // (`probe_ok`): a last-good snapshot lags the stamps by a generation.
+    // Persist only unique pane-fingerprint matches, and only after a successful window probe; a
+    // cached snapshot can lag the current stamps.
     if probe_ok && !stamp_batches.is_empty() {
         let tmux = ctx.backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
@@ -6310,10 +6125,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         .collect();
                     confirmed_stamps(&cands, &panes)
                 } else if direct_bind_allowed(cands.len(), probe.len(), lane_window_count) {
-                    // Exactly 1 candidate and 1 unclaimed probe window, AND this is the lane's
-                    // ONLY window (see `direct_bind_allowed`): bind them directly so agents
-                    // without long text fingerprints (e.g. Antigravity) are stamped and never
-                    // surface as phantom external adoptables.
+                    // A sole candidate and sole lane window can bind without a text fingerprint.
                     vec![(
                         probe[0].0,
                         probe[0].1.clone(),
@@ -6323,10 +6135,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 } else {
                     Vec::new()
                 };
-                // Clear any window whose stamp lost the pass-1 claim race this tick (duplicate
-                // `@repomon_session`) — writing an empty value is `list_windows_meta`'s parse for
-                // "no stamp", so the window falls back to placeholder / honest re-confirmation
-                // instead of permanently wedging as a second claimant of the same identity.
+                // Clear duplicate stamps that lost the claim race so those windows can be
+                // re-identified instead of permanently sharing an identity.
                 for (wid, name) in &duplicate_stamps {
                     if let Err(e) = tmux.set_window_session_by_id(*wid, "") {
                         tracing::warn!(
@@ -6349,11 +6159,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         .await;
     }
 
-    // dxkit stop-gate verdicts: worktrees running dxkit's loop pack leave an append-only
-    // ledger (`.dxkit/loop/ledger.jsonl`); its tail verdict is overlaid onto the lane's real
-    // sessions so a fresh `allowed` grants (and a block vetoes) the done-candidate hint.
-    // Cached by the ledger's mtime — one cheap stat per lane per overlay, a re-read only when
-    // the gate actually ran again. Session matching happens client-side in `attention`.
+    // Overlay the latest gate verdict, cached by ledger mtime; the shared attention logic matches
+    // it to the session.
     {
         let mut cache = ctx.gate_cache.lock().await;
         for lane in lanes.iter_mut() {
@@ -6375,21 +6182,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 }
             }
         }
-        // Bounded by the live lane set: drop worktrees no longer listed.
+
         let live: std::collections::HashSet<&PathBuf> =
             lanes.iter().map(|l| &l.worktree.path).collect();
         cache.retain(|wt, _| live.contains(wt));
     }
 
-    // Interactive dialogs: a transcript that ends in a tool call reads **Running**, but the
-    // pane may be sitting on a permission "Do you want…?" dialog; a turn ending in text reads
-    // **Waiting**, but the pane may be showing an option menu (plan approval, a question with
-    // choices). Neither is in the JSONL. Sniff the panes of managed sessions: a detected
-    // dialog sets `pending_prompt` (clients gate approve/menu controls on it), becomes the
-    // notification-ready "why", and flips the status → Waiting. Idle sessions with a live
-    // window are sniffed too — a dialog sitting unanswered for more than IDLE_AFTER decays the
-    // transcript to Idle, and skipping it here would silently drop its ⏸ — and the same
-    // captures feed the stall detector below.
+    // Pane dialogs are absent from transcripts, so sniff managed windows even after transcript
+    // activity decays to Idle; reuse the capture for stall detection.
     let candidates: Vec<(usize, usize, String, AgentStatus)> = lanes
         .iter()
         .enumerate()
@@ -6411,14 +6211,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         })
         .collect();
     if !candidates.is_empty() {
-        // The sniff is a `capture-pane` per Running/Waiting session — the bulk of the overlay's
+        // The sniff is a `capture-pane` per Running/Waiting session - the bulk of the overlay's
         // subprocess cost. Reuse a recent result per window and only re-capture stale ones, so
         // rapid overlays (notify_watch + client polls) share one sniff per window per TTL.
         const SNIFF_TTL: std::time::Duration = std::time::Duration::from_secs(4);
-        // A Running session is the one that can *newly* raise a dialog (its transcript ends in a
-        // tool call, but the pane may be on a permission/plan/menu prompt that only the sniff
-        // sees), so a NeedsYou can be up to SNIFF_TTL late. Re-capture those on a short 1.5s TTL
-        // so status updates and decision prompts appear almost instantly.
+        // Use a shorter sniff TTL for running sessions because a new permission dialog may not
+        // appear in the transcript.
         const RUNNING_SNIFF_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
         type Sniff = (
             Option<agent::prompt::PendingDialog>,
@@ -6454,7 +6252,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let tmux = ctx.backend.clone();
             let miss_windows: Vec<String> =
                 misses.iter().map(|&i| candidates[i].2.clone()).collect();
-            // Each fresh capture yields the parsed dialog, running subagents, AND a content hash —
+            // Each fresh capture yields the parsed dialog, running subagents, AND a content hash -
             // the hash feeds the stall detector's "when did this pane last change?" clock.
             /// One freshly captured pane: its dialog, running subagents, spinner phrase, quota
             /// wall, and a content hash for the stall detector's "when did this last change?".
@@ -6515,10 +6313,8 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                 sniffs[i] = (p, sub, spin, quota);
             }
         }
-        // Prune the sniff caches so they can't grow without bound — every window name ever
-        // sniffed would otherwise leak an entry. `prompt_cache` also drops results older than
-        // the longest sniff TTL (they'd be re-captured anyway); `pane_seen` is pruned by window
-        // liveness ONLY — its old timestamps are the stall clock.
+        // Expire prompt captures, but prune pane_seen only by window liveness because its
+        // timestamps drive stall detection.
         {
             let live: std::collections::HashSet<&str> =
                 windows.iter().map(|w| w.name.as_str()).collect();
@@ -6581,10 +6377,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         }
     }
 
-    // Every session leaves with a reason, sniffed or not, so a status the operator disbelieves
-    // can be reported instead of merely doubted, and with the attention word that splits
-    // `Waiting` into "ended its turn" and "is asking you something". Both run after the dialog,
-    // rate-limit and stall overlays, so they describe the final public state.
+    // Stamp reasons and attention after all overlays so they describe the final public state.
     {
         let now_utc = chrono::Utc::now();
         for s in lanes.iter_mut().flat_map(|l| l.agent_sessions.iter_mut()) {
@@ -6609,9 +6402,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
 /// sentence, so the text itself is too long to watch for reliably.
 const INSTRUCT_MARKER: &str = "[END REPOMIND]";
 
-/// One instruction squashed onto a single line: control characters dropped and runs of
-/// whitespace collapsed, because the composer takes one line and a stray newline would submit
-/// half a sentence.
+/// Removes control characters and collapses whitespace so composer newlines cannot submit a partial instruction.
 fn collapse_instruction(text: &str) -> String {
     text.chars()
         .filter(|value| !value.is_control() || value.is_whitespace())
@@ -6621,13 +6412,8 @@ fn collapse_instruction(text: &str) -> String {
         .join(" ")
 }
 
-/// Stamp every session with the attention word from the shared taxonomy: "none" while it is
-/// working, "end_of_turn" once it has stopped with nothing open, "permission" or "decision" when
-/// it is sitting on a dialog.
-///
-/// Clients switch on this to tell the two halves of `Waiting` apart. Deriving it here, after the
-/// dialog and stall overlays, is what keeps the desktop and the TUI from each re-deriving it from
-/// a payload that has already moved on.
+/// Derive the shared attention word after dialog and stall overlays so clients do not interpret
+/// stale intermediate status.
 fn stamp_attention_kind(lanes: &mut [Lane]) {
     for s in lanes.iter_mut().flat_map(|l| l.agent_sessions.iter_mut()) {
         s.attention_kind = Some(
@@ -6638,24 +6424,8 @@ fn stamp_attention_kind(lanes: &mut [Lane]) {
     }
 }
 
-/// Whether a tracked usage-limit pause has run its course and must stop being shown as
-/// `RateLimited`.
-///
-/// The pane-scraping detector (`repomon_core::agent::detect_usage_limit`) matches the limit
-/// wording anywhere in a capture, with no notion of whether it is still the last thing that
-/// happened, so a message that scrolled off screen at 02:30 can keep matching for hours after
-/// the agent resumed, and the ONLY things that reliably say a pause is over are wall-clock time
-/// and the transcript itself. A pause lifts when EITHER holds:
-///
-/// (a) the reset instant the message named has already arrived (`now >= reset_at`): once that
-///     moment has passed there is nothing left to wait for, whatever the pane still shows; or
-/// (b) the session's transcript carries real activity newer than when the pause was first
-///     detected (`last_activity_at > detected_at`): the agent could not have written that
-///     without the model actually running again.
-///
-/// Both are checked against facts that don't depend on the pane still looking a particular way,
-/// which is what a merely-absent-detection check (miss streaks in the auto-continue watcher)
-/// cannot guarantee on its own.
+/// Lift a tracked quota pause when its reset deadline passes or transcript activity is newer than
+/// the detection, regardless of stale pane text.
 pub(crate) fn rate_limit_has_lifted(
     detected_at: chrono::DateTime<chrono::Utc>,
     reset_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -6665,14 +6435,8 @@ pub(crate) fn rate_limit_has_lifted(
     reset_at.is_some_and(|r| now >= r) || last_activity_at > detected_at
 }
 
-/// Gate a freshly sniffed Antigravity quota-wall reading against its own countdown: the first
-/// time a window's reading names a "resets in Xh Ym" window, fix `now + that duration` as an
-/// absolute deadline in `deadlines`; while that deadline is still ahead, keep reporting the
-/// reading, but once `now` reaches it, drop the reading (and the tracked deadline) even if the
-/// same wall text is still sitting in the window's (short) pane capture. A reading naming no
-/// window (open-ended "quota exhausted") is passed through unchanged: there is no countdown to
-/// judge it against, so presence alone is all the caller has, exactly like Claude's own
-/// no-reset-time case in `rate_limit_has_lifted`. `deadlines` is keyed by tmux window name.
+/// Anchor a quota countdown once per window and suppress it after expiry, while passing open-ended
+/// quota readings through unchanged.
 pub(crate) fn gate_quota_reading(
     deadlines: &mut std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     window: &str,
@@ -6699,30 +6463,8 @@ pub(crate) fn gate_quota_reading(
     }
 }
 
-/// The status a sniffed pane reports, given the transcript-derived `base`, plus the phrase that
-/// explains it.
-///
-/// The pane outranks the transcript on "is it working right now?", in **both** directions.
-///
-/// Upward: a transcript can only say when the last *message* landed, so it decays to Idle through
-/// a long tool call and reads Waiting through a turn whose background agents are still going, both
-/// of which the operator sees as an obviously busy pane.
-///
-/// Downward: a monitor that has no transcript to read (Antigravity, aider, and every other
-/// [`repomon_core::agent`] mtime-only monitor) calls its manifest's recency "Running" and reports
-/// `ended_turn: true` to say so, because it cannot see turn boundaries at all. A background task
-/// touching that file (a dev server writing into the conversation database, say) then pins the
-/// lane pill to "running" for the whole recency window while the pane sits at its prompt. When the
-/// pane carries no dialog, no subagent and no spinner, it is the better witness and demotes the
-/// row to Idle. A `base` of Running from a monitor that *can* see turn boundaries
-/// (`ended_turn: false`, i.e. mid tool call) is never demoted: a capture taken between redraws can
-/// miss the spinner, and a genuinely frozen pane is the stall detector's job.
-///
-/// A dialog outranks everything: a pane asking a question is not working, whatever else is on
-/// screen. A quota wall (`quota`) is the opposite case: nothing is working and the pane says why,
-/// so the row stays Idle but carries the cause instead of a bare silence timer. Returns `None` for
-/// the reason when the pane said nothing new, so the caller falls back to
-/// [`transcript_status_reason`].
+/// Let dialogs and visible work override transcript status, but demote quiet panes only when
+/// Running came from file recency rather than an unfinished turn.
 pub(crate) fn status_from_pane(
     base: AgentStatus,
     ended_turn: bool,
@@ -6806,14 +6548,8 @@ pub(crate) fn transcript_status_reason(
     }
 }
 
-/// How many of a lane's newest-first transcript sessions to keep, given the worktree's live
-/// `claude`-process count (`alive`), its managed-window count (`managed_n`), and how many of its
-/// sessions are writing right now (`fresh`).
-///
-/// With the reliable `ps`-based probe, `alive` is trustworthy: a count of 0 means no live agent,
-/// so a `/exit`ed or stopped session's lingering transcript is dropped immediately rather than
-/// lingering as a phantom external session. When `alive > 0` or `managed_n > 0`, `fresh` acts as a
-/// backstop, and a probe failure (`None`) doesn't filter.
+/// Keep live and fresh sessions, using managed windows as a backstop and treating a failed process
+/// probe as unknown rather than zero.
 fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh: usize) -> usize {
     match alive {
         Some(0) if managed_n == 0 => 0,
@@ -6822,31 +6558,23 @@ fn sessions_to_keep(total: usize, alive: Option<usize>, managed_n: usize, fresh:
     }
 }
 
-/// How long a viewport claim keeps owning its windows' sizes after the last `viewport.set`, and how
-/// long the capture loop treats a session's focus as cadence-boosting. Three missed ~5s client
-/// heartbeats — generous against a busy tick, short enough that a closed/crashed client frees the
-/// pane for reflow within seconds. `pub(crate)` so [`crate::Ctx::viewport_snapshot`] shares it.
+/// Expire viewport ownership and capture-cadence boosts after three missed five-second heartbeats.
 pub(crate) const VIEWPORT_OWNED_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// A transcript that should get a sticky binding this tick, pending pane evidence: the
-/// fingerprint of its last message must be visible in exactly one of the lane's unclaimed
-/// panes before anything is stamped. Activity rank proved able to guess wrong when several
-/// transcripts were fresh at once, and a wrong sticky stamp wedges until superseded — so the
-/// pane, not the rank, picks the window.
+/// Require a unique pane fingerprint before assigning a transcript to a window; activity rank alone
+/// cannot establish identity.
 struct BindingCandidate {
     sid: String,
     /// Normalized fingerprint of the transcript's last message ([`message_fingerprint`]);
-    /// `None` (no message yet / too short) means no evidence — the candidate simply returns
+    /// `None` (no message yet / too short) means no evidence - the candidate simply returns
     /// next tick.
     needle: Option<String>,
     /// The agent kind parsed from the transcript.
     kind: AgentKind,
 }
 
-/// One lane's binding candidates plus the probe-window pool they may stamp onto, the lane's
-/// total live window count (gates the no-evidence direct-bind fallback — see
-/// [`pair_transcripts_to_windows`]), and any windows whose `@repomon_session` stamp lost the
-/// pass-1 claim race this tick and should be cleared.
+/// Carry candidates, eligible windows, lane headcount, and duplicate stamps for evidence-based
+/// binding.
 type StampBatch = (
     Vec<BindingCandidate>,
     Vec<(u64, String)>,
@@ -6861,22 +6589,15 @@ struct Pairing {
     assignment: Vec<Option<String>>,
     /// Transcripts to bind this tick, pending pane confirmation ([`confirmed_stamps`]).
     new_bindings: Vec<BindingCandidate>,
-    /// The windows a new binding may land on — everything pass 1 didn't claim, `(window_id,
+    /// The windows a new binding may land on - everything pass 1 didn't claim, `(window_id,
     /// name)`. Stamps target the window ID: a slot NAME recycled between the probe and the
     /// stamp must not inherit the old transcript's binding.
     probe: Vec<(u64, String)>,
-    /// Live managed windows no evidence-backed transcript claimed, newest (highest window id)
-    /// first. The first is the placeholder target while a just-spawned agent's transcript is
-    /// absent or still awaiting pane confirmation (at most one, per the `SessKey::Fallback`
-    /// model). Also where a duplicate-stamped LOSER window (below) surfaces, so it renders as a
-    /// placeholder instead of vanishing.
+    /// Expose every unclaimed live window as a placeholder, newest window first, including
+    /// duplicate-stamp losers.
     unpaired: Vec<String>,
-    /// Windows whose `@repomon_session` names a sid an EARLIER window (in `windows` order)
-    /// already claimed this tick — sticky identity is supposed to be 1:1, so a second live
-    /// window carrying the same stamp is a bug (duplicate stamp), not a legitimate second home
-    /// for the transcript. `(window_id, name)`, in `windows` order. The caller clears these
-    /// stamps so the window falls back to placeholder / honest re-confirmation instead of
-    /// wedging as a permanent phantom claimant.
+    /// Clear later windows claiming the same session stamp so each transcript retains only its
+    /// first window.
     duplicate_stamps: Vec<(u64, String)>,
 }
 
@@ -6892,17 +6613,11 @@ fn normalize_fingerprint(s: &str) -> String {
 
 /// Minimum normalized length before a fingerprint is distinctive enough to act on.
 const FINGERPRINT_MIN: usize = 24;
-/// How much of the normalized TAIL to keep — after a long reply scrolls, its tail is what
+/// How much of the normalized TAIL to keep - after a long reply scrolls, its tail is what
 /// stays visible above the input box.
 const FINGERPRINT_LEN: usize = 64;
-/// How far back into scrollback the stamp-confirmation probe captures a candidate's window,
-/// looking for its fingerprint. A fast, tool-call-heavy agent (long Bash/Read output between
-/// two messages) can push its own last message hundreds of lines up the scrollback within a
-/// single overlay tick — a shallow capture here means the candidate never confirms and the
-/// window stays permanently unbound (surfaces as "external" forever, never as a managed
-/// session), even though the agent is right there. This only runs for lanes that still have an
-/// unconfirmed candidate, and reading further into tmux's in-memory scrollback is cheap, so
-/// there's no real cost to looking well past what a single tick could plausibly need.
+/// Capture enough scrollback to find a last-message fingerprint after long tool output pushes it
+/// off screen.
 const STAMP_CONFIRM_CAPTURE_LINES: u32 = 500;
 
 /// The pane fingerprint of a transcript's last message, or `None` when there is no message
@@ -7003,13 +6718,8 @@ async fn reset_managed_session_labels(ctx: &Ctx, key: &str) {
     }
 }
 
-/// Reorder `sessions` in place to match a persisted manual tab order (managed window identities
-/// or external transcript ids).
-///
-/// Sessions named in `order` come first, in that order; sessions the order doesn't mention (a
-/// freshly spawned agent, placeholders with no transcript id yet) keep their relative wire
-/// order and append — like browser tabs, new tabs open at the end. A stable sort keeps this
-/// deterministic even when the same session appears twice in `order` (the first entry wins).
+/// Apply the persisted tab order stably, appending unspecified sessions in their existing wire
+/// order.
 fn apply_session_order(sessions: &mut [repomon_core::model::AgentSession], order: &[String]) {
     let position: std::collections::HashMap<&str, usize> = order
         .iter()
@@ -7024,10 +6734,8 @@ fn apply_session_order(sessions: &mut [repomon_core::model::AgentSession], order
     });
 }
 
-/// Which stamps the pane evidence supports: each candidate with a fingerprint is stamped on
-/// the single probe window whose (normalized) pane contains it. No match, several matching
-/// panes, or several candidates matching the same pane → no stamp for those involved; the
-/// candidates return next tick once the screens disambiguate. Returns `(wid, name, sid, kind)`.
+/// Return only one-to-one pane-fingerprint matches; ambiguous candidates remain unbound until a
+/// later scan.
 fn confirmed_stamps(
     cands: &[BindingCandidate],
     panes: &[(u64, String, String)],
@@ -7042,7 +6750,7 @@ fn confirmed_stamps(
             }
         }
     }
-    // Keep only 1:1 matches — a candidate seen in several panes, or a pane claimed by
+    // Keep only 1:1 matches - a candidate seen in several panes, or a pane claimed by
     // several candidates, proves nothing yet.
     hits.iter()
         .filter(|&&(ci, pi)| {
@@ -7061,18 +6769,14 @@ fn confirmed_stamps(
         .collect()
 }
 
-/// Permit binding without pane evidence only when this is the lane's sole window.
-/// A partial window snapshot can omit an existing stamp, so one unclaimed candidate and
-/// one free window do not establish uniqueness. Multi-window lanes require `confirmed_stamps`.
-/// See `direct_bind_allowed_requires_the_lanes_only_window` for the duplicate-stamp regression.
+/// Allow binding without pane evidence only in a single-window lane, because partial snapshots can
+/// omit an existing stamp.
 fn direct_bind_allowed(cands_len: usize, probe_len: usize, lane_window_count: usize) -> bool {
     cands_len == 1 && probe_len == 1 && lane_window_count == 1
 }
 
-/// Pair kept transcripts with live windows by durable session stamp, preserving identity across
-/// activity-rank changes and daemon restarts. Unassigned transcripts remain external and free
-/// windows remain placeholders until `confirmed_stamps` proves a unique pane match. The next
-/// overlay exposes that confirmed pairing, avoiding stale-transcript/new-window mismatches.
+/// Keep durable bindings until unique pane evidence confirms a replacement, preserving identity
+/// across activity-rank changes and restarts.
 fn pair_transcripts_to_windows(
     summaries: &[agent::TranscriptSummary],
     windows: &[agent::WindowMeta],
@@ -7080,16 +6784,12 @@ fn pair_transcripts_to_windows(
 ) -> Pairing {
     let is_fresh =
         |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
-    // Pass 1 — sticky identity, tentatively: each window claims the kept transcript its
+    // Pass 1 - sticky identity, tentatively: each window claims the kept transcript its
     // `@repomon_session` names.
     let mut claim: Vec<Option<usize>> = vec![None; windows.len()];
     let mut claimed = vec![false; summaries.len()];
-    // Sticky identity is supposed to be 1:1 (one window per sid): the first window (in
-    // `windows` order) to carry a given `@repomon_session` stamp is its home; any LATER window
-    // carrying the exact same stamp is a duplicate — evidence of a stale direct-bind or a
-    // concurrent resume — and gets queued for clearing rather than silently accepted as a
-    // second claimant. Tracked by the raw stamp text, independent of whether the sid still
-    // matches a kept transcript, so a duplicate is caught even if one copy's transcript aged out.
+    // The first window owns each raw session stamp, even if the transcript aged out; queue
+    // duplicate claimants for clearing.
     let mut first_window_for_sid: HashMap<&str, usize> = HashMap::new();
     let mut duplicate_stamps: Vec<(u64, String)> = Vec::new();
     for (wi, w) in windows.iter().enumerate() {
@@ -7114,7 +6814,7 @@ fn pair_transcripts_to_windows(
         }
     }
     // Honor pass 1's claims for DISPLAY. A window's `@repomon_session` stamp is durable
-    // ground truth — going idle is not going dead, so a valid claim is never un-displayed
+    // ground truth - going idle is not going dead, so a valid claim is never un-displayed
     // just because its transcript stopped writing for a moment.
     let mut assignment: Vec<Option<String>> = vec![None; summaries.len()];
     let mut has_display = vec![false; windows.len()];
@@ -7124,24 +6824,8 @@ fn pair_transcripts_to_windows(
             has_display[wi] = true;
         }
     }
-    // Supersession: a claude process rotates its transcript id in place (`/clear`, a
-    // fork-on-resume), leaving its window bound to a dead transcript while the live
-    // continuation has no window. When more FRESH unclaimed transcripts exist than free
-    // windows to receive them, OFFER claims whose transcript has gone quiet to pass 2's
-    // evidence probe — WARMEST first: the transcript that stopped writing most recently is
-    // the one that just rotated into the newcomer, while a long-cold one is simply an idle
-    // agent whose window must not be given away. A claim on a fresh transcript is never
-    // released, so an idle fleet can't be shuffled.
-    //
-    // Offering a window to the probe does NOT change what's displayed for it this tick —
-    // only `confirmed_stamps` writing a durable `@repomon_session` stamp (proven by real pane
-    // text) can actually move it. Flipping `assignment` here on headcount alone previously
-    // made ANY idle-but-still-valid session (in a lane that simply holds more live
-    // transcripts than tmux windows, e.g. one companion window per external session) flicker
-    // to "external" every single tick it lost this footrace to an unrelated fresh transcript
-    // — most visibly, a lane containing the operator's own always-fresh, never-window-bound
-    // session permanently stole the idle-but-legitimately-bound window out from under another
-    // session's display, tick after tick, forever.
+    // Offer the warmest quiet bindings for supersession when fresh transcripts outnumber free
+    // windows; retain their displayed identity until pane evidence confirms a replacement.
     let mut released: std::collections::HashSet<usize> = std::collections::HashSet::new();
     {
         let fresh_unclaimed = summaries
@@ -7165,10 +6849,8 @@ fn pair_transcripts_to_windows(
             }
         }
     }
-    // Pass 2 — first contact plus supersession offers. Unclaimed transcripts (and any window
-    // offered above) are candidates for the free-window pool. A never-claimed window remains
-    // a placeholder until pane evidence writes a durable stamp; a released-but-still-displayed
-    // window keeps showing its current binding until that evidence arrives.
+    // Unclaimed windows stay placeholders and supersession candidates keep their displayed binding
+    // until evidence establishes a durable stamp.
     let mut free: Vec<usize> = (0..windows.len())
         .filter(|&i| !has_display[i] || released.contains(&i))
         .collect();
@@ -7185,18 +6867,8 @@ fn pair_transcripts_to_windows(
     let has_never_bound_window = free.iter().any(|&i| windows[i].session.is_none());
     let mut new_bindings = Vec::new();
     for &si in &chosen {
-        // Nominate a transcript for a durable stamp when PANE EVIDENCE could confirm it.
-        // Two routes qualify:
-        //  - it is actively writing (`is_fresh`): it IS some window's agent right now, so
-        //    the evidence pass will find its turn on screen.
-        //  - it is quiet but its window carries NO binding yet AND it has a distinctive
-        //    last-message fingerprint: this recovers an idle agent whose `@repomon_session`
-        //    was lost (a daemon restart of a quiet fleet leaves the window unstamped and no
-        //    transcript fresh, so pass 1 can't reclaim it and this pass never used to try).
-        //    Its pane still shows that last message, so `confirmed_stamps` can reclaim the
-        //    window by evidence. A quiet transcript with no fingerprint stays a display-only
-        //    stand-in — there is nothing to confirm — and a released stale binding
-        //    (`session.is_some()`) is left for a fresh claimant, never re-stamped from a guess.
+        // Nominate fresh transcripts or fingerprinted quiet transcripts for unstamped windows;
+        // neither stale bindings nor fingerprint-free guesses may claim a window.
         if let Some(sid) = &summaries[si].session_id {
             let needle = message_fingerprint(summaries[si].last_message.as_deref());
             let nominate = is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some());
@@ -7209,7 +6881,7 @@ fn pair_transcripts_to_windows(
             }
         }
     }
-    // A released-but-displayed window is NOT unpaired — it already has a real, still-shown
+    // A released-but-displayed window is NOT unpaired - it already has a real, still-shown
     // binding above and must not also render as a placeholder tab.
     let mut unpaired: Vec<&agent::WindowMeta> = windows
         .iter()
@@ -7227,12 +6899,8 @@ fn pair_transcripts_to_windows(
     }
 }
 
-/// Which of a lane's newest-first transcripts to keep, honoring bindings: every summary bound
-/// to a live managed window is kept regardless of rank (the window only exists while its
-/// agent's process lives, so it outranks the process-count probe), then newest-first from the
-/// rest up to `keep` total. Output is re-sorted newest-first so the wire order is unchanged.
-/// Without this, a bound-but-quiet agent could be truncated in favor of a newer external
-/// transcript, dropping a live agent from the lane.
+/// Preserve summaries bound to live windows before filling the newest-first quota, so newer
+/// external transcripts cannot hide managed agents.
 fn select_kept_summaries(
     summaries: Vec<agent::TranscriptSummary>,
     bound: &std::collections::HashSet<String>,
@@ -7247,10 +6915,8 @@ fn select_kept_summaries(
     }
     let is_fresh =
         |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
-    // Protected: bound to a live window (the window proves its agent alive) OR actively
-    // writing right now — `sessions_to_keep`'s "never drop a session that is working"
-    // contract must survive bound-protection, or a stale binding could make the one live
-    // transcript invisible. When keep == 0 and bound is empty, the agent has exited and is dropped.
+    // Protect both live bindings and actively writing transcripts; a stale binding must not
+    // displace the only active session.
     let (mut out, rest): (Vec<_>, Vec<_>) = summaries.into_iter().partition(|s| {
         (keep > 0 && is_fresh(s)) || s.session_id.as_ref().is_some_and(|id| bound.contains(id))
     });
@@ -7269,7 +6935,7 @@ struct SessSnapshot {
     focus: Option<(repomon_core::model::LaneId, String)>,
     /// Other agent windows visible in the same multi-pane viewport.
     fit_windows: Vec<String>,
-    /// When this session last (re)asserted its viewport — its ownership beat's freshness clock.
+    /// When this session last (re)asserted its viewport - its ownership beat's freshness clock.
     focus_at: Option<std::time::Instant>,
     /// When this session last drove an agent (for remote-vs-remote last-interaction-wins).
     last_interaction: Option<std::time::Instant>,
@@ -7310,14 +6976,8 @@ async fn other_session_snapshots(ctx: &Ctx, caller_id: u64) -> Vec<SessSnapshot>
     out
 }
 
-/// Whether `caller` may reflow `window` right now, given the other live sessions.
-///
-/// 1. Any OTHER Local (TUI) session with a fresh focus beat on `window` denies it (TUI precedence).
-/// 2. Any OTHER Remote session with a fresh focus beat on `window` AND a `last_interaction` newer
-///    than the caller's denies it (remote-vs-remote last-interaction-wins).
-/// 3. Otherwise it is allowed; the handler stamps the caller's `last_interaction` on apply.
-/// 4. Self-refit is always allowed — the caller is excluded from `others`, so it never blocks
-///    itself.
+/// Honor fresh viewport claims with local precedence, permitting a newer caller claim at equal
+/// transport priority before comparing remote interaction times.
 fn fit_allowed(
     caller: &SessSnapshot,
     others: &[SessSnapshot],
@@ -7329,10 +6989,8 @@ fn fit_allowed(
             continue;
         }
 
-        // A fresh, newer claim by the caller means it has just exposed this window in its own
-        // viewport and needs to fit the shared pane to that geometry. This is the multi-pane
-        // extension of the old single-focus ownership model. Transport precedence remains: a
-        // remote client cannot displace a Local/TUI claim merely by sending a newer heartbeat.
+        // A newer viewport claim may supersede an equal-priority owner, but remote claims cannot
+        // displace local ownership.
         let caller_claim_is_newer = fit_claims_window(caller, window, now)
             && match (caller.focus_at, o.focus_at) {
                 (Some(mine), Some(theirs)) => mine > theirs,
@@ -7366,8 +7024,8 @@ fn fit_claims_window(session: &SessSnapshot, window: &str, now: std::time::Insta
             .is_some_and(|at| now.duration_since(at) < VIEWPORT_OWNED_TTL)
 }
 
-/// How long a managed agent's pane must sit unchanged — with no dialog up and its turn not
-/// ended — before the session reads as stalled.
+/// How long a managed agent's pane must sit unchanged - with no dialog up and its turn not
+/// ended - before the session reads as stalled.
 const STALL_AFTER_MINS: i64 = 5;
 
 /// When a sniffed session counts as stalled, returns the stall's start (the pane's last
@@ -7400,18 +7058,8 @@ pub(crate) fn sess_key(s: &repomon_core::model::AgentSession) -> String {
     }
 }
 
-/// Compare this overlay's per-lane sessions to the previous tick's; for each session that
-/// vanished, log it at INFO (`target: repomon::overlay`) with a **process-first** attributed
-/// reason plus the worktree's live-`claude` count and the lane's remaining session count.
-///
-/// Process-first (not window-pairing-based) so a multi-agent exit transition — where transcripts
-/// re-pair to the surviving windows — doesn't masquerade as a bug. Reasons:
-/// - `process-exited` — no live `claude` remains in the worktree: a correct disappearance.
-/// - `transcript-aged-out` / `alive-but-dropped` — a `claude` is still alive there but this row
-///   dropped: the bug we're hunting. `alive=N sessions=M` disambiguates the multi-agent case
-///   (a clean single-agent bug reads `alive>=1 sessions=0`).
-/// - `inferred-expired` — a file-activity session aged out (~2 min, by design).
-/// - `probe-unavailable` — the pgrep/lsof probe couldn't run this tick.
+/// Explain vanished sessions using process evidence rather than window pairing, which can change
+/// during a normal multi-agent exit.
 async fn diagnose_vanished_sessions(
     ctx: &Ctx,
     lanes: &[Lane],
@@ -7446,7 +7094,7 @@ async fn diagnose_vanished_sessions(
         let Some(prev) = prev_map.get(&lane.id) else {
             continue;
         };
-        // The worktree's live `claude` count — the process-first liveness signal.
+        // The worktree's live `claude` count - the process-first liveness signal.
         let alive = live.and_then(|m| {
             lane.worktree
                 .path
@@ -7568,10 +7216,8 @@ fn is_builtin(name: &str) -> bool {
             .any(|(n, _)| n == name)
 }
 
-/// The base command to resume an adopted Claude session, matching the *account* (config dir)
-/// the session belongs to — and reusing the user's configured agent for that account so any
-/// flags they set (e.g. `--dangerously-skip-permissions`) carry over. Falls back to a bare
-/// `[CLAUDE_CONFIG_DIR=…] claude`.
+/// Resume with the session's account and configured launch flags, falling back to an
+/// account-qualified Claude command.
 fn adopt_base_command(
     default_agent: &Option<String>,
     customs: &HashMap<String, String>,
@@ -7603,13 +7249,8 @@ fn adopt_base_command(
     })
 }
 
-/// The account (CLAUDE_CONFIG_DIR, canonicalized) a command targets, or `None` for the default.
-///
-/// Variant accounts launch with an explicit, shell-quoted `CLAUDE_CONFIG_DIR=…` (see
-/// [`agent::claude::launch_command`]); the default account launches as `env -u CLAUDE_CONFIG_DIR
-/// claude` (no assignment). So this is `None` when the assignment is absent, parses the value
-/// honoring shell quoting (a config dir may contain spaces), and normalizes the *default* base back
-/// to `None` so the default account keeps its `None`/`"default"` identity regardless of spelling.
+/// Resolve the shell-quoted account assignment and normalize the default config directory to no
+/// account override.
 fn command_account(cmd: &str) -> Option<PathBuf> {
     let dir = PathBuf::from(config_dir_arg(cmd)?);
     let dir = dir.canonicalize().unwrap_or(dir);
@@ -7618,10 +7259,8 @@ fn command_account(cmd: &str) -> Option<PathBuf> {
     (dir != default).then_some(dir)
 }
 
-/// The `CLAUDE_CONFIG_DIR=` value from a command's leading env assignment, shell-unquoted, or
-/// `None` if absent. Honors the single-quote grouping [`shell_quote`] emits, so a config dir
-/// containing spaces (`CLAUDE_CONFIG_DIR='/a b/.claude' claude`) parses as one whole path rather
-/// than being split on the inner space.
+/// Parse the leading account assignment with shell quoting so config directories containing spaces
+/// remain intact.
 fn config_dir_arg(cmd: &str) -> Option<String> {
     const KEY: &str = "CLAUDE_CONFIG_DIR=";
     let mut from = 0;
@@ -7644,7 +7283,7 @@ fn unquote_shell_word(s: &str) -> String {
         match c {
             c if c.is_whitespace() => break,
             '\'' => {
-                chars.next(); // opening quote
+                chars.next();
                 for c in chars.by_ref() {
                     if c == '\'' {
                         break; // closing quote
@@ -7688,7 +7327,7 @@ fn is_env_assignment(tok: &str) -> bool {
 /// resolve to `claude`.
 fn program_of(command: &str) -> Option<&str> {
     let mut toks = command.split_whitespace().peekable();
-    // A leading `env [-i] [-u NAME]… [NAME=val]… program` — skip `env` and its options/
+    // A leading `env [-i] [-u NAME]… [NAME=val]… program` - skip `env` and its options/
     // assignments (note `-u` takes a NAME argument) so the real program surfaces.
     if toks.peek() == Some(&"env") {
         toks.next();
@@ -7721,7 +7360,7 @@ fn window_meta_kind(
 }
 
 /// The agent kind repomon last spawned in a lane (from its persisted meta), defaulting to "unknown"
-/// when nothing was recorded — used as fallback to label a window-only placeholder session.
+/// when nothing was recorded - used as fallback to label a window-only placeholder session.
 fn lane_meta_kind(
     metas: &[repomon_core::model::LaneMeta],
     lane_id: repomon_core::model::LaneId,
@@ -7734,10 +7373,8 @@ fn lane_meta_kind(
         .unwrap_or_else(|| AgentKind::from_kind_str("unknown"))
 }
 
-/// A window-only placeholder agent: a repomon-spawned session whose tmux window is alive but
-/// whose transcript hasn't appeared yet (just launched), so it shows immediately instead of
-/// staying invisible until the `.jsonl` lands. Managed (`external: false`), no transcript id,
-/// and not `inferred` (it's a real spawn, not a guess from file activity).
+/// Expose live managed windows before their transcripts exist without labeling them as inferred or
+/// external.
 fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> AgentSession {
     AgentSession {
         id: 0,
@@ -7772,21 +7409,16 @@ fn window_placeholder_session(lane: &Lane, kind: AgentKind, window: String) -> A
     }
 }
 
-/// A Claude session id is safe to interpolate into a resume command (`claude --resume <id>`).
-/// Transcript ids are UUIDs / `[A-Za-z0-9_-]`; anything else (whitespace, `;`, `$`, quotes, `|`,
-/// backticks…) is rejected so `agent.adopt` can't be turned into shell injection — the command is
-/// ultimately run via `sh -c` by tmux. Empty is invalid.
+/// Accept only nonempty alphanumeric, underscore, or hyphen session ids to prevent shell injection
+/// in resume commands.
 fn valid_session_id(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Pick the tmux window list for this overlay tick. On a successful probe, return the fresh list
-/// and remember it as last-good. On a probe *failure* (a transient fork/connection fault, e.g.
-/// `tmux` failing to spawn under load — distinct from a genuinely empty server), reuse the
-/// last-good list so a single bad snapshot doesn't momentarily drop every managed agent — which
-/// would flip sessions to `external`, detach the focused TUI, and fire stale notifications.
+/// Reuse the last successful window snapshot after probe failure so transient errors cannot detach
+/// clients or create false external sessions.
 fn resolve_windows<T: Clone>(
     fresh: Result<Vec<T>, String>,
     last_good: &mut Vec<T>,
@@ -7795,11 +7427,8 @@ fn resolve_windows<T: Clone>(
     match fresh {
         // Transient probe fault (fork/connection): reuse last-good; don't touch the empty counter.
         Err(_) => last_good.clone(),
-        // A sudden total vanish of every window is usually a tmux server bounce (e.g. the user ran
-        // `tmux kill-server`), not all agents exiting at once. Treat the first empties as a blip —
-        // reuse last-good — and accept the empty only after EMPTY_WINDOWS_CONFIRM in a row, so a
-        // bounce doesn't drop every managed session for a tick (which detaches the TUI and fires a
-        // wave of stale Idle notifications).
+        // Require consecutive empty probes before discarding a nonempty snapshot, avoiding false
+        // exits during a server bounce.
         Ok(w) if w.is_empty() && !last_good.is_empty() => {
             *empty_misses = empty_misses.saturating_add(1);
             if *empty_misses >= EMPTY_WINDOWS_CONFIRM {
@@ -7821,10 +7450,7 @@ fn resolve_windows<T: Clone>(
 /// windows (vs. a transient bounce).
 const EMPTY_WINDOWS_CONFIRM: u8 = 2;
 
-/// Per-path analogue of [`resolve_windows`] for the transcript scan: on success, remember each
-/// path's result as last-good; on a scan-task failure (a join error / panic that escaped the
-/// per-lane `catch_unwind`), reuse the last-good per path so the whole fleet doesn't collapse to
-/// empty for that tick. Unknown paths fall back to empty.
+/// Retain per-path results after scan-task failure so one failed scan cannot erase the fleet.
 fn reuse_per_path_on_failure<T: Clone>(
     fresh: Result<Vec<Vec<T>>, String>,
     paths: &[std::path::PathBuf],
@@ -7849,11 +7475,8 @@ fn reuse_per_path_on_failure<T: Clone>(
 #[cfg(all(unix, not(target_os = "linux")))]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     use std::process::Command;
-    // Enumerate `claude` processes via `ps`, matching the executable basename. `pgrep -x claude`
-    // proved UNRELIABLE on macOS: it misses live `claude` processes that `ps` lists (their kernel
-    // accounting name differs from the exec name), so those worktrees read as alive=0 and had
-    // their sessions truncated away — the disappearing-sessions bug. `-ww` disables column
-    // truncation so a full-path `comm` isn't clipped before the basename match.
+    // Use untruncated `ps` executable paths because kernel process names can differ from executable
+    // basenames.
     let ps = Command::new("ps")
         .args(["-axww", "-o", "pid=,comm="])
         .output()
@@ -7891,7 +7514,7 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     Some(counts)
 }
 
-/// Linux variant: scan `/proc` directly — always present, no `ps`/`lsof` dependency, and
+/// Linux variant: scan `/proc` directly - always present, no `ps`/`lsof` dependency, and
 /// cheaper than either.
 #[cfg(target_os = "linux")]
 fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
@@ -7904,11 +7527,8 @@ fn live_claude_cwds() -> Option<HashMap<PathBuf, usize>> {
     Some(combined)
 }
 
-/// Count processes named `name` per working directory by walking `/proc`. A process matches
-/// when its `comm` equals `name` (the kernel uses the script basename for `#!` launchers,
-/// truncated to 15 bytes — "claude" fits) OR when the basename of its cmdline argv[0] does
-/// (covers exec'd wrappers whose comm differs — the Linux analogue of the pgrep-vs-ps lesson
-/// above). cwd comes from `/proc/<pid>/cwd`; entries we can't read (other users) are skipped.
+/// Count readable `/proc` entries by working directory, accepting either the kernel name or argv[0]
+/// basename to include wrapped commands.
 #[cfg(target_os = "linux")]
 fn live_cwds_by_name(name: &str) -> Option<HashMap<PathBuf, usize>> {
     let mut counts: HashMap<PathBuf, usize> = HashMap::new();
@@ -7972,7 +7592,7 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
         let cache = ctx.live_cwds.lock().await;
         if let Some((t, map)) = &*cache {
             // pgrep+lsof is slow (lsof spikes to 100-500ms on macOS); keep it well off the hot
-            // path. A `/exit`-ed session may linger up to this long — acceptable.
+            // path. A `/exit`-ed session may linger up to this long - acceptable.
             if t.elapsed() < std::time::Duration::from_secs(10) {
                 return Some(map.clone());
             }
@@ -7998,24 +7618,20 @@ async fn live_cwds_cached(ctx: &Ctx) -> Option<HashMap<PathBuf, usize>> {
         Some(m) => m,
         None => {
             // The probe couldn't run (ps/lsof spawn failed under load, /proc unreadable).
-            // Returning None means "don't filter" — callers keep all recent sessions rather than
-            // truncating to a bogus low count — but it was silent; log it so a flap is visible.
+            // Returning None means "don't filter" - callers keep all recent sessions rather than
+            // truncating to a bogus low count - but it was silent; log it so a flap is visible.
             tracing::warn!("live agent-process probe failed; not truncating sessions");
             return None;
         }
     };
-    // Sticky-high: a single `pgrep`/`lsof` undercount must not drop a session from the overlay
-    // (then re-add it next probe), which churns the lane list and used to re-fire alerts. Hold each
-    // worktree's highest recently-observed count for a short grace, so one bad sample can't hide a
-    // session; a genuine count drop decays after the grace. Managed exits stay prompt because the
-    // managed-window-vanish path clears this map (and tmux closes the window the moment the process
-    // dies), so this lingering only ever affects external sessions — acceptable, like the cache TTL.
+    // Hold recent high process counts through transient undercounts; managed-window exits clear
+    // this grace immediately.
     const STICKY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
     let now = std::time::Instant::now();
     let mut effective = map.clone();
     {
         let mut sticky = ctx.cwds_sticky.lock().await;
-        // Refresh a worktree's held high only when this sample meets or exceeds it — an under-read
+        // Refresh a worktree's held high only when this sample meets or exceeds it - an under-read
         // leaves the high's timestamp untouched so it can age out (real exits eventually decay).
         for (k, &c) in &map {
             if c == 0 {
@@ -8165,13 +7781,7 @@ async fn commits_in_range(
     Ok(out)
 }
 
-/// Logs a `tracing::warn!` naming `replacement` for a deprecated `orchestrator.*` alias — but
-/// only the first time `method` is called in this process's lifetime. These aliases are still on
-/// the hot path of anything still calling them (the TUI's command-center view drives several of
-/// them on every keystroke and on a render tick), so logging every call would flood the daemon
-/// log; one line per method for the life of the process is enough to tell an operator or a
-/// client author to move to the replacement before the alias is removed (target: the release
-/// after next — see `docs/protocol.md`).
+/// Warn once per deprecated method per process so frequently used aliases do not flood logs.
 fn warn_deprecated_orchestrator_rpc(method: &str, replacement: &str) {
     static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
@@ -8192,19 +7802,8 @@ fn first_time_warned(seen: &mut std::collections::HashSet<String>, method: &str)
     seen.insert(method.to_string())
 }
 
-/// The `{running, agent, model, backend, window, autonomy, session_id, attention, headline}`
-/// status JSON for the orchestrator (shared by `orchestrator.status` and the
-/// `event.orchestrator.status` broadcast). `agent` is the raw name the session was started with
-/// (`claude-work`, a custom, `codex`); `backend` is the normalized seam value
-/// (`"claude"`/`"codex"`) clients should switch rendering on — a codex-backed session has no
-/// transcript chat view, never reports `end_of_turn`, and always has a null `session_id`.
-/// `autonomy` is the level the session was started with, or `null` if it was adopted from a
-/// surviving tmux window and is therefore unknown. `session_id` is the `--session-id` UUID it was
-/// launched with (see `mint_session_id`) — same "unknown → null" semantics as `autonomy` for an
-/// adopted window, always null for codex. `attention` is one of `"none"`, `"permission"`,
-/// `"decision"`, `"end_of_turn"` — see
-/// [`notify_watch::check_orchestrator_attention`](crate::notify_watch); `headline` is a short
-/// "why" (the pending dialog's question, or a tail of repomind's last message) or `null`.
+/// Return the orchestrator wire status, preserving null identity and autonomy for adopted windows
+/// and backend-specific transcript availability.
 pub(crate) fn orchestrator_status_value(
     orch: Option<&crate::OrchestratorSession>,
     attention: &str,
@@ -8236,11 +7835,8 @@ pub(crate) fn orchestrator_status_value(
     }
 }
 
-/// Pick the orchestrator's active transcript out of an already-scanned, newest-first session list:
-/// the newest with real message/tool activity (skips the content-less usage-probe sessions),
-/// falling back to the newest overall. Pure — split out of [`pick_orchestrator_transcript`] so the
-/// selection rule itself is unit-testable without touching the filesystem. Used only as the
-/// unknown-session-id fallback (an adopted window) — see [`pick_orchestrator_transcript_in`].
+/// For an unknown session id, choose the newest transcript with real activity, falling back to the
+/// newest transcript overall.
 fn pick_orchestrator_transcript_from(
     mut summaries: Vec<agent::TranscriptSummary>,
 ) -> Option<agent::TranscriptSummary> {
@@ -8254,18 +7850,8 @@ fn pick_orchestrator_transcript_from(
     Some(summaries.swap_remove(idx))
 }
 
-/// The orchestrator's chosen transcript, given its own `session_id` (if known) and its `$HOME`.
-/// `Some(id)`: a direct lookup of *that* session's transcript file
-/// ([`agent::claude::transcript_for_session`]) — pinned regardless of what else is running on the
-/// machine, so another active Claude session can never be misattributed as repomind's, however
-/// much more recently it touched its own transcript. `None` (a window adopted from a prior daemon
-/// lifetime whose session id this process never captured): falls back to the previous "newest
-/// $HOME session with content across accounts" heuristic (see
-/// [`pick_orchestrator_transcript_from`]) — the tracked `agent` can be stale after a restart+adopt
-/// (it reflects config, not the running window's actual `CLAUDE_CONFIG_DIR`), and the ~empty
-/// usage-probe sessions also run in `$HOME`, so neither the account nor plain recency is a
-/// reliable selector on its own there. Split out from [`pick_orchestrator_transcript`] so tests can
-/// drive it against a fixture `home` without mutating the process-global `HOME` env var.
+/// Use the captured session id across accounts when known; otherwise choose a home transcript with
+/// real activity because adopted account metadata and probe recency are unreliable.
 fn pick_orchestrator_transcript_in(
     home: &Path,
     session_id: Option<&str>,
@@ -8278,20 +7864,15 @@ fn pick_orchestrator_transcript_in(
     pick_orchestrator_transcript_from(summaries)
 }
 
-/// The orchestrator's chosen transcript for the real `$HOME` — see
-/// [`pick_orchestrator_transcript_in`] for the selection rule. Shared by `orchestrator.transcript`
-/// (the iOS chat view) and the notify-watch end-of-turn attention check. Blocking (reads/scans
-/// `$HOME`) — call from `spawn_blocking`.
+/// Read the orchestrator transcript from the real home directory on a blocking worker.
 pub(crate) fn pick_orchestrator_transcript(
     session_id: Option<&str>,
 ) -> Option<agent::TranscriptSummary> {
     pick_orchestrator_transcript_in(&config::home(), session_id)
 }
 
-/// Drop a stale orchestrator session: if we think one is running but its tmux window is gone (killed
-/// externally, or it `/exit`ed), clear the tracked session and broadcast the stopped status, so
-/// `orchestrator.status` reads accurately and `orchestrator.start` re-spawns rather than no-op on a
-/// corpse. Returns whether a session is still tracked afterward.
+/// Clear a vanished orchestrator window and broadcast its stopped status, returning whether a
+/// session remains tracked.
 pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
     let window = match ctx.orchestrator.lock().await.as_ref() {
         Some(session) => session.window.clone(),
@@ -8314,14 +7895,8 @@ pub(crate) async fn reconcile_orchestrator(ctx: &Ctx) -> bool {
     false
 }
 
-/// Which backend an orchestrator agent name runs on. `None` and Claude account variants are
-/// Claude; a config custom is Claude too — its command line gets the Claude-shaped flags
-/// [`build_claude_orchestrator_command`] appends, exactly as before backends existed (a
-/// codex-shaped custom is future work). `codex` is the one non-Claude backend that can actually
-/// drive the fleet (it has an MCP client). Anything else is a loud `invalid_params` — `aider`
-/// and `cursor-agent` can't speak MCP, and an unknown name has no command — instead of what this
-/// path used to do: silently spawn e.g. `aider --mcp-config …`, a broken window the user had to
-/// diagnose by hand.
+/// Resolve Claude accounts and custom commands to Claude, accept Codex, Antigravity, and OpenCode,
+/// and reject unsupported orchestrator backends.
 pub(crate) fn resolve_orchestrator_backend(
     agent: &Option<String>,
     customs: &HashMap<String, String>,
@@ -8349,11 +7924,7 @@ pub(crate) fn resolve_orchestrator_backend(
     }
 }
 
-/// Resolve the orchestrator's base launch command from its agent name, mirroring `agent.spawn`: a
-/// config custom wins, then an autodetected Claude variant (e.g. `claude-work` →
-/// `CLAUDE_CONFIG_DIR=… claude`), else the kind's default binary (`codex` — anything else was
-/// already rejected by [`resolve_orchestrator_backend`]). `None` (no agent chosen) is bare
-/// `claude`.
+/// Resolve configured commands before discovered account variants and supported backend defaults.
 pub(crate) fn orchestrator_base_command(
     agent: &Option<String>,
     customs: &HashMap<String, String>,
@@ -8375,31 +7946,16 @@ pub(crate) fn orchestrator_base_command(
     }
 }
 
-/// The result of translating spawn launch options: the (possibly augmented) launch command, plus an
-/// optional `/effort` slash-command to inject as the session's FIRST input. Claude's native
-/// `--effort` flag covers low|medium|high|xhigh|max, but `ultracode` (the top level = xhigh +
-/// workflows) is only reachable via the `/effort` slash command, so that case is injected after the
-/// session opens — exactly how an operator sets it. When `effort_inject` is `Some`, the caller must
-/// send the task as input AFTER the injection (so effort is set before the task), not as a launch
-/// argument.
+/// Carry launch flags and optional effort input, which must precede the task when the requested
+/// effort is unavailable as a CLI flag.
 #[derive(Debug, PartialEq, Eq)]
 struct LaunchPlan {
     command: String,
     effort_inject: Option<String>,
 }
 
-/// Translate the optional spawn launch options (`--mode` / `--model` / `--effort`) into the agent
-/// command's flags (and, for claude `ultracode`, a `/effort` input to inject), per [`AgentKind`].
-/// `command` is the already-resolved base launch command (e.g. `claude`, `CLAUDE_CONFIG_DIR=… claude`,
-/// or `codex`); it is run via `sh -c` by tmux, so every interpolated value is `shell_quote`d.
-///
-/// Invariants:
-/// - When nothing is requested (`mode` absent/`"default"`, no `effort`, no `model`) the command is
-///   returned **byte-identical** to the input (and `effort_inject` is `None`), so the default spawn
-///   path is unchanged.
-/// - Flags are only emitted for kinds whose dialect we know (Claude + variants, Codex). For any
-///   other kind (an unknown binary) requested options are ignored with a warning rather than
-///   injecting a flag the binary may not accept (which would make it exit on launch).
+/// Translate known launch dialects with shell-quoted values; preserve the command byte-for-byte
+/// when no option applies and return any required effort input separately.
 fn apply_launch_options(
     command: String,
     kind: &AgentKind,
@@ -8407,7 +7963,7 @@ fn apply_launch_options(
     mode: Option<&str>,
     model: Option<&str>,
 ) -> LaunchPlan {
-    // "default"/empty mean "no override" — treat them exactly like an absent option.
+    // "default"/empty mean "no override" - treat them exactly like an absent option.
     let mode = mode.filter(|m| !m.eq_ignore_ascii_case("default") && !m.is_empty());
     let effort = effort.filter(|e| !e.is_empty());
     let model = model.filter(|m| !m.is_empty());
@@ -8419,7 +7975,7 @@ fn apply_launch_options(
         };
     }
 
-    let mut suffix = String::new(); // flags appended to the command
+    let mut suffix = String::new();
     let mut effort_inject = None;
 
     match kind {
@@ -8559,12 +8115,8 @@ fn codex_reasoning_effort(effort: &str) -> Option<&'static str> {
     }
 }
 
-/// Best-effort agent kind for a resolved (custom) launch command, so a custom configured agent that
-/// wraps `claude`/`codex` still gets the right flag dialect. Reuses [`program_of`] (which skips
-/// leading `VAR=value` env assignments) and matches the program's basename. An unrecognized program
-/// yields `Other` (launch options are then ignored rather than guessed). A custom command with a
-/// space inside a quoted env value can't be parsed by whitespace and falls back to `Other` — a safe
-/// no-op, not a wrong flag.
+/// Infer the executable dialect through leading environment assignments, falling back to Other when
+/// parsing is ambiguous rather than emitting unsupported flags.
 fn kind_from_command(command: &str) -> AgentKind {
     match program_of(command).map(program_basename) {
         Some("claude") => AgentKind::ClaudeCode,
@@ -8641,10 +8193,8 @@ fn program_basename(prog: &str) -> &str {
     prog.rsplit('/').next().unwrap_or(prog)
 }
 
-/// Refuse an `agent.spawn` into the controller lane based on who is asking. `caller_lane` is the
-/// lane of the caller's MCP identity, or `None` when no identity was presented - the local
-/// operator through the TUI or Mission Control. A managed worker holds an identity bound to its
-/// own lane; only an identity already inside the controller lane may put another agent there.
+/// Restricts controller-lane spawning to the local operator or an identity already bound to that
+/// lane.
 pub(crate) fn controller_spawn_identity_refusal(
     caller_lane: Option<repomon_core::model::LaneId>,
     controller_lane: repomon_core::model::LaneId,
@@ -8735,19 +8285,8 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
     }
 }
 
-/// Attach backend-specific MCP configuration without placing identity values in persistent files.
-/// OpenCode receives a runtime-only inline merge. Antigravity and Cursor need global registration,
-/// but their entries contain only the executable and arguments; the managed child inherits its identity env.
-///
-/// For `Other`/custom agents: the command string is inspected with `kind_from_command` to detect
-/// whether the custom command wraps a known binary (e.g. `claude --dangerously-skip-permissions`
-/// → `ClaudeCode`, `agy --mode plan` → `Antigravity`). If it matches, that kind's wiring is
-/// applied transparently. Completely unknown custom commands receive no MCP wiring.
-///
-/// `Aider` has no native MCP client support as of its current release; no wiring is attempted.
-/// Attach the assembled boot document to a launch command, for the kinds whose CLI takes it as
-/// a launch flag. Every other kind is handed the document another way (OpenCode through its
-/// instructions list, the rest as a typed first line), so its command comes back unchanged.
+/// Attach boot context through supported launch flags, leaving other backends to their
+/// instruction-file or first-input path.
 fn attach_boot_context(command: String, kind: &AgentKind, boot: &Path) -> String {
     match crate::repomind::boot::delivery(kind) {
         crate::repomind::boot::Delivery::AppendSystemPromptFile => format!(
@@ -8787,10 +8326,8 @@ fn configure_backend_mcp(
             // Aider has no native MCP client support; fleet mail is unavailable for Aider agents.
         }
         AgentKind::Other(_) => {
-            // Inspect the program name to detect whether a custom command wraps a known binary
-            // (e.g. `claude --dangerously-skip-permissions` wraps ClaudeCode). If it matches a
-            // wired dialect, apply that kind's registration so the custom agent gets fleet mail.
-            // Fully unknown commands silently receive no MCP wiring.
+            // Register known binaries wrapped by custom commands with their MCP dialect; unknown
+            // programs receive no wiring.
             let dialect = kind_from_command(&spec.program);
             if !matches!(dialect, AgentKind::Other(_)) {
                 configure_backend_mcp(&dialect, spec, boot)?;
@@ -8803,11 +8340,8 @@ fn configure_backend_mcp(
     Ok(())
 }
 
-/// Build the `OPENCODE_CONFIG_CONTENT` JSON string registering the `repomon` MCP server.
-/// Preserves any existing configuration in `existing` (or parsed from `OPENCODE_CONFIG_CONTENT`),
-/// adding or replacing `mcp.repomon` with a local server executing `repomond mcp`.
-/// The `environment` mapping specifies which process environment variables OpenCode should
-/// interpolate into the child process using `{env:VAR}` syntax.
+/// Merge Repomon MCP registration into existing OpenCode configuration while forwarding identity
+/// through environment placeholders.
 pub(crate) fn build_opencode_config_content(
     existing: Option<&str>,
     env_vars: &[&str],
@@ -8931,12 +8465,8 @@ fn ensure_cursor_mcp_registration() -> Result<(), String> {
 
 static HERMES_MCP_READY: AtomicBool = AtomicBool::new(false);
 
-/// Register Repomon in Hermes without persisting a session identity.
-///
-/// Hermes intentionally filters nonstandard variables before starting stdio MCP servers, so the
-/// config names the three allowed values as `${VAR}` placeholders. Hermes resolves them from each
-/// managed agent process immediately before launching `repomond mcp`. Its config CLI performs the
-/// YAML merge atomically and preserves unrelated user settings.
+/// Register environment placeholders because Hermes filters nonstandard MCP variables; resolve
+/// identity from each managed process without persisting it.
 fn ensure_hermes_mcp_registration(resolved_command: &str) -> Result<(), String> {
     if HERMES_MCP_READY.load(Ordering::Acquire) {
         return Ok(());
@@ -9006,14 +8536,8 @@ fn ensure_hermes_mcp_registration(resolved_command: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Build the full `claude` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
-/// the window command through a shell). `--mcp-config` *adds* the repomon fleet server; the user's
-/// own basic-memory (mnemind) server still loads from their Claude config, so we don't redeclare
-/// it. The fleet + memory tools are pre-approved so routine orchestration doesn't prompt.
-/// `session_id` pins the launched session's id (`--session-id <uuid>`, verified against `claude
-/// --help` to exist) so the transcript picker can find *this* session's transcript directly
-/// instead of guessing by recency — see [`pick_orchestrator_transcript_in`]. The Codex
-/// counterpart is [`build_codex_orchestrator_command`].
+/// Build a shell-quoted Claude command with additive MCP registration, captured session identity,
+/// and pre-approved fleet tools.
 fn build_claude_orchestrator_command(
     base: &str,
     mcp_config_path: &Path,
@@ -9047,24 +8571,8 @@ fn build_claude_orchestrator_command(
     command
 }
 
-/// Build the full `codex` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
-/// the window command through a shell). ALL Codex-CLI flag knowledge lives here (plus its unit
-/// test), so a codex release changing a flag is a one-function fix. Verified against codex-cli
-/// 0.142.3 (`codex --help`); where it diverges from the Claude arm:
-/// - No `--mcp-config` file: the repomon fleet server is registered inline via `-c key=value`
-///   dotted TOML overrides (`mcp_servers.repomon.*`; the value portion is parsed as TOML). The
-///   user's own `~/.codex/config.toml` servers (e.g. basic-memory) still load — not redeclared,
-///   mirroring the Claude arm's treatment.
-/// - No `--append-system-prompt`: the repomind persona is prepended to the initial positional
-///   prompt instead. Weaker than a real system prompt (visible in the chat, can fade over a very
-///   long session) — if codex stabilizes an instructions-file override, swap it in here.
-/// - No `--session-id` and no `--allowedTools`: codex can't pin its session file (and its
-///   on-disk format is unstable anyway — the caller records `session_id: None`, and the
-///   transcript/end-of-turn paths gate on `OrchestratorBackend::has_transcript`); tool
-///   pre-approval is expressed through the approval policy below instead of a per-tool list.
-/// - `autonomy` maps onto codex's approval/sandbox flags so routine MCP-driven orchestration
-///   never stalls on an interactive approval. The REAL guardrail is `REPOMON_MCP_AUTONOMY`,
-///   enforced server-side by `repomon_mcp::policy` from the env this hands the MCP server.
+/// Build a shell-quoted Codex command with inline MCP overrides and a persona prompt; server-side
+/// autonomy remains authoritative and session identity stays unknown.
 fn build_codex_orchestrator_command(
     base: &str,
     socket: &Path,
@@ -9119,26 +8627,8 @@ fn build_codex_orchestrator_command(
     command
 }
 
-/// Build the full `agy` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs the
-/// window command through a shell). ALL Antigravity-CLI flag knowledge lives here (plus its unit
-/// test), so an Antigravity release changing a flag is a one-function fix. Verified against
-/// `agy --help`; where it diverges from the Claude arm:
-/// - No `--mcp-config` argument: the repomon fleet server is registered globally in
-///   `~/.gemini/config/mcp_config.json` via [`ensure_antigravity_mcp_registration`]. Environment
-///   variables (`REPOMON_MCP_SOCKET`, `REPOMON_MCP_AUTONOMY`, and optionally `REPOMON_MCP_MAX_AGENTS`)
-///   are exported inline in the command prefix so `agy` and its spawned MCP child processes inherit
-///   them; `REPOMON_MCP_MODE` is deliberately NOT set to `"agent"`, granting full orchestrator tool
-///   surface.
-/// - No `--append-system-prompt`: the repomind persona is prepended to the initial prompt passed
-///   via `--prompt-interactive` instead.
-/// - No `--session-id` and no `--allowedTools`: Antigravity has no session-id flag or stable
-///   transcript contract (`has_transcript` is false), so dialogs are monitored via pane output;
-///   tool approval behavior maps through `--dangerously-skip-permissions` and `--mode`.
-/// - `autonomy` maps onto `agy`'s execution flags:
-///   - `autonomous` -> `--dangerously-skip-permissions --mode accept-edits`
-///   - `supervised` -> default interactive mode (prompts for approvals and edits)
-///   - `read-only` -> `--mode plan` (plan mode produces plans without executing edits; server-side
-///     `REPOMON_MCP_AUTONOMY="read-only"` strictly enforces read-only tool access)
+/// Build a shell-quoted Antigravity command with inherited MCP identity, an interactive persona
+/// prompt, and server-enforced autonomy.
 fn build_antigravity_orchestrator_command(
     base: &str,
     socket: &Path,
@@ -9184,24 +8674,8 @@ fn build_antigravity_orchestrator_command(
     command
 }
 
-/// Build the full `opencode` invocation for the orchestrator, shell-quoted for `sh -c` (tmux runs
-/// the window command through a shell). ALL OpenCode-CLI flag knowledge lives here (plus its unit
-/// test), so an OpenCode release changing a flag is a one-function fix. Verified against
-/// `opencode --help`; where it diverges from the Claude arm:
-/// - No `--mcp-config` file: the repomon fleet server is registered dynamically via the
-///   `OPENCODE_CONFIG_CONTENT` environment variable using [`build_opencode_config_content`].
-///   The config's `environment` table maps `{env:VAR}` entries for `REPOMON_MCP_SOCKET`,
-///   `REPOMON_MCP_AUTONOMY`, and optionally `REPOMON_MCP_MAX_AGENTS`, which are exported inline
-///   in the command prefix. `REPOMON_MCP_MODE` is deliberately NOT set to `"agent"`, granting full
-///   orchestrator tool access.
-/// - No `--append-system-prompt`: the repomind persona is prepended to the initial prompt passed
-///   via `--prompt` instead.
-/// - No `--session-id` and no `--allowedTools`: OpenCode has no session-id flag or stable
-///   transcript contract (`has_transcript` is false), so dialogs are monitored via pane output;
-///   tool approval behavior is bounded server-side via `REPOMON_MCP_AUTONOMY`.
-/// - Autonomy levels: OpenCode's interactive TUI mode has no CLI-level approval bypass flag;
-///   posture (`autonomous`, `supervised`, `read-only`) is strictly enforced by `repomon_mcp::policy`
-///   via `REPOMON_MCP_AUTONOMY`.
+/// Build a shell-quoted OpenCode command with runtime MCP configuration and a persona prompt;
+/// server-side policy enforces autonomy.
 fn build_opencode_orchestrator_command(
     base: &str,
     socket: &Path,
@@ -9249,12 +8723,7 @@ fn build_opencode_orchestrator_command(
     Ok(command)
 }
 
-/// Mint a fresh v4-shaped UUID for `--session-id`, without pulling in the `uuid` crate (no crate
-/// in this workspace depends on it — see `Cargo.lock`). Mirrors the entropy pattern
-/// `repomon_mcp::policy`'s `mint_confirm`/`random_token` use for its confirmation tokens: this
-/// doesn't need to be cryptographically random, only fresh and correctly shaped — `claude
-/// --session-id` merely needs a valid, presumably-unused UUID to key the orchestrator's own
-/// transcript by.
+/// Generate a fresh v4-shaped session UUID from system entropy for deterministic transcript lookup.
 fn mint_session_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -9287,9 +8756,8 @@ fn mint_session_id() -> String {
     format!("{time_low:08x}-{time_mid:04x}-{time_hi_and_version:04x}-{clock_seq:04x}-{node:012x}")
 }
 
-/// Write the orchestrator's `--mcp-config` file (registering the `repomon` stdio server pointed at
-/// `repomond mcp` on `socket`), returning its path. The server's env carries the socket + autonomy
-/// guardrails. Mirrors the logic that previously lived in `repomon orchestrate`.
+/// Writes the orchestrator MCP configuration with its daemon endpoint and autonomy guardrails,
+/// returning the file path.
 fn write_orchestrator_mcp_config(
     socket: &Path,
     autonomy: &str,
@@ -9299,7 +8767,7 @@ fn write_orchestrator_mcp_config(
 }
 
 /// Like [`write_orchestrator_mcp_config`] but with extra env pairs and a caller-chosen file
-/// name — standing runs write `repomind-standing-mcp.json` with the unattended guardrail env so
+/// name - standing runs write `repomind-standing-mcp.json` with the unattended guardrail env so
 /// they never clobber (or inherit) the interactive session's config.
 pub(crate) fn write_orchestrator_mcp_config_named(
     socket: &Path,
@@ -9349,14 +8817,8 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
-    /// Real incident, 2026-09-05: `fleet_status` reported window `lane-81-7` on lane 81 as
-    /// "rate-limited, resuming ~06:00" at 11:07, over five hours after the named reset time,
-    /// and after the session had produced many turns of genuine work since 06:00. The
-    /// pane-scraping detector (`detect_usage_limit`) matches the limit wording anywhere in a
-    /// capture with no notion of whether it's still the last thing that happened, so a stale
-    /// banner lingering in scrollback kept `ctx.rate_limits` populated indefinitely. These two
-    /// tests are the regression: the reset time alone, or fresh transcript activity alone, must
-    /// each be enough to lift the pause.
+    /// A passed reset time and newer transcript activity must each independently clear stale pane
+    /// quota text.
     #[test]
     fn rate_limit_lifts_once_the_reset_time_has_passed_even_without_new_activity() {
         // The pane never produced new output after the pause (auto-continue may still be
@@ -9371,7 +8833,7 @@ mod tests {
         );
         let detected_at = Utc.with_ymd_and_hms(2026, 9, 5, 2, 31, 0).unwrap();
         let reset_at = Utc.with_ymd_and_hms(2026, 9, 5, 6, 0, 0).unwrap();
-        let last_activity_at = detected_at; // nothing new since the pause was first seen
+        let last_activity_at = detected_at;
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 11, 7, 0).unwrap();
         assert!(rate_limit_has_lifted(
             detected_at,
@@ -9383,10 +8845,8 @@ mod tests {
 
     #[test]
     fn rate_limit_lifts_when_transcript_activity_postdates_the_pause() {
-        // No reset time was parseable from this message (the classic "try again later"
-        // wording), so a bare miss-streak clear is all the auto-continue watcher has. But the
-        // transcript itself proves the agent produced real output long after the pause was
-        // detected, which the model could not have written while genuinely blocked.
+        // New transcript output proves a quota hold ended even when the original message had no
+        // parseable reset time.
         let pane = include_str!(
             "../../repomon-core/src/agent/fixtures/claude_session_limit_then_resumed.txt"
         );
@@ -9440,7 +8900,7 @@ mod tests {
             gate_quota_reading(&mut deadlines, "lane-9", reading.clone(), mid),
             reading
         );
-        // Past the deadline: the same lingering text no longer counts.
+
         let after = t0 + chrono::Duration::hours(3);
         assert_eq!(
             gate_quota_reading(&mut deadlines, "lane-9", reading, after),
@@ -9465,9 +8925,7 @@ mod tests {
         );
     }
 
-    /// Real capture, 2026-09-04: window `lane-81-7` had an on-screen spinner and two live
-    /// subagent rows while its transcript, whose last entry was assistant text, read `Waiting`.
-    /// The sidebar rendered that as NEEDS YOU for an agent that was plainly working.
+    /// Live spinner and subagent evidence must override a transcript-only waiting state.
     #[test]
     fn running_subagents_outrank_a_transcript_that_says_waiting() {
         let pane =
@@ -9491,9 +8949,7 @@ mod tests {
         );
     }
 
-    /// Real capture, 2026-09-04: window `lane-81-5` sat at an empty Antigravity composer whose
-    /// scrollback still held the agent's sentence about background agents. Nothing on that pane
-    /// is a liveness signal, so an idle transcript must stay idle.
+    /// Background-agent prose in scrollback must not override an idle composer.
     #[test]
     fn prose_about_background_agents_leaves_an_idle_pane_idle() {
         let pane = include_str!(
@@ -9532,11 +8988,7 @@ mod tests {
         );
     }
 
-    /// Real capture, 2026-09-04: window `lane-81-5` sat at an idle Antigravity composer while a
-    /// background `npm run dev` task kept touching the conversation database. Antigravity is an
-    /// mtime-only monitor, so that touch alone reads `Running` with `ended_turn: true`, and the
-    /// lane pill stayed on "running" for the whole two-minute recency window. Nothing on the pane
-    /// is a liveness signal, so the pane demotes it.
+    /// Background writes from an mtime-only monitor must not override a visibly idle pane.
     #[test]
     fn a_ticking_background_task_does_not_keep_an_idle_pane_running() {
         let pane =
@@ -9586,8 +9038,7 @@ mod tests {
         assert_eq!(reason, None);
     }
 
-    /// Real capture, 2026-09-04: a finished Claude turn keeps its spinner glyph but stamps the
-    /// result (`done 4:52 AM`), so the glyph must not hold the row on "running".
+    /// A completed spinner must not keep the session running.
     #[test]
     fn a_finished_turn_stamp_does_not_read_as_running() {
         let pane =
@@ -9632,13 +9083,10 @@ mod tests {
         assert_eq!(end, AgentStatus::Idle);
     }
 
-    /// Both edges of an Antigravity 1.1.x turn. Antigravity has no parseable transcript, so its
-    /// base status is pure file recency and the pane is the only witness either way. The stop edge
-    /// is the one that was broken: a background task touching the conversation database held the
-    /// row on "running" for the whole recency window.
+    /// Pane evidence must control both Antigravity turn edges despite unrelated
+    /// conversation-database writes.
     #[test]
     fn antigravity_turn_edges_follow_the_pane_in_both_directions() {
-        // Turn starts: the braille spinner Antigravity streams with.
         let (start, _) = status_from_pane(
             AgentStatus::Idle,
             true,
@@ -9669,12 +9117,8 @@ mod tests {
         );
     }
 
-    /// Codex has no on-disk transcript repomon can parse (`agent::CodexMonitor` returns `None`),
-    /// so every managed Codex row is a window placeholder: Idle base, `ended_turn: true`, and the
-    /// pane as its ONLY status signal. Both edges therefore have to come from the sniff.
-    ///
-    /// The running line here is Codex's documented working footer, not a live capture: no Codex
-    /// pane was up on the tmux server while this was written.
+    /// Without a readable transcript, Codex placeholders derive both running and idle transitions
+    /// from pane evidence.
     #[test]
     fn codex_placeholder_status_comes_entirely_from_its_pane() {
         let placeholder = window_placeholder_session(
@@ -9701,15 +9145,12 @@ mod tests {
         );
         assert_eq!(start, AgentStatus::Running);
 
-        // And back: the composer with nothing streaming.
         let (end, _) = status_from_pane(AgentStatus::Running, true, None, None, None, None);
         assert_eq!(end, AgentStatus::Idle);
     }
 
-    /// A pane asking a question is not working, whatever else is on screen.
-    /// The whole Antigravity mismatch, end to end, over the panes captured on 2026-09-04 while a
-    /// real `agy` agent worked in lane 48355417. The daemon reported `idle` for every one of these
-    /// frames; the pane said otherwise in three of the four.
+    /// Current pane evidence distinguishes active work and pending questions from an idle
+    /// transcript.
     #[test]
     fn antigravity_pane_shapes_classify_the_way_the_operator_sees_them() {
         let cases: [(&str, &str, AgentStatus); 5] = [
@@ -9936,14 +9377,11 @@ mod tests {
         let refusal = controller_cap_refusal(2, 2).expect("at the cap");
         assert!(refusal.contains("2"), "unexpected message: {refusal}");
         assert!(controller_cap_refusal(3, 2).is_some());
-        // A cap of zero closes the lane entirely.
+
         assert!(controller_cap_refusal(0, 0).is_some());
     }
 
-    /// `warn_deprecated_orchestrator_rpc` logs one `warn` per process lifetime per method: the
-    /// dedup set (exercised directly here, rather than the process-global static, so this test
-    /// can't leak state into others) says "first time" exactly once per method and "already
-    /// warned" for every call after, independent of other methods.
+    /// Use a local dedup set so warning assertions cannot leak state into other tests.
     #[test]
     fn deprecated_orchestrator_rpc_warns_once_per_method_per_process() {
         let mut seen = std::collections::HashSet::new();
@@ -10421,7 +9859,6 @@ mod tests {
         let earlier = Some(now - std::time::Duration::from_secs(10));
         let later = Some(now - std::time::Duration::from_secs(1));
 
-        // No contenders: a lone caller always gets its fit.
         let caller = fit_snap(false, None, None, None);
         assert!(fit_allowed(&caller, &[], "lane-7", now));
 
@@ -10440,7 +9877,6 @@ mod tests {
         let tui_other = fit_snap(true, Some("lane-9"), fresh, None);
         assert!(fit_allowed(&remote_caller, &[tui_other], "lane-7", now));
 
-        // Stale beat releases ownership: a crashed/closed TUI no longer blocks.
         let tui_stale = fit_snap(true, Some("lane-7"), stale, None);
         assert!(fit_allowed(&remote_caller, &[tui_stale], "lane-7", now));
         let tui_no_beat = fit_snap(true, Some("lane-7"), None, None);
@@ -10507,7 +9943,6 @@ mod tests {
         // caller had no claim and this exact shape was denied by the test above.
         assert!(fit_allowed(&multitasking_caller, &[peer], "lane-7-2", now));
 
-        // A remote caller still cannot displace a Local/TUI owner.
         let local_peer = fit_snap(
             true,
             Some("lane-7-2"),
@@ -10567,13 +10002,13 @@ mod tests {
         // No live process and no managed window -> a /exit'ed session is dropped immediately without lingering.
         assert_eq!(sessions_to_keep(5, Some(0), 0, 0), 0);
         assert_eq!(sessions_to_keep(5, Some(0), 0, 1), 0);
-        // A managed lane keeps its window count.
+
         assert_eq!(sessions_to_keep(3, Some(0), 1, 0), 1);
         assert_eq!(sessions_to_keep(3, Some(0), 1, 1), 1);
         // When alive is known, keep = max(alive, managed_n) capped at total, without inflating on stale fresh transcripts.
         assert_eq!(sessions_to_keep(5, Some(2), 1, 3), 2);
         assert_eq!(sessions_to_keep(1, Some(5), 0, 0), 1);
-        // When probe is unavailable (None), fresh acts as backstop.
+
         assert_eq!(sessions_to_keep(5, None, 1, 3), 3);
         assert_eq!(sessions_to_keep(2, None, 0, 0), 0);
         assert_eq!(sessions_to_keep(0, Some(0), 0, 0), 0);
@@ -10581,15 +10016,14 @@ mod tests {
 
     #[test]
     fn session_id_validation_blocks_injection() {
-        // Real transcript ids pass.
         assert!(valid_session_id("44ba81d8-be2c-4f0b-b9b3-c228fa53cc79"));
         assert!(valid_session_id("abc_123-DEF"));
         // Anything that could break out of `claude --resume <id>` under `sh -c` is rejected.
-        assert!(!valid_session_id("")); // empty
+        assert!(!valid_session_id(""));
         assert!(!valid_session_id("x; touch /tmp/pwned"));
         assert!(!valid_session_id("$(id)"));
         assert!(!valid_session_id("a`whoami`"));
-        assert!(!valid_session_id("a b")); // whitespace
+        assert!(!valid_session_id("a b"));
         assert!(!valid_session_id("a|b"));
         assert!(!valid_session_id("../../etc"));
     }
@@ -10613,7 +10047,7 @@ mod tests {
             resolve_windows(Err("tmux spawn failed".into()), &mut last, &mut misses),
             vec!["lane-1", "lane-2"]
         );
-        assert_eq!(last, vec!["lane-1", "lane-2"]); // unchanged by failure
+        assert_eq!(last, vec!["lane-1", "lane-2"]);
     }
 
     #[test]
@@ -10622,7 +10056,7 @@ mod tests {
         let (a, b) = (PathBuf::from("/a"), PathBuf::from("/b"));
         let paths = vec![a.clone(), b.clone()];
         let mut lg: HashMap<PathBuf, Vec<i32>> = HashMap::new();
-        // Success caches each path's result and returns it verbatim.
+
         assert_eq!(
             reuse_per_path_on_failure(Ok(vec![vec![1, 2], vec![3]]), &paths, &mut lg),
             vec![vec![1, 2], vec![3]]
@@ -10651,25 +10085,21 @@ mod tests {
             vec!["lane-1"]
         );
         assert_eq!(misses, 1);
-        // Sustained empty (EMPTY_WINDOWS_CONFIRM in a row): accept it — agents really are gone.
+        // Sustained empty (EMPTY_WINDOWS_CONFIRM in a row): accept it - agents really are gone.
         assert_eq!(
             resolve_windows(Ok(vec![]), &mut last, &mut misses),
             Vec::<String>::new()
         );
         assert!(last.is_empty());
-        // A subsequent successful probe resets the counter.
+
         resolve_windows(Ok(vec!["lane-9".into()]), &mut last, &mut misses);
         assert_eq!(misses, 0);
     }
 
     #[test]
     fn resolve_windows_accepts_empty_immediately_once_last_good_is_reconciled() {
-        // This is the effect `reap::kill_and_forget` buys `agent.stop`: proactively dropping the
-        // just-killed window from `last_good` (rather than waiting for the reaper/next probe to
-        // notice on its own) means the very next genuinely-empty probe isn't mistaken for the
-        // total-vanish-debounce case in `resolve_windows_rides_out_a_one_tick_total_vanish`
-        // above — it's accepted at once, so a stopped agent's window can't be read back as still
-        // live for even one extra tick.
+        // Removing an explicitly killed window from the cache lets the next empty probe take effect
+        // without total-vanish debounce.
         let mut last: Vec<String> = vec!["lane-1".into()];
         let mut misses = 0u8;
         last.retain(|w| w != "lane-1"); // what `kill_and_forget` does synchronously on kill
@@ -10764,7 +10194,7 @@ mod tests {
     fn pairing_sticks_across_activity_flip() {
         // The reported bug: two bound agents swap activity rank; the pairing must not move.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
-        // b most recently active…
+
         let p = pair_transcripts_to_windows(&[tsum("b", t(2)), tsum("a", t(1))], &windows, t(2));
         assert_eq!(
             p.assignment,
@@ -10860,10 +10290,8 @@ mod tests {
 
     #[test]
     fn spawn_race_keeps_a_stale_transcript_off_the_new_window() {
-        // agent.spawn created the window but claude hasn't written its .jsonl yet; the only
-        // transcript around is a stale leftover (an /exited session, or the user's own
-        // external one). It must remain external while the new window stays a placeholder;
-        // displaying it on that window is already a user-visible transcript mismatch.
+        // A stale external transcript must not attach to a freshly spawned window before that agent
+        // writes its own transcript.
         let windows = vec![wm("lane-7", 5, None)];
         let stale = tsum("e", t(0));
         let p = pair_transcripts_to_windows(std::slice::from_ref(&stale), &windows, t(100));
@@ -10883,20 +10311,17 @@ mod tests {
 
     #[test]
     fn duplicate_stamp_on_a_second_window_is_flagged_for_clearing_and_still_placeholders() {
-        // Live incident: a resumed transcript's sid ended up stamped on THREE separate windows
-        // at once (should be structurally impossible — sticky identity is 1:1). Pass 1 must
-        // only let the FIRST window (in `windows` order) claim the transcript for display; the
-        // others must (a) be reported so their stale stamp can be cleared, and (b) still surface
-        // as placeholders — never silently vanish from the lane.
+        // Duplicate stamps keep only the first display claim; other windows must remain visible as
+        // placeholders while their stamps are cleared.
         let windows = vec![
             wm("lane-81-5", 20, Some("dup")),
             wm("lane-81-6", 58, Some("dup")),
             wm("lane-81-9", 65, Some("dup")),
         ];
         let p = pair_transcripts_to_windows(&[tsum("dup", t(0))], &windows, t(100));
-        // Only the first window displays the transcript…
+
         assert_eq!(p.assignment, vec![Some("lane-81-5".to_string())]);
-        // …the other two are flagged as duplicate stamps to clear…
+
         assert_eq!(
             p.duplicate_stamps,
             vec![(58, "lane-81-6".to_string()), (65, "lane-81-9".to_string())]
@@ -10914,13 +10339,8 @@ mod tests {
 
     #[test]
     fn direct_bind_allowed_requires_the_lanes_only_window() {
-        // The bug: the no-evidence direct bind used to fire whenever exactly one candidate and
-        // one FREE window existed THIS TICK, even in a lane that has other, already-claimed
-        // windows — if the window snapshot that tick ever lagged reality (a stale `last_good`
-        // reuse, a notify race) and momentarily "forgot" one of those claims, the same sid could
-        // get stamped a second time, producing the duplicate-stamp incident reproduced above.
-        // Requiring the lane to have exactly one window in total closes that gap: with nothing
-        // else in the lane, there is nothing the sid could already be bound to.
+        // A free-window count cannot establish uniqueness when other windows in the lane may
+        // already carry the same stamp.
         assert!(
             direct_bind_allowed(1, 1, 1),
             "single-window lane: safe to bind directly"
@@ -10941,11 +10361,8 @@ mod tests {
 
     #[test]
     fn idle_agent_recovers_its_unstamped_window_by_pane_evidence() {
-        // Daemon restarted a quiet fleet: the agent's `@repomon_session` is gone (unstamped
-        // window) and it went idle far longer than RECENTLY_ACTIVE_SECS ago. Its pane still
-        // shows its last message, so it MUST be nominated for a pane-evidence stamp — before
-        // this fix a quiet transcript was never nominated and the window stayed unrecoverable,
-        // so the positional guess wedged and reopening attached the wrong conversation.
+        // An idle transcript with a distinctive fingerprint can recover its unstamped window even
+        // without fresh activity.
         let msg = "recovered idle agent distinctive last message tail marker";
         let windows = vec![wm("lane-7", 1, None)];
         let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
@@ -10959,7 +10376,7 @@ mod tests {
     fn restart_recovers_two_idle_agents_to_their_own_windows() {
         // Two idle agents, both windows unstamped after a restart. They remain placeholders
         // while the evidence pass pins each to the window whose pane shows ITS OWN last
-        // message — never crosswise.
+        // message - never crosswise.
         let ma = "idle alpha last message evidence tail one two three";
         let mb = "idle bravo last message evidence tail four five six";
         let windows = vec![wm("lane-7", 1, None), wm("lane-7-2", 2, None)];
@@ -11008,8 +10425,8 @@ mod tests {
     #[test]
     fn idle_recovery_without_matching_pane_stamps_nothing() {
         // A nominated idle agent (unstamped window + fingerprint) whose message is NOT on the
-        // captured pane — scrolled off, or the window is a fresh-spawn stand-in showing a
-        // different agent — gets no 1:1 evidence, so nothing is stamped and no guess wedges.
+        // captured pane - scrolled off, or the window is a fresh-spawn stand-in showing a
+        // different agent - gets no 1:1 evidence, so nothing is stamped and no guess wedges.
         let msg = "idle agent whose tail is not on the captured pane at all";
         let windows = vec![wm("lane-7", 1, None)];
         let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
@@ -11031,20 +10448,15 @@ mod tests {
         // Too short to fingerprint (< FINGERPRINT_MIN normalized chars).
         let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), "ok")], &windows, t(100));
         assert!(p.new_bindings.is_empty());
-        // A None last message (the plain `tsum`) likewise.
+
         let p = pair_transcripts_to_windows(&[tsum("a", t(0))], &windows, t(100));
         assert!(p.new_bindings.is_empty());
     }
 
     #[test]
     fn clear_rotation_rebinds_window_to_the_live_transcript() {
-        // `/clear` (or a fork-on-resume) rotates the session id in place: the window stays
-        // bound to the dead transcript e while the live continuation x has no window. e's
-        // claim is offered to pass 2's evidence probe but keeps showing on the window until
-        // that evidence actually arrives — a durable tmux stamp is real ground truth right up
-        // until pane evidence proves otherwise, so nothing should un-display it on headcount
-        // alone. Once `confirmed_stamps` proves x is the one actually writing there, the next
-        // overlay's pass 1 exposes the durable pairing and e falls to external on its own.
+        // Session rotation must retain the old display binding until pane evidence confirms the
+        // continuation.
         let windows = vec![wm("lane-7", 1, Some("e"))];
         let p =
             pair_transcripts_to_windows(&[tsum("x", t(100)), tsum("e", t(0))], &windows, t(100));
@@ -11059,11 +10471,8 @@ mod tests {
 
     #[test]
     fn clear_rotation_releases_the_rotated_window_not_the_coldest() {
-        // Two bound agents, both currently quiet: a rotated its session id a moment ago
-        // (`/clear` → continuation c), b has been idle for much longer. The window offered
-        // to c's evidence probe must be a's — the transcript that went quiet MOST recently is
-        // the one that just rotated; offering b's would route c's keys into b's pane once
-        // confirmed. a's window keeps displaying a until evidence actually reassigns it.
+        // Offer the most recently quiet binding to a continuation, preserving unrelated idle agents
+        // until evidence confirms reassignment.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
         let p = pair_transcripts_to_windows(
             &[tsum("c", t(100)), tsum("a", t(50)), tsum("b", t(0))],
@@ -11081,15 +10490,8 @@ mod tests {
 
     #[test]
     fn permanently_unbound_fresh_transcript_never_displaces_an_idle_valid_binding() {
-        // A lane can legitimately hold more transcripts than tmux windows — e.g. one external,
-        // never-window-bound session (like the operator's own always-fresh live conversation)
-        // alongside agents that genuinely were adopted into windows. That extra fresh transcript
-        // is NOT a `/clear` continuation of anything here — it was never claimed by any window
-        // to begin with — so it must never repeatedly steal an idle-but-still-validly-bound
-        // window's DISPLAY on pure headcount (`fresh_unclaimed > free_n`), tick after tick,
-        // forever. It's fine to offer that window to the evidence probe (it wins nothing, since
-        // pane evidence never confirms an unrelated transcript there), but the display must stay
-        // put every single tick, not just the first.
+        // An unrelated external transcript must not steal a valid window display through headcount
+        // alone, even across repeated scans.
         let windows = vec![
             wm("lane-81", 1, Some("bound")),
             wm("lane-81-2", 2, Some("other")),
@@ -11109,7 +10511,7 @@ mod tests {
             "both idle-but-bound sessions keep their real windows; the unrelated fresh one stays external"
         );
         // Re-running against the exact same input (simulating the next poll tick, nothing
-        // resolved) must be identical — no flip-flopping.
+        // resolved) must be identical - no flip-flopping.
         let p2 = pair_transcripts_to_windows(
             &[
                 tsum("operator", t(100)),
@@ -11128,7 +10530,7 @@ mod tests {
     #[test]
     fn fresh_external_does_not_steal_a_bound_window_when_a_free_one_exists() {
         // An idle bound agent e plus a fresh unpaired transcript x: with a free window
-        // available, x becomes a candidate for that free window and e's binding is left alone —
+        // available, x becomes a candidate for that free window and e's binding is left alone -
         // supersession only fires when the fresh transcript would otherwise have no home.
         let windows = vec![wm("lane-7", 1, Some("e")), wm("lane-7-2", 9, None)];
         let p =
@@ -11140,7 +10542,7 @@ mod tests {
 
     #[test]
     fn idle_bound_pairing_holds_without_fresh_claimants() {
-        // Nothing fresh in the lane (everyone idle): stale-bound windows keep their agents —
+        // Nothing fresh in the lane (everyone idle): stale-bound windows keep their agents -
         // supersession must never shuffle a merely-idle fleet.
         let windows = vec![wm("lane-7", 1, Some("a")), wm("lane-7-2", 2, Some("b"))];
         let p = pair_transcripts_to_windows(&[tsum("b", t(1)), tsum("a", t(0))], &windows, t(100));
@@ -11153,7 +10555,7 @@ mod tests {
 
     #[test]
     fn select_kept_summaries_protects_bound_sessions() {
-        // A bound-but-quiet agent (its window is alive — that IS liveness) must survive
+        // A bound-but-quiet agent (its window is alive - that IS liveness) must survive
         // truncation ahead of newer unbound transcripts; output stays newest-first. `now` is
         // far past every activity time so freshness plays no part here.
         let bound: std::collections::HashSet<String> = ["a".to_string()].into();
@@ -11168,7 +10570,7 @@ mod tests {
             .filter_map(|s| s.session_id.as_deref())
             .collect();
         assert_eq!(ids, vec!["e1", "a"]);
-        // Under the cap nothing is dropped.
+
         let kept =
             select_kept_summaries(vec![tsum("e1", t(3)), tsum("a", t(1))], &bound, 5, t(1000));
         assert_eq!(kept.len(), 2);
@@ -11265,7 +10667,6 @@ mod tests {
         assert_eq!(windows, ["lane-7-2", "lane-7"]);
         assert_eq!(session_identity_keys(&managed[0]), ["win:lane-7-2"]);
 
-        // An empty order is a no-op.
         let mut untouched = vec![tsession("a"), tsession("b")];
         apply_session_order(&mut untouched, &[]);
         let sids: Vec<_> = untouched
@@ -11284,7 +10685,7 @@ mod tests {
             "✻ Done! The deploy isn't\nblocked on the invite anymore.\n❯",
             &f
         ));
-        // A different conversation's pane does not match.
+
         assert!(!pane_text_contains(
             "recap: building Store Listen landing page",
             &f
@@ -11395,7 +10796,7 @@ mod tests {
     #[test]
     fn select_kept_summaries_never_drops_a_fresh_transcript() {
         // The fresh backstop must survive bound-protection: with keep=1 and the budget
-        // filled by a bound-but-stale transcript, the actively-writing one is kept too —
+        // filled by a bound-but-stale transcript, the actively-writing one is kept too -
         // truncating the only session doing work would make the live agent invisible.
         let bound: std::collections::HashSet<String> = ["e".to_string()].into();
         let kept =
@@ -11425,7 +10826,7 @@ mod tests {
             Some("claude")
         );
         assert_eq!(program_of("FOO=1 BAR=2 aider --model x"), Some("aider"));
-        // The default account's launch UNSETS the var via `env -u` — still resolves to claude.
+        // The default account's launch UNSETS the var via `env -u` - still resolves to claude.
         assert_eq!(
             program_of("env -u CLAUDE_CONFIG_DIR claude"),
             Some("claude")
@@ -11439,23 +10840,23 @@ mod tests {
     #[test]
     fn adopt_picks_command_matching_the_account() {
         let candidates = vec![
-            "claude".to_string(),                                         // default account
+            "claude".to_string(),
             "CLAUDE_CONFIG_DIR=/h/.claude-work claude --foo".to_string(), // work account + flag
             "aider".to_string(),                                          // not claude
         ];
         let work = PathBuf::from("/h/.claude-work");
         let want = Some(work.canonicalize().unwrap_or(work));
-        // The work-account session resumes with the work command — flag carried over.
+        // The work-account session resumes with the work command - flag carried over.
         assert_eq!(
             pick_for_account(&candidates, &want),
             Some("CLAUDE_CONFIG_DIR=/h/.claude-work claude --foo".to_string())
         );
-        // A default-account session resumes with bare claude.
+
         assert_eq!(
             pick_for_account(&candidates, &None),
             Some("claude".to_string())
         );
-        // Non-claude commands are never chosen (can't --resume).
+
         assert_eq!(pick_for_account(&["aider".to_string()], &None), None);
         assert_eq!(
             command_account("CLAUDE_CONFIG_DIR=/x claude"),
@@ -11469,11 +10870,8 @@ mod tests {
         // The default account launches with `env -u CLAUDE_CONFIG_DIR claude` (no `CLAUDE_CONFIG_DIR=`
         // prefix), so it reads back as the *default* account (None).
         assert_eq!(command_account("env -u CLAUDE_CONFIG_DIR claude"), None);
-        // A hand-written pin to the default base also normalizes to the default account
-        // (defensive). Unix-only assertions: these launch strings are POSIX shell words built
-        // for the tmux backend, and the parser correctly treats `\` as a shell escape — which
-        // a native Windows default base (`C:\Users\...`) would trip over. Windows agents get
-        // structured commands (no shell strings) with the session-backend work.
+        // These POSIX launch-string assertions are Unix-only; Windows uses structured commands
+        // rather than shell escaping.
         #[cfg(unix)]
         {
             let default = agent::claude::default_config_base();
@@ -11481,7 +10879,7 @@ mod tests {
                 command_account(&format!("CLAUDE_CONFIG_DIR={} claude", default.display())),
                 None
             );
-            // ...and a quoted default base is still the default account.
+
             assert_eq!(
                 command_account(&format!("CLAUDE_CONFIG_DIR='{}' claude", default.display())),
                 None
@@ -11516,7 +10914,7 @@ mod tests {
             "claude-yolo".to_string(),
             "claude --dangerously-skip-permissions".to_string(),
         );
-        // No agent chosen -> bare claude (the default backend).
+
         assert_eq!(orchestrator_base_command(&None, &customs), "claude");
         // A custom agent resolves to its configured command (flags carried over).
         assert_eq!(
@@ -11524,7 +10922,7 @@ mod tests {
             "claude --dangerously-skip-permissions"
         );
         // A kind name resolves to its default binary (mirrors agent.spawn); for the orchestrator
-        // only `codex` reaches here — anything non-MCP-capable is rejected upstream by
+        // only `codex` reaches here - anything non-MCP-capable is rejected upstream by
         // `resolve_orchestrator_backend`.
         assert_eq!(
             orchestrator_base_command(&Some("codex".into()), &customs),
@@ -11537,7 +10935,7 @@ mod tests {
         use crate::OrchestratorBackend as B;
         let mut customs = HashMap::new();
         customs.insert("my-yolo".to_string(), "claude --yolo".to_string());
-        // Default and every claude-ish name → Claude.
+
         assert_eq!(
             resolve_orchestrator_backend(&None, &customs).unwrap(),
             B::Claude
@@ -11554,12 +10952,12 @@ mod tests {
             resolve_orchestrator_backend(&Some("my-yolo".into()), &customs).unwrap(),
             B::Claude
         );
-        // Codex is a non-Claude backend.
+
         assert_eq!(
             resolve_orchestrator_backend(&Some("codex".into()), &customs).unwrap(),
             B::Codex
         );
-        // Antigravity resolves from both "antigravity" and "agy".
+
         for name in ["antigravity", "agy"] {
             assert_eq!(
                 resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
@@ -11567,7 +10965,7 @@ mod tests {
                 "{name}"
             );
         }
-        // OpenCode resolves from both "opencode" and "open-code".
+
         for name in ["opencode", "open-code"] {
             assert_eq!(
                 resolve_orchestrator_backend(&Some(name.into()), &customs).unwrap(),
@@ -11636,7 +11034,6 @@ mod tests {
         assert!(cmd.contains(" -m 'gpt-5.2-codex'"), "{cmd}");
         assert!(cmd.contains("what needs me?"), "{cmd}");
 
-        // Read-only maps to codex's read-only sandbox.
         let cmd =
             build_codex_orchestrator_command("codex", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" -s read-only"), "{cmd}");
@@ -11704,7 +11101,6 @@ mod tests {
         assert!(cmd.contains(" --model 'gemini-2.5-pro'"), "{cmd}");
         assert!(cmd.contains("coordinate lane-1 and lane-2"), "{cmd}");
 
-        // Read-only maps to --mode plan.
         let cmd =
             build_antigravity_orchestrator_command("agy", &socket, "read-only", None, &None, &None);
         assert!(cmd.contains(" --mode plan"), "{cmd}");
@@ -11781,7 +11177,6 @@ mod tests {
         );
         assert!(cmd.contains("coordinate lane-1 and lane-2"), "{cmd}");
 
-        // Read-only passes autonomy level in env.
         let cmd = build_opencode_orchestrator_command(
             "opencode",
             &socket,
@@ -12052,7 +11447,7 @@ mod tests {
             ),
             &base,
         );
-        // Codex and unknown kinds with no options are also identical.
+
         identical(
             apply_launch_options("codex".into(), &AgentKind::Codex, None, None, None),
             "codex",
@@ -12119,7 +11514,7 @@ mod tests {
     #[test]
     fn launch_options_claude_ultracode_injects_slash_effort() {
         // `ultracode` isn't a valid --effort flag value (claude warns + ignores it), so it is set
-        // via the /effort slash command injected as the session's first input — NOT a launch flag.
+        // via the /effort slash command injected as the session's first input - NOT a launch flag.
         let plan = apply_launch_options(
             "claude".into(),
             &AgentKind::ClaudeCode,
@@ -12127,7 +11522,7 @@ mod tests {
             None,
             Some("opus"),
         );
-        assert_eq!(plan.command, "claude --model 'opus'"); // no --effort flag
+        assert_eq!(plan.command, "claude --model 'opus'");
         assert_eq!(plan.effort_inject.as_deref(), Some("/effort ultracode"));
     }
 
@@ -12145,7 +11540,7 @@ mod tests {
             "codex --model 'gpt-5' --full-auto -c model_reasoning_effort='high'"
         );
         assert_eq!(plan.effort_inject, None);
-        // codex has no plan mode -> ignored, no stray flag.
+
         let plan =
             apply_launch_options("codex".into(), &AgentKind::Codex, None, Some("plan"), None);
         assert_eq!(plan.command, "codex");
@@ -12200,7 +11595,7 @@ mod tests {
             kind_from_command("CLAUDE_CONFIG_DIR=/h/.claude-work claude"),
             AgentKind::ClaudeCode
         );
-        // A full path resolves by basename.
+
         assert_eq!(
             kind_from_command("/opt/homebrew/bin/codex --full-auto"),
             AgentKind::Codex
@@ -12299,7 +11694,7 @@ mod tests {
             parsed["instructions"],
             json!(["/home/me/repomind/.repomind/boot.md"])
         );
-        // The MCP registration is untouched by the addition.
+
         assert_eq!(parsed["mcp"]["repomon"]["type"], json!("local"));
 
         // An operator's own instructions list is preserved, and the boot file is not duplicated.
@@ -12337,7 +11732,7 @@ mod tests {
     fn orchestrator_command_wires_mcp_persona_and_tools() {
         let path = PathBuf::from("/tmp/repomind-mcp.json");
         let sid = "11111111-1111-4111-8111-111111111111";
-        // No model, no prompt: the core wiring is always present.
+
         let cmd = build_claude_orchestrator_command("claude", &path, &None, &None, sid, None);
         assert!(cmd.starts_with("claude --mcp-config "));
         assert!(cmd.contains("/tmp/repomind-mcp.json"));
@@ -12345,12 +11740,11 @@ mod tests {
         assert!(cmd.contains("--allowedTools mcp__repomon,mcp__basic-memory"));
         // The persona is appended (a recognizable line from it survives the quoting).
         assert!(cmd.contains("repomind"));
-        // The session id is always pinned.
+
         assert!(cmd.contains(&format!("--session-id '{sid}'")));
-        // No model flag when none is requested.
+
         assert!(!cmd.contains("--model"));
 
-        // A model + a prompt are appended (shell-quoted).
         let cmd = build_claude_orchestrator_command(
             "CLAUDE_CONFIG_DIR=/h/.claude-work claude",
             &path,
@@ -12364,7 +11758,6 @@ mod tests {
         assert!(cmd.contains("'what needs me?'"));
         assert!(cmd.contains(&format!("--session-id '{sid}'")));
 
-        // An empty prompt is dropped (not quoted as an empty arg).
         let cmd = build_claude_orchestrator_command(
             "claude",
             &path,
@@ -12378,10 +11771,8 @@ mod tests {
 
     #[test]
     fn mint_session_id_is_a_well_formed_v4_uuid() {
-        // `claude --session-id` rejects anything that isn't a valid UUID (verified live against
-        // `claude --help`, which documents the flag) — so the minted id must always parse as one:
-        // 8-4-4-4-12 hex groups, version nibble `4`, variant nibble in `8..=b`. Two draws must
-        // also differ (a repeated id would collide with a still-live session's transcript file).
+        // Mint distinct valid UUIDs because Claude’s session-id flag rejects other identifiers and
+        // reuse collides with existing transcripts.
         let a = mint_session_id();
         let b = mint_session_id();
         assert_ne!(a, b, "two mints must not collide");
@@ -12473,23 +11864,23 @@ mod tests {
         let old = now - chrono::Duration::minutes(6);
         let fresh = now - chrono::Duration::minutes(1);
 
-        // Frozen mid-work — Running (transcript ends in a tool call): stalled, anchored on the pane's last change.
+        // Frozen mid-work - Running (transcript ends in a tool call): stalled, anchored on the pane's last change.
         assert_eq!(
             stall_since(Running, false, false, Some(old), now),
             Some(old)
         );
-        // Idle is never stalled
+
         assert_eq!(stall_since(Idle, false, false, Some(old), now), None);
-        // The pane is still moving: not stalled.
+
         assert_eq!(stall_since(Running, false, false, Some(fresh), now), None);
-        // A dialog is up (waiting on you): never a stall.
+
         assert_eq!(stall_since(Running, false, true, Some(old), now), None);
         // The turn ended (waiting for instructions, however long ago): never a stall.
         assert_eq!(stall_since(Idle, true, false, Some(old), now), None);
         assert_eq!(stall_since(Waiting, true, false, Some(old), now), None);
-        // Rate-limited is timer-owned, not stuck.
+
         assert_eq!(stall_since(RateLimited, false, false, Some(old), now), None);
-        // No pane observation yet: can't call it.
+
         assert_eq!(stall_since(Running, false, false, None, now), None);
     }
 
@@ -12500,7 +11891,7 @@ mod tests {
         assert!(sniff_cache_status_matches(Some(Running), Running));
         assert!(!sniff_cache_status_matches(Some(Waiting), Running));
         assert!(!sniff_cache_status_matches(Some(Running), Waiting));
-        // Direct prompt captures are intentionally status-agnostic.
+
         assert!(sniff_cache_status_matches(None, Running));
         assert!(sniff_cache_status_matches(None, Waiting));
     }
@@ -12527,23 +11918,19 @@ mod tests {
         let picked =
             pick_orchestrator_transcript_from(vec![stub(None, 0), stub(Some("hi"), 0)]).unwrap();
         assert_eq!(picked.last_message.as_deref(), Some("hi"));
-        // A tool call with no message still counts as "real content".
+
         let picked = pick_orchestrator_transcript_from(vec![stub(None, 0), stub(None, 3)]).unwrap();
         assert_eq!(picked.tool_call_count, 3);
         // Nothing has content: fall back to the newest (first) overall.
         let picked = pick_orchestrator_transcript_from(vec![stub(None, 0), stub(None, 0)]).unwrap();
         assert!(picked.last_message.is_none());
-        // No sessions at all: None.
+
         assert!(pick_orchestrator_transcript_from(vec![]).is_none());
     }
 
     #[test]
     fn pick_orchestrator_transcript_in_pins_to_session_id_else_falls_back_to_newest() {
-        // Reproduces the live-verified misattribution: an "unrelated" Claude session (some other
-        // active session on the machine) touches its transcript AFTER the orchestrator's own,
-        // making it the newest — a recency-only picker would return the wrong one. `Some(id)` must
-        // still pick the orchestrator's own (older) transcript by id; only `None` (an adopted
-        // window with no known id) falls back to the old newest-wins heuristic.
+        // A known session id must beat recency even when an unrelated transcript changes later.
         let root = tempfile::tempdir().unwrap();
         let home = PathBuf::from("/Users/fixture-home");
         let dir = root.path().join(agent::claude::encode_project_dir(&home));
@@ -12561,7 +11948,7 @@ mod tests {
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        // An unrelated Claude session, written after — newer mtime, so a pure recency scan would
+        // An unrelated Claude session, written after - newer mtime, so a pure recency scan would
         // wrongly prefer it.
         std::fs::write(
             dir.join("unrelated-session-id.jsonl"),
@@ -12778,7 +12165,7 @@ mod tests {
             }
         };
         assert!(!is_ext);
-        // Slot count remained untouched
+
         assert_eq!(ext_slots_remaining, Some(1));
 
         // A stale unbound session is also never promoted even if slots > 0
@@ -12836,7 +12223,6 @@ mod tests {
         assert!(get_init["lane"].is_null());
         assert!(get_init["effective"].is_null());
 
-        // 2. Set enabled + one class override + stall_mins
         let set_res = dispatch(
             &ctx,
             &sess,
@@ -12857,7 +12243,6 @@ mod tests {
         );
         assert_eq!(set_res["effective"]["stall_mins"], json!(15));
 
-        // 3. Get with lane_id returns merged effective policy
         let get_lane = dispatch(
             &ctx,
             &sess,
@@ -12875,7 +12260,6 @@ mod tests {
         );
         assert_eq!(get_lane["effective"]["stall_mins"], json!(15));
 
-        // 4. In-memory snapshot is refreshed and contains the lane
         assert!(ctx.supervision.read().await.lane(42).is_some());
     }
 
@@ -12901,7 +12285,6 @@ mod tests {
         let ctx = Ctx::new(store, config, None);
         let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
 
-        // Insert 3 entries for lane 1, 2 entries for lane 2
         for i in 1..=3 {
             let entry = repomon_core::model::SupervisionEntry {
                 id: 0,
@@ -12945,7 +12328,6 @@ mod tests {
             ctx.store.append_supervision(entry).await.unwrap();
         }
 
-        // Filter lane 1
         let audit_lane1 = dispatch(
             &ctx,
             &sess,
@@ -12960,7 +12342,6 @@ mod tests {
             assert_eq!(e["lane_id"], json!(1));
         }
 
-        // All lanes, limit capped
         let audit_all = dispatch(
             &ctx,
             &sess,
@@ -13169,14 +12550,12 @@ mod tests {
         let ctx = Ctx::new(store, config, None);
         let sess = ctx.open_session(crate::conn::ConnKind::Local).await;
 
-        // Create a real repo with initial commit
         let repo_dir = tempfile::tempdir().unwrap();
         git(repo_dir.path(), &["init", "-b", "main"]);
         git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
 
         let repo = ctx.registry.add(repo_dir.path()).await.unwrap();
 
-        // Create a lane
         let lane_val = dispatch(
             &ctx,
             &sess,
@@ -13190,7 +12569,6 @@ mod tests {
         .unwrap();
         let lane_id = lane_val["id"].as_i64().unwrap();
 
-        // Set policy on this lane
         dispatch(
             &ctx,
             &sess,
@@ -13206,7 +12584,6 @@ mod tests {
         assert!(ctx.store.lane_policy(lane_id).await.unwrap().is_some());
         assert!(ctx.supervision.read().await.lane(lane_id).is_some());
 
-        // Delete the lane
         dispatch(
             &ctx,
             &sess,
@@ -13219,7 +12596,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Policy row is deleted and snapshot is refreshed
         assert!(ctx.store.lane_policy(lane_id).await.unwrap().is_none());
         assert!(ctx.supervision.read().await.lane(lane_id).is_none());
     }

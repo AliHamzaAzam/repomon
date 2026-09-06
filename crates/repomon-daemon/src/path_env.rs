@@ -1,14 +1,5 @@
-//! PATH repair for daemons started from a GUI.
-//!
-//! macOS gives an app launched from Finder or the Dock a stripped `PATH`
-//! (`/usr/bin:/bin:/usr/sbin:/sbin`), and every process it spawns inherits it. A daemon started
-//! that way cannot see `tmux` (typically `/opt/homebrew/bin`), `claude` (`~/.local/bin`), or
-//! `codex`, so agent detection reports everything missing and a spawn fails with a bare
-//! `No such file or directory`. The same applies to a launchd service, whose plist carries no
-//! environment of its own.
-//!
-//! The repair only runs when `PATH` is exactly the stripped default, so a daemon started from a
-//! shell (or one given a deliberate `PATH`) is never second-guessed.
+//! Repairs the stripped default PATH inherited by GUI launches while preserving an explicitly
+//! configured shell PATH.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -99,7 +90,7 @@ mod tests {
     fn only_the_stripped_gui_default_counts_as_minimal() {
         assert!(looks_minimal("/usr/bin:/bin:/usr/sbin:/sbin"));
         assert!(looks_minimal("  /usr/bin:/bin:/usr/sbin:/sbin  "));
-        // A real user PATH, or any deliberate one, is left alone.
+
         assert!(!looks_minimal(
             "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         ));

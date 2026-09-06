@@ -1,7 +1,5 @@
-//! Worktree-scoped file I/O RPCs for the upcoming in-app editor (D1 `file.list`, D2
-//! `file.read`/`file.write`). No tmux/agent involved — these RPCs never touch a session, so
-//! (unlike `fleet_mail_*`) this harness is just `Ctx` + `serve` + a real git worktree, the same
-//! shape `lane_diff_reports_commits_ahead_and_uncommitted_stat` (integration.rs) uses.
+//! Exercises worktree file RPCs through local IPC against an isolated git worktree without starting
+//! agent sessions.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -163,7 +161,6 @@ async fn file_list_is_sorted_dirs_first_and_excludes_dot_git() {
     assert_eq!(dir_entry["is_dir"], json!(true));
     assert!(dir_entry["size"].is_null());
 
-    // A subdirectory listing is scoped to that one level.
     let r = call(
         &mut h.stream,
         4,
@@ -476,7 +473,7 @@ async fn file_write_creates_new_file_atomically_with_no_conflict_check() {
         std::fs::read_to_string(h.root.join("brand-new.txt")).unwrap(),
         "fresh\n"
     );
-    // Atomic write: no leftover temp file.
+
     assert!(!h.root.join("brand-new.txt.repomon-tmp").exists());
 
     h.shutdown().await;
@@ -522,7 +519,6 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
     .unwrap();
     let stale_mtime = read["mtime_ms"].as_u64().unwrap().saturating_sub(1);
 
-    // A change lands on disk out from under the editor.
     tokio::time::sleep(Duration::from_millis(20)).await;
     std::fs::write(h.root.join("shared.txt"), "v2-from-elsewhere").unwrap();
 
@@ -548,7 +544,7 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
     let data = err.data.expect("conflict error must carry data");
     assert!(data.get("expected_mtime_ms").is_some());
     assert!(data.get("actual_mtime_ms").is_some());
-    // Rejected write must not have touched the file.
+
     assert_eq!(
         std::fs::read_to_string(h.root.join("shared.txt")).unwrap(),
         "v2-from-elsewhere"
@@ -616,20 +612,16 @@ async fn file_write_rejects_stale_mtime_and_broadcasts_event_on_success() {
 async fn file_index_reports_worktree_files_and_caches_per_lane() {
     let mut h = setup("file-index").await;
 
-    // Create .gitignore
     std::fs::write(h.root.join(".gitignore"), "target/\n*.log\n").unwrap();
 
-    // Create nested directory and files
     std::fs::create_dir_all(h.root.join("src/deep")).unwrap();
     std::fs::write(h.root.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(h.root.join("src/deep/file.txt"), "content\n").unwrap();
 
-    // Create ignored files and directories
     std::fs::create_dir_all(h.root.join("target")).unwrap();
     std::fs::write(h.root.join("target/bin.exe"), "bin").unwrap();
     std::fs::write(h.root.join("test.log"), "log\n").unwrap();
 
-    // Call file.index
     let r1 = call(
         &mut h.stream,
         2,
@@ -655,7 +647,6 @@ async fn file_index_reports_worktree_files_and_caches_per_lane() {
     assert!(!paths1.iter().any(|p| p.starts_with("target")));
     assert!(!paths1.contains(&"test.log".to_string()));
 
-    // Call file.index again: verify cache hit with same generation
     let r2 = call(
         &mut h.stream,
         3,
@@ -668,7 +659,6 @@ async fn file_index_reports_worktree_files_and_caches_per_lane() {
     let gen2 = res2["generation"].as_u64().unwrap();
     assert_eq!(gen1, gen2, "cache hit should retain generation");
 
-    // Write file via file.write: bumps generation
     let write_res = call(
         &mut h.stream,
         4,
@@ -682,7 +672,6 @@ async fn file_index_reports_worktree_files_and_caches_per_lane() {
     .await;
     assert!(write_res.error.is_none());
 
-    // Call file.index again: verify cache invalidation bumped generation
     let r3 = call(
         &mut h.stream,
         5,
@@ -717,7 +706,6 @@ async fn worktree_watcher_lifecycle_and_events() {
     assert!(r.error.is_none());
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // 1. External file creation
     std::fs::write(h.root.join("new_external.txt"), "created on disk\n").unwrap();
 
     let mut saw_create = false;
@@ -767,7 +755,6 @@ async fn worktree_watcher_lifecycle_and_events() {
     assert!(saw_modify, "expected event.file.changed with op: modified");
     tokio::time::sleep(Duration::from_millis(350)).await;
 
-    // 3. Ignored file produces nothing
     std::fs::write(h.root.join(".gitignore"), "*.ignored\n").unwrap();
     // Wait for debounce on .gitignore
     tokio::time::sleep(Duration::from_millis(350)).await;
@@ -795,7 +782,6 @@ async fn worktree_watcher_lifecycle_and_events() {
         "ignored files must not broadcast events"
     );
 
-    // 4. File removal
     std::fs::remove_file(h.root.join("new_external.txt")).unwrap();
 
     let mut saw_remove = false;
@@ -819,7 +805,6 @@ async fn worktree_watcher_lifecycle_and_events() {
     }
     assert!(saw_remove, "expected event.file.changed with op: removed");
 
-    // 5. Watcher stops when lane leaves viewport
     let r = call(
         &mut h.stream,
         11,
@@ -860,7 +845,6 @@ async fn worktree_watcher_lifecycle_and_events() {
 async fn file_create_operations_and_collisions() {
     let mut h = setup("file-create").await;
 
-    // 1. Create directory with nested parents
     let r1 = call(
         &mut h.stream,
         10,
@@ -871,7 +855,6 @@ async fn file_create_operations_and_collisions() {
     assert!(r1.error.is_none());
     assert!(h.root.join("deep/nested/dir").is_dir());
 
-    // 2. Create file in existing directory
     let r2 = call(
         &mut h.stream,
         11,
@@ -882,7 +865,6 @@ async fn file_create_operations_and_collisions() {
     assert!(r2.error.is_none());
     assert!(h.root.join("deep/nested/dir/file.txt").is_file());
 
-    // 3. Collision error (-32009) on already existing file
     let r3 = call(
         &mut h.stream,
         12,
@@ -892,7 +874,6 @@ async fn file_create_operations_and_collisions() {
     .await;
     assert_eq!(r3.error.as_ref().map(|e| e.code), Some(-32009));
 
-    // 4. Collision error (-32009) on already existing directory
     let r4 = call(
         &mut h.stream,
         13,
@@ -902,7 +883,6 @@ async fn file_create_operations_and_collisions() {
     .await;
     assert_eq!(r4.error.as_ref().map(|e| e.code), Some(-32009));
 
-    // 5. Parent directory auto-creation for new file
     let r5 = call(
         &mut h.stream,
         14,
@@ -913,7 +893,6 @@ async fn file_create_operations_and_collisions() {
     assert!(r5.error.is_none());
     assert!(h.root.join("auto/parent/test.txt").is_file());
 
-    // 6. Traversal rejection
     let r6 = call(
         &mut h.stream,
         15,
@@ -934,7 +913,6 @@ async fn file_rename_operations_and_traversal() {
     std::fs::create_dir_all(h.root.join("target_dir")).unwrap();
     std::fs::write(h.root.join("target_dir/existing.txt"), "already here\n").unwrap();
 
-    // 1. Cross-directory rename
     let r1 = call(
         &mut h.stream,
         10,
@@ -946,7 +924,6 @@ async fn file_rename_operations_and_traversal() {
     assert!(!h.root.join("source.txt").exists());
     assert!(h.root.join("target_dir/moved.txt").is_file());
 
-    // 2. Collision error (-32009) when destination exists
     let r2 = call(
         &mut h.stream,
         11,
@@ -956,7 +933,6 @@ async fn file_rename_operations_and_traversal() {
     .await;
     assert_eq!(r2.error.as_ref().map(|e| e.code), Some(-32009));
 
-    // 3. Traversal rejection
     let r3 = call(
         &mut h.stream,
         12,
@@ -980,7 +956,6 @@ async fn file_delete_operations_and_guards() {
     std::fs::create_dir_all(h.root.join("non_empty_dir/sub")).unwrap();
     std::fs::write(h.root.join("non_empty_dir/sub/item.txt"), "nested\n").unwrap();
 
-    // 1. Delete plain file
     let r1 = call(
         &mut h.stream,
         10,
@@ -991,7 +966,6 @@ async fn file_delete_operations_and_guards() {
     assert!(r1.error.is_none());
     assert!(!h.root.join("delete_me.txt").exists());
 
-    // 2. Delete empty directory without recursive flag
     let r2 = call(
         &mut h.stream,
         11,
@@ -1013,7 +987,6 @@ async fn file_delete_operations_and_guards() {
     assert_eq!(r3.error.as_ref().map(|e| e.code), Some(-32008));
     assert!(h.root.join("non_empty_dir").exists());
 
-    // 4. Delete non-empty directory with recursive: true succeeds
     let r4 = call(
         &mut h.stream,
         13,
@@ -1024,7 +997,6 @@ async fn file_delete_operations_and_guards() {
     assert!(r4.error.is_none());
     assert!(!h.root.join("non_empty_dir").exists());
 
-    // 5. Delete .git is rejected
     let r5 = call(
         &mut h.stream,
         14,
@@ -1034,7 +1006,6 @@ async fn file_delete_operations_and_guards() {
     .await;
     assert!(r5.error.is_some());
 
-    // 6. Delete root is rejected
     let r6 = call(
         &mut h.stream,
         15,
@@ -1062,17 +1033,16 @@ async fn file_search_features_and_truncation() {
         "fn main() {\n    println!(\"Score: 100\");\n    calculate_score();\n}\n",
     )
     .unwrap();
-    // Binary file: should be skipped
+
     std::fs::write(
         h.root.join("src/blob.bin"),
         [0u8, 1, 2, b's', b'c', b'o', b'r', b'e'],
     )
     .unwrap();
-    // Ignored file: should be skipped
+
     std::fs::write(h.root.join(".gitignore"), "*.log\n").unwrap();
     std::fs::write(h.root.join("audit.log"), "score in log\n").unwrap();
 
-    // 1. Plain substring search with 1-based line and column
     let r1 = call(
         &mut h.stream,
         10,
@@ -1096,7 +1066,6 @@ async fn file_search_features_and_truncation() {
     assert_eq!(hit_lib.column, 8); // "pub fn " is 7 chars, so column is 8!
     assert!(hit_lib.preview.contains("calculate_score"));
 
-    // 2. Case sensitive search
     let r2 = call(
         &mut h.stream,
         11,
@@ -1117,7 +1086,6 @@ async fn file_search_features_and_truncation() {
             .any(|hit| hit.preview.contains("println!(\"Score:"))
     );
 
-    // Case insensitive search
     let r2_ci = call(
         &mut h.stream,
         12,
@@ -1138,7 +1106,6 @@ async fn file_search_features_and_truncation() {
             .any(|hit| hit.preview.contains("println!(\"Score:"))
     );
 
-    // 3. Regex mode
     let r3 = call(
         &mut h.stream,
         13,
@@ -1156,7 +1123,6 @@ async fn file_search_features_and_truncation() {
     assert_eq!(res3.hits[0].path, "src/lib.rs");
     assert_eq!(res3.hits[0].line, 2);
 
-    // 4. Glob filter restricts to matching paths
     let r4 = call(
         &mut h.stream,
         14,
@@ -1173,11 +1139,9 @@ async fn file_search_features_and_truncation() {
     assert!(!res4.hits.is_empty());
     assert!(res4.hits.iter().all(|hit| hit.path == "src/main.rs"));
 
-    // 5. Binary file and ignored file are excluded
     assert!(!res2_ci.hits.iter().any(|hit| hit.path == "src/blob.bin"));
     assert!(!res2_ci.hits.iter().any(|hit| hit.path == "audit.log"));
 
-    // 6. Cap truncation
     let r6 = call(
         &mut h.stream,
         15,
@@ -1201,7 +1165,6 @@ async fn file_search_features_and_truncation() {
 async fn file_diff_base_rpc_integration() {
     let mut h = setup("file-diff-base").await;
 
-    // 1. diff_base returns committed content
     let r1 = call(
         &mut h.stream,
         20,
@@ -1251,7 +1214,6 @@ async fn file_diff_base_rpc_integration() {
     assert_eq!(res3.kind, "missing");
     assert_eq!(res3.content, None);
 
-    // 4. Path traversal attempt is rejected with invalid_params
     let r4 = call(
         &mut h.stream,
         23,

@@ -58,10 +58,8 @@ fn git_dated(dir: &Path, args: &[&str], date: &str) {
     assert!(ok, "git {args:?}");
 }
 
-/// A config whose repomind home is a throwaway directory. Every test that reaches a home-backed
-/// RPC (repo notes, playbooks, and the export triggers behind the journal, schedules, and
-/// approval rules) must use one: with the default `~/repomind` the suite would write into the
-/// operator's real fleet memory.
+/// Provides a temporary repomind home so home-backed RPC tests cannot write to the operator’s fleet
+/// memory.
 fn isolated_config(dir: &Path) -> Config {
     let mut config = Config::default();
     config.repomind.home = dir.join("repomind").to_string_lossy().into_owned();
@@ -146,8 +144,8 @@ async fn config_set_persists_every_sound_preference() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// U3 item 2: a `config.set` price override takes effect immediately, with no daemon restart;
-/// the same running daemon's next `usage.summary`/`usage.models` read must reflect it.
+/// A price override must affect the running daemon’s next usage summary and model query without a
+/// restart.
 #[tokio::test]
 async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -258,7 +256,6 @@ async fn config_set_price_override_reprices_the_live_ledger_without_a_restart() 
         Some(2.0),
     );
 
-    // A sparse update keeps previously overridden fields.
     let patch = call(
         &mut stream,
         5,
@@ -356,11 +353,9 @@ async fn daemon_serves_repo_and_lane_methods() {
 
     let mut stream = connect_retry(&sock).await;
 
-    // Empty fleet to start.
     let r = call(&mut stream, 1, "repo.list", None).await;
     assert_eq!(r.result.unwrap(), json!([]));
 
-    // Add a real git repo.
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
@@ -376,7 +371,6 @@ async fn daemon_serves_repo_and_lane_methods() {
     .await;
     assert!(r.error.is_none(), "repo.add errored: {:?}", r.error);
 
-    // The main worktree appears as a lane.
     let r = call(&mut stream, 3, "lane.list", None).await;
     let lanes = r.result.unwrap();
     let arr = lanes.as_array().unwrap();
@@ -384,13 +378,11 @@ async fn daemon_serves_repo_and_lane_methods() {
     assert_eq!(arr[0]["worktree"]["is_main"], json!(true));
     assert_eq!(arr[0]["state"]["branch"], json!("main"));
 
-    // daemon.status reports our version.
     let r = call(&mut stream, 4, "daemon.status", None).await;
     let status = r.result.unwrap();
     assert_eq!(status["version"], json!(repomon_core::version()));
     assert_eq!(status["repos"], json!(1));
 
-    // Unknown method is a proper JSON-RPC error.
     let r = call(&mut stream, 5, "no.such.method", None).await;
     assert!(r.result.is_none());
     assert_eq!(r.error.unwrap().code, -32601);
@@ -424,7 +416,6 @@ async fn daemon_spawns_and_drives_an_agent() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // Register a repo and grab its lane.
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
@@ -495,10 +486,8 @@ async fn daemon_spawns_and_drives_an_agent() {
         "captured pane was: {content:?}"
     );
 
-    // Force an overlay computation while the agent is still running, so the daemon's tmux-window
-    // cache (`last_good_windows`) is populated with the live window — the precondition for the
-    // regression checked below (the total-vanish debounce only has something stale to fall back
-    // on once it has seen the window at least once).
+    // Populate the live-window cache before stop to verify teardown clears retained liveness
+    // immediately.
     let lanes = call(&mut stream, 6, "lane.list", None)
         .await
         .result
@@ -516,7 +505,6 @@ async fn daemon_spawns_and_drives_an_agent() {
         "expected a live agent session before stop: {lane:?}"
     );
 
-    // Stop the agent.
     call(
         &mut stream,
         7,
@@ -525,13 +513,8 @@ async fn daemon_spawns_and_drives_an_agent() {
     )
     .await;
 
-    // Regression check: immediately after `agent.stop` returns — no sleep, no poll — the lane
-    // must report no agent. This is the bug: `agent.stop` kills the tmux window but used to leave
-    // the daemon's window-liveness caches stale, so `resolve_windows`'s `EMPTY_WINDOWS_CONFIRM`
-    // debounce (meant to ride out a *transient* tmux-server bounce) misread our own deliberate
-    // kill as one of those and held the dead window in `last_good_windows` for one more tick —
-    // long enough for an immediately-following read (e.g. `delete_lane`'s impact summary) to see
-    // the just-stopped agent as still live.
+    // Assert immediately: a deliberate stop must clear caches without waiting for the
+    // transient-probe debounce.
     let lanes = call(&mut stream, 8, "lane.list", None)
         .await
         .result
@@ -616,7 +599,7 @@ async fn streams_agent_output_for_visible_lanes() {
     )
     .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    // Subscribe last, then mark the lane visible — the streamer should push its pane content.
+    // Subscribe last, then mark the lane visible - the streamer should push its pane content.
     call(
         &mut stream,
         5,
@@ -632,7 +615,6 @@ async fn streams_agent_output_for_visible_lanes() {
     )
     .await;
 
-    // Read pushed notifications looking for our marker.
     let mut found = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
@@ -662,7 +644,7 @@ async fn streams_agent_output_for_visible_lanes() {
         "did not receive streamed agent output with the marker"
     );
 
-    // (No further requests here — we're subscribed, so responses and events interleave.)
+    // (No further requests here - we're subscribed, so responses and events interleave.)
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new(repomon_core::agent::tmux_program())
@@ -705,7 +687,6 @@ async fn dashboard_timeline_sessions_search() {
     let from = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
     let to = chrono::Utc::now().to_rfc3339();
 
-    // search
     let r = call(
         &mut stream,
         1,
@@ -715,7 +696,6 @@ async fn dashboard_timeline_sessions_search() {
     .await;
     assert_eq!(r.result.unwrap().as_array().unwrap().len(), 2);
 
-    // timeline: one repo row with some density
     let r = call(
         &mut stream,
         2,
@@ -726,7 +706,6 @@ async fn dashboard_timeline_sessions_search() {
     let t = r.result.unwrap();
     assert_eq!(t["rows"].as_array().unwrap().len(), 1);
 
-    // sessions: the two commits (15 min span) form one session
     let r = call(
         &mut stream,
         3,
@@ -804,7 +783,6 @@ async fn fs_browse_marks_repos_and_added() {
     assert_eq!(mr["added"], json!(false));
     assert!(res["parent"].is_string());
 
-    // After registering it, the browser marks it added.
     call(
         &mut stream,
         2,
@@ -902,13 +880,11 @@ async fn system_doctor_reports_machine_health_and_agents() {
     let r = call(&mut stream, 1, "system.doctor", None).await;
     let res = r.result.expect("system.doctor result");
 
-    // git probe
     let git = &res["git"];
     assert_eq!(git["available"], json!(true));
     assert!(git["version"].as_str().unwrap().contains("git"));
     assert!(git["path"].as_str().is_some());
 
-    // tmux probe
     let tmux = &res["tmux"];
     assert!(tmux["available"].is_boolean());
     if tmux["available"].as_bool().unwrap() {
@@ -934,7 +910,6 @@ async fn system_doctor_reports_machine_health_and_agents() {
         assert_eq!(res["agent_host"], json!(null));
     }
 
-    // agents probe
     let agents = res["agents"].as_array().expect("agents array");
     let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"claude-code"));
@@ -1082,7 +1057,6 @@ async fn agent_manager_add_set_default_and_remove() {
     assert_eq!(yolo["custom"], json!(true));
     assert_eq!(yolo["default"], json!(false));
 
-    // Adding under a built-in name is rejected.
     let r = call(
         &mut stream,
         3,
@@ -1118,7 +1092,6 @@ async fn agent_manager_add_set_default_and_remove() {
             .contains("default_agent")
     );
 
-    // A built-in can also be the default.
     let r = call(
         &mut stream,
         6,
@@ -1154,7 +1127,6 @@ async fn agent_manager_add_set_default_and_remove() {
         "yolo should be gone"
     );
 
-    // Set-default on an unknown agent is rejected.
     let r = call(
         &mut stream,
         10,
@@ -1182,7 +1154,7 @@ async fn commit_recent_returns_latest_even_when_none_today() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // A repo whose only commits are from last year — nothing "today".
+    // A repo whose only commits are from last year - nothing "today".
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git_dated(
@@ -1208,7 +1180,6 @@ async fn commit_recent_returns_latest_even_when_none_today() {
         .unwrap();
     let lane_id = lanes[0]["id"].as_i64().unwrap();
 
-    // Nothing today...
     let today = call(&mut stream, 3, "commit.today", None)
         .await
         .result
@@ -1230,7 +1201,7 @@ async fn commit_recent_returns_latest_even_when_none_today() {
     .unwrap();
     let arr = recent.as_array().unwrap();
     assert_eq!(arr.len(), 2, "recent commits: {recent}");
-    assert_eq!(arr[0]["summary"], json!("old two")); // newest first
+    assert_eq!(arr[0]["summary"], json!("old two"));
     assert_eq!(arr[1]["summary"], json!("old one"));
 
     server.abort();
@@ -1238,7 +1209,7 @@ async fn commit_recent_returns_latest_even_when_none_today() {
 }
 
 // No orchestrator is ever started here, so `reconcile_orchestrator` returns false on its
-// first check (no tracked session) without touching tmux — this doesn't need a live tmux server.
+// first check (no tracked session) without touching tmux - this doesn't need a live tmux server.
 #[tokio::test]
 async fn orchestrator_input_errors_loudly_when_not_running() {
     let store = Store::open_in_memory().unwrap();
@@ -1300,7 +1271,6 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // A repo with one commit on main.
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     std::fs::write(repo_dir.path().join("README.md"), "hi\n").unwrap();
@@ -1315,7 +1285,6 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     .await;
     let repo_id = r.result.unwrap()["id"].as_i64().unwrap();
 
-    // A lane branched off main.
     let wt_parent = tempfile::tempdir().unwrap();
     let wt_path = wt_parent.path().join("feat");
     let r = call(
@@ -1333,7 +1302,6 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     assert!(r.error.is_none(), "lane.create errored: {:?}", r.error);
     let lane_id = r.result.unwrap()["id"].as_i64().unwrap();
 
-    // One commit ahead of main...
     std::fs::write(wt_path.join("a.txt"), "a\n").unwrap();
     git(&wt_path, &["add", "a.txt"]);
     git(&wt_path, &["commit", "-m", "feat: add a"]);
@@ -1341,7 +1309,7 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
     std::fs::write(wt_path.join("README.md"), "changed\n").unwrap();
     std::fs::write(wt_path.join("scratch.txt"), "scratch\n").unwrap();
     // No file watcher runs against this bare `Ctx` (that's wired up in `main.rs`), so the cached
-    // clean state from `lane.create`'s listing needs an explicit nudge to re-walk — same as
+    // clean state from `lane.create`'s listing needs an explicit nudge to re-walk - same as
     // `repomon_core::lane::tests::worktree_file_activity_is_detected`.
     ctx.lanes.invalidate_state(&wt_path);
 
@@ -1370,10 +1338,9 @@ async fn lane_diff_reports_commits_ahead_and_uncommitted_stat() {
         "uncommitted_stat was: {uncommitted_stat:?}"
     );
     assert_eq!(d["untracked"], json!(1));
-    // No patch without include_patch.
+
     assert!(d.get("patch").is_none());
 
-    // include_patch=true honors a tiny max_patch_chars cap.
     let r = call(
         &mut stream,
         4,
@@ -1460,7 +1427,6 @@ async fn commit_show_returns_full_detail_rejects_malformed_oid_and_honors_trunca
     .trim()
     .to_string();
 
-    // Valid oid -> full metadata + patch.
     let r = call(
         &mut stream,
         3,
@@ -1546,7 +1512,6 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // Global list sees the skill.
     let r = call(
         &mut stream,
         1,
@@ -1593,7 +1558,6 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
         1
     );
 
-    // The toggle landed in the repo root AND the worktree.
     for base in [&repo, &wt] {
         let s: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(base.join(".claude/settings.local.json")).unwrap(),
@@ -1602,7 +1566,6 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
         assert_eq!(s["enabledPlugins"]["superpowers@official"], true);
     }
 
-    // Repo-scope list reflects it with enabled_source repo.
     let r = call(
         &mut stream,
         4,
@@ -1635,7 +1598,6 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
     assert!(Path::new(&skill_path).join("SKILL.md").is_file());
     assert!(wt.join(".claude/skills/e2e-skill/SKILL.md").is_file());
 
-    // Write then read round-trips the content.
     let r = call(
         &mut stream,
         6,
@@ -1670,7 +1632,6 @@ async fn extension_rpcs_list_toggle_and_fan_out() {
             .contains("edited")
     );
 
-    // A path outside the managed skill roots is rejected.
     let r = call(
         &mut stream,
         8,
@@ -1782,7 +1743,6 @@ async fn repo_notes_get_set_round_trip() {
     let repo_id = repo["id"].as_i64().unwrap();
     let repo_name = repo["name"].as_str().unwrap().to_string();
 
-    // Fresh repo: no notes yet.
     let r = call(
         &mut stream,
         2,
@@ -1816,7 +1776,7 @@ async fn repo_notes_get_set_round_trip() {
     let got = r.result.unwrap();
     assert_eq!(got["exists"], json!(true));
     assert_eq!(got["content"], json!("use `pnpm test`, never `npm test`"));
-    // File-first since R2: the notes live in the repomind home, not the app-support directory.
+
     let path = std::path::PathBuf::from(got["path"].as_str().unwrap());
     assert!(
         path.starts_with(cfg_dir.path().join("repomind").join("fleet")),
@@ -1830,7 +1790,6 @@ async fn repo_notes_get_set_round_trip() {
         "the app-support repo-notes directory must no longer be written"
     );
 
-    // Over the cap: rejected with an error that names the limit.
     let r = call(
         &mut stream,
         5,
@@ -1845,7 +1804,6 @@ async fn repo_notes_get_set_round_trip() {
         err.message
     );
 
-    // Unknown repo: not found.
     let r = call(
         &mut stream,
         6,
@@ -1910,14 +1868,12 @@ async fn journal_append_and_query() {
         assert!(r.result.unwrap()["id"].as_i64().unwrap() > 0);
     }
 
-    // Plain query: newest first.
     let r = call(&mut stream, 10, "journal.query", Some(json!({}))).await;
     let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[0]["action"], json!("session_start"));
     assert_eq!(entries[0]["session"], json!("b"));
 
-    // Search filters (case-insensitive substring over params).
     let r = call(
         &mut stream,
         11,
@@ -1929,7 +1885,6 @@ async fn journal_append_and_query() {
     assert_eq!(entries.len(), 1, "entries: {entries:?}");
     assert_eq!(entries[0]["action"], json!("spawn_agent"));
 
-    // Recap: everything after session a's start, ascending.
     let r = call(
         &mut stream,
         12,
@@ -1963,7 +1918,6 @@ async fn playbook_lifecycle_over_rpc() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // Save a draft.
     let r = call(
         &mut stream,
         1,
@@ -1974,7 +1928,6 @@ async fn playbook_lifecycle_over_rpc() {
     assert!(r.error.is_none(), "save errored: {:?}", r.error);
     assert_eq!(r.result.unwrap()["status"], json!("draft"));
 
-    // Drafts are invisible to search.
     let r = call(
         &mut stream,
         2,
@@ -1984,7 +1937,6 @@ async fn playbook_lifecycle_over_rpc() {
     .await;
     assert_eq!(r.result.unwrap()["playbooks"], json!([]));
 
-    // Approve, then search hits.
     let r = call(
         &mut stream,
         3,
@@ -2026,7 +1978,6 @@ async fn playbook_lifecycle_over_rpc() {
         "approved content must stay live until re-approval: {books:?}"
     );
 
-    // list shows the pending revision for the approval surface.
     let r = call(&mut stream, 7, "playbook.list", None).await;
     let books = r.result.unwrap()["playbooks"].as_array().unwrap().clone();
     assert_eq!(books[0]["draft_content"], json!("v2 steps"));
@@ -2051,7 +2002,6 @@ async fn playbook_lifecycle_over_rpc() {
     let err = r.error.expect("oversized must error");
     assert!(err.message.contains("16384"), "unhelpful: {}", err.message);
 
-    // Unknown-name approve/delete error.
     let r = call(
         &mut stream,
         10,
@@ -2080,7 +2030,6 @@ async fn schedule_add_list_remove() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // Valid add returns the row plus its computed next firing.
     let r = call(
         &mut stream,
         1,
@@ -2094,7 +2043,6 @@ async fn schedule_add_list_remove() {
     assert_eq!(sched["max_actions"], json!(10), "default cap should be 10");
     assert!(sched["next_run"].is_string(), "missing next_run: {sched}");
 
-    // Bad spec teaches the grammar.
     let r = call(
         &mut stream,
         2,
@@ -2105,7 +2053,6 @@ async fn schedule_add_list_remove() {
     let err = r.error.expect("bad spec must error");
     assert!(err.message.contains("daily"), "unhelpful: {}", err.message);
 
-    // Empty prompt rejected; oversized max_actions clamped to 50.
     let r = call(
         &mut stream,
         3,
@@ -2123,13 +2070,11 @@ async fn schedule_add_list_remove() {
     .await;
     assert_eq!(r.result.unwrap()["max_actions"], json!(50));
 
-    // List shows both with next_run.
     let r = call(&mut stream, 5, "schedule.list", None).await;
     let scheds = r.result.unwrap()["schedules"].as_array().unwrap().clone();
     assert_eq!(scheds.len(), 2);
     assert!(scheds.iter().all(|s| s["next_run"].is_string()));
 
-    // Remove; second remove errors.
     let r = call(&mut stream, 6, "schedule.remove", Some(json!({ "id": id }))).await;
     assert!(r.error.is_none(), "remove errored: {:?}", r.error);
     let r = call(&mut stream, 7, "schedule.remove", Some(json!({ "id": id }))).await;
@@ -2207,7 +2152,6 @@ async fn approval_record_and_rules_lifecycle() {
         assert_eq!(v["propose"], json!(false), "always-escalate proposed: {v}");
     }
 
-    // A deny resets the streak.
     let r = call(
         &mut stream,
         20,
@@ -2225,7 +2169,6 @@ async fn approval_record_and_rules_lifecycle() {
     .await;
     assert_eq!(r.result.unwrap()["approvals"], json!(0));
 
-    // Remove; second remove errors.
     let r = call(
         &mut stream,
         22,
@@ -2265,7 +2208,7 @@ async fn orchestrator_watch_is_per_connection() {
     assert!(!ctx.has_orchestrator_watcher().await);
 
     // A watches; B saying "off" must not clobber A's watch (per-connection state, like
-    // viewports — a phone leaving its view must not stop the TUI's stream).
+    // viewports - a phone leaving its view must not stop the TUI's stream).
     let r = call(&mut a, 1, "orchestrator.watch", Some(json!({ "on": true }))).await;
     assert!(r.error.is_none(), "watch errored: {:?}", r.error);
     assert!(ctx.has_orchestrator_watcher().await);
@@ -2282,7 +2225,6 @@ async fn orchestrator_watch_is_per_connection() {
         "another connection's off must not clobber A's watch"
     );
 
-    // A turning itself off unwatches.
     let r = call(
         &mut a,
         2,

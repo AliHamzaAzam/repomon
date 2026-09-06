@@ -1,8 +1,5 @@
-//! Daemon-side notification engine for every subscribed client.
-//!
-//! The TUI does its own edge detection for local popups, while desktop and remote clients consume
-//! `event.notification`. The daemon runs the shared detection (`repomon_core::notify`) over the
-//! lane list and broadcasts every meaningful transition. APNs remains optional and remote-gated.
+//! Broadcasts shared notification transitions for desktop and remote clients, with optional APNs
+//! delivery and local popup coverage coordinated with the TUI.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,19 +20,13 @@ use serde_json::json;
 use crate::inject::{self, AuditSeed, Expectation, Payload, SendOutcome};
 use crate::{Ctx, ORCHESTRATOR_WINDOW, push, rpc};
 
-/// How often the watcher re-reads the fleet for remote/push notifications. Each tick recomputes
-/// the overlay, but the overlay's own caches absorb most of the cost: the composite snapshot is
-/// reused for `OVERLAY_TTL` (~750ms), the `lsof`/`pgrep` process probe for ~10s, and each pane
-/// sniff for ~20s. So a tick that only re-reads warm caches is cheap, and a 2s cadence cuts the
-/// old 8s worst-case alert latency to ~2s (the daemon owns *all* remote delivery and the local
-/// desktop popup whenever the TUI is parked/closed) without pegging a core.
+/// Reclassify the fleet frequently for prompt notifications, reusing the overlay’s underlying probe
+/// caches.
 const TICK: Duration = Duration::from_secs(2);
 /// Don't re-fire the same session's notification within this window (status flapping).
 const DEBOUNCE: Duration = Duration::from_secs(30);
-/// How long to keep an alert's activity latch after its session leaves the snapshot, so a
-/// vanish+reappear (an `lsof` undercount, the 6h recency gate, `claude --resume` churn) can't slip
-/// a repeat through the gap. Covers the longest flap window — a multi-hour usage-limit pause —
-/// comfortably; a transcript gone longer than this can't re-enter under the same id anyway.
+/// Retain activity latches across transient disappearances and quota pauses so reappearing sessions
+/// cannot bypass repeat suppression.
 const LATCH_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 /// How long since the local TUI's last request before we treat it as parked (attached) or closed
 /// and let the daemon fire desktop popups itself. The TUI refreshes ~1s, so a few seconds of
@@ -49,14 +40,12 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     let mut prev: HashMap<(LaneId, SessKey), SessState> = HashMap::new();
     let mut seeded = false;
     let mut debounce: HashMap<(LaneId, SessKey, NotifKind), Instant> = HashMap::new();
-    // Activity-anchored re-fire latch: the session's `last_activity_at` (transcript mtime) at the
-    // moment each (lane, session, kind) last fired. A repeat is allowed only once that advances —
-    // i.e. the agent did real work since — so status flapping can't re-alert (see
-    // `activity_allows_refire`). Applies to NeedsYou/RateLimited/Resumed; Idle stays on `debounce`.
+    // Keys repeat suppression by message timestamp, which is stable across transcript metadata
+    // changes.
     let mut latch: HashMap<(LaneId, SessKey, NotifKind), (DateTime<Utc>, Instant)> = HashMap::new();
     // The subagent-inclusion setting the current `prev` snapshot was built with. When it flips,
     // the set of tracked keys changes wholesale (inferred sessions appear/vanish), so we re-seed
-    // rather than diff — otherwise toggling it off would fire a spurious Idle for every subagent.
+    // rather than diff - otherwise toggling it off would fire a spurious Idle for every subagent.
     let mut prev_subagents = false;
     // Orchestrator attention state, carried across ticks (see `check_orchestrator_attention`):
     // toggles the $HOME transcript scan to every other tick, caches its last result for the
@@ -68,10 +57,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     // An entry is consumed when its triage fires or when the session stops needing attention;
     // the notify latch above prevents re-adds until the agent does real work again.
     let mut pending_triage: HashMap<(LaneId, SessKey), Instant> = HashMap::new();
-    // Every surfaced agent row's public status as of the previous tick, so a transition can be
-    // pushed to clients the moment the classifier sees it. Independent of `prev` above: that map
-    // is the notification engine's, filtered by the subagent setting and diffed for alert edges,
-    // whereas this one covers every row the sidebar draws and diffs for any status change at all.
+    // Retain previous status for every row, independently of notification filtering.
     let mut status_prev: StatusSnapshot = HashMap::new();
     let mut status_seeded = false;
 
@@ -79,15 +65,11 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
         tick.tick().await;
         let cfg = ctx.config.read().await.clone();
         // The TUI fires its own desktop popups while it's actively watching; the daemon takes over
-        // local desktop delivery only when the TUI has parked in an attach or closed — i.e. its
+        // local desktop delivery only when the TUI has parked in an attach or closed - i.e. its
         // ~1s lane.list heartbeat has gone stale. Remote delivery is gated separately below.
         let tui_active =
             (*ctx.local_watcher_seen.lock().await).is_some_and(|t| t.elapsed() < LOCAL_TTL);
 
-        // Runs unconditionally — even with notifications disabled — because the TUI's pinned row
-        // and command-center header need repomind's attention live regardless; only the desktop
-        // popup inside this call is gated on `cfg.notify_enabled`. Must stay ABOVE the
-        // notify_enabled early-continue below.
         check_orchestrator_attention(
             &ctx,
             &cfg,
@@ -98,14 +80,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
         )
         .await;
 
-        // Always recompute (bypass the lane.list cache): edge detection must never reuse a stale
-        // snapshot, and in a headless setup nothing else populates the cache.
-        //
-        // This runs ABOVE the `notify_enabled` gate and covers every managed session in the fleet,
-        // not just the lanes some client happens to have in its viewport. An agent's pill is not a
-        // notification: turning notifications off used to stop the daemon's only periodic
-        // re-classification dead, leaving every client's status as fresh as its own polling and
-        // nothing else. `event.agent.status` below is the push half of the same guarantee.
+        // Refresh status even with notifications disabled and no UI polling; status events still
+        // require current classification.
         let Ok(lanes) = rpc::lanes_with_agents_fresh(&ctx).await else {
             continue;
         };
@@ -147,10 +123,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             if debounce.get(&dkey).is_some_and(|t| t.elapsed() < DEBOUNCE) {
                 continue;
             }
-            // Activity latch: suppress a repeat of this alert unless the session's transcript has
-            // advanced since it last fired. Defeats the status flapping (idle-decay, lsof
-            // undercount, sniff wobble) that the time-debounce can't. Idle has no activity anchor
-            // (it fires on disappearance), so it stays on the debounce alone.
+            // Allow a new alert only for new message activity; the idle debounce handles brief
+            // status fluctuations.
             let activity = lanes
                 .iter()
                 .find(|l| l.id == key.0)
@@ -160,10 +134,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             if kind != NotifKind::Idle && !activity_allows_refire(prev_fired, activity) {
                 continue;
             }
-            // Diagnostic for the "repeats an alert I already handled" report: a re-fire is only
-            // legitimate when the transcript advanced since last time (current_activity > prev_fired).
-            // If these logs show a re-fire with current_activity <= prev_fired (or prev_fired None
-            // for a session that clearly fired before), the latch is being bypassed.
+            // Log the activity comparison so suppressed and repeated alerts can be diagnosed.
             if kind == NotifKind::NeedsYou {
                 tracing::info!(
                     lane = key.0,
@@ -248,12 +219,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 continue;
             };
             let sess = session_by_key(lane, &key, subagents);
-            // Legacy approval-policy auto-approve: a routine Bash permission matching a
-            // confirmed per-repo rule is answered by the daemon itself and the alert is
-            // suppressed — the acceptance is precisely "the fourth cargo test never reaches
-            // your phone". Routed through `inject::verified_send` (T11) so it shares the one
-            // audited, re-verified send path with supervision; supervised lanes opt out here
-            // entirely, since their own loop already carries this same learned rule.
+            // Verified rule-based approval suppresses handled alerts; supervised lanes use their
+            // own loop to avoid competing sends.
             if kind == NotifKind::NeedsYou
                 && legacy_rule_auto_approve(&ctx, lane_id, lane, sess).await
             {
@@ -266,14 +233,14 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 slot_by_key(lane, &key, subagents),
                 cfg.notify_show_why,
             );
-            // The actual on-screen dialog, when there is one — what a push's Approve acts on.
+            // The actual on-screen dialog, when there is one - what a push's Approve acts on.
             let dialog = sess.and_then(|s| s.pending_prompt.clone());
             // The payload's "prompt" falls back to the agent's last message for context.
             let prompt = dialog
                 .clone()
                 .or_else(|| sess.and_then(|s| s.last_message.clone()));
             // Stable dedup id: a genuine re-alert advances the session's activity and so gets a new
-            // id, but a flapped re-send (same lane/session/kind, same activity) repeats the id — so
+            // id, but a flapped re-send (same lane/session/kind, same activity) repeats the id - so
             // a client that briefly reconnects or APNs that double-delivers can drop the duplicate.
             let session_id = sess.and_then(|s| s.session_id.clone());
             let activity_epoch = sess.map(|s| s.last_activity_at.timestamp()).unwrap_or(0);
@@ -301,10 +268,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
             // behind the remote bridge because it carries remote credentials and device state.
             ctx.broadcast("event.notification", payload.clone());
             if cfg.remote.enabled {
-                // Lock-screen push: a NeedsYou with a pending question gets the actionable
-                // category (Approve / Open); everything else is a plain alert. Approve-from-lock
-                // only when an actual dialog is up — a plain "finished its turn" Enter would be a
-                // no-op (or worse, submit an empty reply).
+                // Offer lock-screen approval only for an actionable dialog so a generic alert
+                // cannot send a blank Enter.
                 let category = if kind == NotifKind::NeedsYou && dialog.is_some() {
                     push::CATEGORY_PROMPT
                 } else {
@@ -313,10 +278,7 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
                 push::send_all(&ctx, &title, &body, category, &payload).await;
             }
 
-            // Local desktop popup, fired by the daemon only when no local UI is already covering
-            // it (the TUI is parked in an attach, or nothing is open), so we never double-notify
-            // with the TUI's own. `notify_desktop_fallback` turns it off entirely: on macOS this
-            // goes out via `osascript`, which delivers as Script Editor and wears its icon.
+            // Use the daemon popup when no UI covers the event and the fallback is enabled.
             if repomon_core::notify::daemon_popup_allowed(tui_active, cfg.notify_desktop_fallback) {
                 repomon_core::notify::send_native(
                     &title,
@@ -329,17 +291,8 @@ pub async fn notify_watch(ctx: Arc<Ctx>) {
     }
 }
 
-/// Legacy learned-rule auto-approve (pre-dates supervision): a routine Bash permission dialog
-/// whose `(repo, command_pattern)` has a confirmed `ApprovalRule` is answered by the daemon
-/// itself — the acceptance is precisely "the fourth cargo test never reaches your phone". The
-/// hardcoded always-escalate sniffer wins over any learned rule. Returns `true` when the alert
-/// should be suppressed (this block fully handled the dialog); `false` to fall through to
-/// normal notification handling — including when the send was skipped or failed, so the human
-/// still gets notified.
-///
-/// A lane under active supervision opts out here entirely: the supervision loop owns answering
-/// there and carries this same learned rule via its own `extra_allow` input
-/// (`supervision::handle_session`), so this legacy path must never race it.
+/// Answer confirmed routine permissions through verified injection, preserving hard escalation
+/// rules and leaving supervised lanes or failed sends to their existing handlers.
 async fn legacy_rule_auto_approve(
     ctx: &Ctx,
     lane_id: LaneId,
@@ -435,9 +388,7 @@ fn kind_enabled(cfg: &Config, kind: NotifKind) -> bool {
     }
 }
 
-// ---- repomind orchestrator attention (B4: the human<->repomind escalation loop) ----
-
-/// Don't re-fire the orchestrator's own "needs you" desktop popup within this window — separate
+/// Don't re-fire the orchestrator's own "needs you" desktop popup within this window - separate
 /// from the per-session `DEBOUNCE` above, since this is a single pane, not a fleet of sessions.
 const ORCH_POPUP_DEBOUNCE: Duration = Duration::from_secs(30);
 /// How far back to capture the orchestrator's pane for the pending-dialog sniff (mirrors the
@@ -446,16 +397,8 @@ const ORCH_CAPTURE_LINES: u32 = 45;
 /// Cap on the end-of-turn headline's length (a tail of repomind's last message).
 const ORCH_HEADLINE_LEN: usize = 140;
 
-/// Fold the repomind orchestrator's attention into this tick: a pending pane dialog (permission /
-/// decision) or an end-of-turn message beats "none". Runs on every tick regardless of
-/// `cfg.notify_enabled` — the TUI's pinned row and command-center header need it live even with
-/// notifications off — but the desktop popup fired on the none→attention edge below IS gated on
-/// `cfg.notify_enabled && cfg.notify_needs_you`, mirroring `kind_enabled`'s gating of the
-/// per-session NeedsYou popup above (this is the same escalation, just for the orchestrator's own
-/// pane rather than a managed agent's).
-///
-/// `scan_transcript`/`transcript_cache` throttle the `$HOME` transcript scan (a directory walk) to
-/// every other tick a dialog isn't already covering the answer; `popup_fired` debounces the popup.
+/// Refresh orchestrator attention independently of notification settings, gating only popups and
+/// throttling transcript scans.
 async fn check_orchestrator_attention(
     ctx: &Ctx,
     cfg: &Config,
@@ -466,16 +409,11 @@ async fn check_orchestrator_attention(
 ) {
     let alive = rpc::reconcile_orchestrator(ctx).await;
     let (word, headline) = if !alive {
-        *transcript_cache = None; // no session: drop any stale cached transcript status
+        *transcript_cache = None;
         ("none", None)
     } else {
-        // Pin the transcript scan to the orchestrator's own session id (captured at spawn via
-        // `--session-id`) — the `ctx.orchestrator` state `reconcile_orchestrator` just confirmed
-        // is alive — so it never picks up some other active Claude session's transcript. See
-        // `rpc::pick_orchestrator_transcript`. `has_transcript` gates the scan entirely: a
-        // backend with no parseable transcript (codex) must NOT reach the picker at all — with
-        // its always-`None` session id the picker would fall back to the "newest `~/.claude`
-        // transcript with content" heuristic and misattribute another live Claude session.
+        // Only transcript-capable backends may enter the picker; a missing ID on another backend
+        // could otherwise select an unrelated Claude session.
         let (session_id, has_transcript, window) = {
             let orch = ctx.orchestrator.lock().await;
             let o = orch.as_ref();
@@ -483,7 +421,6 @@ async fn check_orchestrator_attention(
                 o.and_then(|o| o.session_id.clone()),
                 // `None` (stopped between the reconcile above and here) also means "don't scan".
                 o.is_some_and(|o| o.backend.has_transcript()),
-                // The controller lane's window; the legacy name only when nothing is tracked.
                 o.map(|o| o.window.clone())
                     .unwrap_or_else(|| ORCHESTRATOR_WINDOW.to_string()),
             )
@@ -537,7 +474,7 @@ async fn check_orchestrator_attention(
         if due {
             *popup_fired = Some(Instant::now());
             // Phone loop: repomind's own escalations reach remote clients like a managed
-            // agent's would — event.notification for the in-app feed plus APNs — regardless of
+            // agent's would - event.notification for the in-app feed plus APNs - regardless of
             // whether a TUI is open locally (mirrors the lane path's remote gating).
             if cfg.remote.enabled {
                 let (title, body, payload) =
@@ -583,10 +520,7 @@ fn orchestrator_attention_payload(
     (title, body, payload)
 }
 
-/// Map the orchestrator's pane dialog (if any — already detected/classified by
-/// `repomon_core::agent::prompt`, which is fixture-tested there) and its transcript status to an
-/// attention word + headline. Pure, so *this* mapping — dialog → permission/decision, `Waiting` →
-/// end_of_turn, else none — is unit-testable without tmux or a real transcript.
+/// Derives the notification attention state from the final overlaid session state.
 fn derive_attention(
     dialog: Option<&str>,
     transcript: Option<(AgentStatus, Option<String>)>,
@@ -607,7 +541,7 @@ fn derive_attention(
     }
 }
 
-/// The tail of a message, trimmed and capped at `max` chars — likelier than the opening line to
+/// The tail of a message, trimmed and capped at `max` chars - likelier than the opening line to
 /// hold repomind's actual question when a turn ends on a long response.
 fn tail(s: &str, max: usize) -> String {
     let s = s.trim();
@@ -669,7 +603,7 @@ mod attention_tests {
 
     #[test]
     fn a_dialog_wins_even_over_a_waiting_transcript() {
-        // The pane dialog is the more precise signal — it beats a stale/lagging transcript scan.
+        // The pane dialog is the more precise signal - it beats a stale/lagging transcript scan.
         let (word, _) = derive_attention(
             Some("Do you trust the files in this folder?"),
             Some((AgentStatus::Waiting, Some("some prior message".into()))),
@@ -994,9 +928,8 @@ mod legacy_auto_approve_tests {
 
     #[tokio::test]
     async fn legacy_rule_skips_when_dialog_changed() {
-        // The dialog is gone by send time (idle pane instead): verified_send must skip rather
-        // than type a stray Enter, and the alert must NOT be suppressed — the one documented
-        // deviation from the old raw-send behavior.
+        // If the prompt disappears before verified delivery, skip the key and retain the human
+        // alert.
         let backend = Arc::new(ScriptedBackend::new(vec![IDLE_PANE.to_string()]));
         let ctx = make_ctx(backend.clone());
 
@@ -1110,12 +1043,8 @@ pub(crate) fn status_snapshot(lanes: &[Lane]) -> StatusSnapshot {
         .collect()
 }
 
-/// Rows whose **status** changed between two snapshots, newly appeared rows included.
-///
-/// Diffed on `status` alone, never on the reason: a reason is a live phrase ("no output for 4m")
-/// that re-renders on its own every tick, and diffing it would put an event on the bus every 2s
-/// for a fleet that is doing nothing. A row that *left* the snapshot emits nothing either: the
-/// lane events and the client's own refresh already cover a session that ended.
+/// Returns new or status-changed rows, ignoring changing reason text and vanished rows to avoid
+/// redundant events.
 pub(crate) fn status_changes<'a>(
     prev: &StatusSnapshot,
     now: &'a StatusSnapshot,

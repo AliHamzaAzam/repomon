@@ -1,12 +1,6 @@
-//! The codex orchestrator backend, exercised through the daemon's own RPC surface: a start with
-//! `agent: "codex"` must record the codex backend with no session id (codex can't pin one),
-//! `orchestrator.transcript` must read as an empty chat (codex's on-disk session format is not
-//! parsed — the pane stream is the view), and an MCP-less agent (`aider`) must be rejected
-//! loudly instead of spawning a broken window. Whether a real `codex` binary is installed is
-//! deliberately irrelevant: every assertion is on the daemon's own bookkeeping, mirroring
-//! `orchestrator.rs`'s approach, and the window is stopped at the end either way. Kept in its
-//! own integration binary: like `orchestrator.rs`, it mutates process env (`XDG_CONFIG_HOME`),
-//! which is only safe when no other test shares the process.
+//! Verifies backend bookkeeping without a captured session ID and rejection of MCP-less
+//! orchestrators. Fake executables avoid provider dependencies; process isolation protects
+//! environment changes.
 
 use std::process::Command;
 use std::time::Duration;
@@ -98,9 +92,6 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
     let r = call(&mut stream, 2, "orchestrator.status", None).await;
     assert_eq!(r.result.unwrap()["running"], json!(false));
 
-    // A codex start records the codex backend and — unlike a Claude spawn — no session id.
-    // `read-only` autonomy so that if a real `codex` binary is installed and boots in the
-    // window before the stop below, the MCP policy layer caps what it may do.
     let r = call(
         &mut stream,
         3,
@@ -119,10 +110,8 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
         "codex can't pin a session id — must be null, got: {status}"
     );
 
-    // The transcript reads as an empty chat for a codex backend — the gate must answer before
-    // any ~/.claude scan happens, so no other live Claude session's transcript can ever be
-    // misattributed as this orchestrator's. ([] also happens to be the answer if the window
-    // already died on a codex-less machine and reconcile cleared the session — both fine.)
+    // An empty Codex chat must return before scanning Claude transcripts to prevent cross-session
+    // attribution.
     let r = call(&mut stream, 4, "orchestrator.transcript", Some(json!({}))).await;
     assert!(r.error.is_none(), "transcript errored: {:?}", r.error);
     assert_eq!(r.result.unwrap(), json!([]));

@@ -1,12 +1,5 @@
-//! Per-connection session state.
-//!
-//! Each live client connection (the local TUI over the Unix socket, or a companion app over the
-//! remote WebSocket bridge) owns one [`ConnSession`]. It holds what THIS device is looking at —
-//! the viewport it streams and the window it focuses — so an iPhone, an iPad, and the Mac TUI can
-//! each hold their own view at once. The capture poll loop streams the UNION across every live
-//! session (see [`crate::Ctx::viewport_snapshot`]), and `agent.fit` arbitrates pane sizing across
-//! them (see `rpc::fit_allowed`). This replaces the old daemon-global viewport/focus slots, which
-//! a second device would clobber.
+//! Keeps viewport and focus claims per connection. Capture subscriptions are combined, while resize
+//! ownership is arbitrated between clients.
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -21,18 +14,18 @@ use tokio::sync::Mutex;
 pub enum ConnKind {
     /// The local Unix-socket client (the TUI).
     Local,
-    /// A companion app over the remote bridge. `device` is the paired device name, or `None` for
-    /// the legacy shared `[remote] token`.
+    /// Identifies a remote bridge connection by its paired device name, or None for the shared
+    /// configuration token.
     Remote { device: Option<String> },
 }
 
-/// One client connection's streaming state — what THIS device is looking at. Replaces the old
+/// One client connection's streaming state - what THIS device is looking at. Replaces the old
 /// daemon-global viewport/focus slots so multiple devices can each hold their own view at once.
 pub struct ConnSession {
     /// Monotonic connection id (from [`crate::Ctx::next_conn`]); the key in `Ctx::sessions`.
     pub id: u64,
     pub kind: ConnKind,
-    /// Lanes this connection currently has visible — fast-polled for output.
+    /// Lanes this connection currently has visible - fast-polled for output.
     pub viewport: Mutex<Vec<LaneId>>,
     /// Which agent window the focused lane streams (Tab in Focus/Split), if a specific session is
     /// selected. Lanes not named here stream their first slot.
@@ -46,16 +39,10 @@ pub struct ConnSession {
     pub viewport_focus_at: Mutex<Option<Instant>>,
     /// Plain-terminal windows (`term-{lane}-{n}`) this connection has visible as Grid tiles.
     pub viewport_windows: Mutex<Vec<String>>,
-    /// Windows this connection byte-watches. std Mutex: read on the event-forward hot path.
-    /// (Populated by task A4; the field exists now so the struct is final.)
+    /// Tracks byte watches behind a synchronous mutex for event-forward filtering.
     pub watched_bytes: std::sync::Mutex<HashSet<String>>,
-    /// Snapshot of `(viewport lanes, viewport_windows)` used to filter `event.agent.output` on the
-    /// event-forward hot path. Deliberately duplicates the tokio `viewport`/`viewport_windows`
-    /// fields: those stay the source of truth for the async poll loop (`viewport_snapshot`), but
-    /// the forwarding loops must not `await`, so they read this std-Mutex mirror instead. The
-    /// `viewport.set` handler is the single writer and rewrites BOTH the tokio fields and this
-    /// snapshot together, so they never diverge. Empty at session creation, matching a connection
-    /// that has not yet asserted a viewport (it receives no output events).
+    /// Mirrors viewport filters behind a synchronous mutex for forwarding without await;
+    /// viewport.set updates both this snapshot and the async state.
     pub output_filter: std::sync::Mutex<(HashSet<LaneId>, HashSet<String>)>,
     /// When this connection last drove an agent (send_input/signal/key/scroll/answer, and a fit
     /// that actually applied). `agent.fit`'s remote-vs-remote arbitration is last-interaction-wins.
@@ -88,10 +75,7 @@ impl ConnSession {
     }
 }
 
-/// Drops a connection's [`ConnSession`] from `Ctx::sessions` when the connection task ends —
-/// including on an early `?`/`return` error path or a panic. `close_session` is async, so cleanup
-/// is spawned onto the runtime rather than awaited in `drop`. Both transports hold one of these
-/// for the life of a connection so no session ever outlives its socket.
+/// Schedules removal of per-connection session state on every exit path.
 pub struct SessionGuard {
     ctx: std::sync::Arc<crate::Ctx>,
     id: u64,

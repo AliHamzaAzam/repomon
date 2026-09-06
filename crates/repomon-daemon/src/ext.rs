@@ -23,12 +23,7 @@ pub fn claude_home() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().join(".claude"))
 }
 
-/// Accounts and agent ecosystem scopes to offer in the extensions picker:
-/// - Claude config dirs (main and variants)
-/// - Antigravity (`~/.gemini`)
-/// - Codex (`~/.codex`)
-/// - OpenCode (`~/.config/opencode`)
-/// - Cursor (`~/.cursor`)
+/// Lists supported agent accounts and ecosystem scopes for the extensions picker.
 pub fn ext_accounts() -> Vec<ExtAccount> {
     let default = default_config_base();
     let mut out: Vec<ExtAccount> = config_bases()
@@ -342,10 +337,7 @@ impl ClaudeCli {
         self.run_for(None, args)
     }
 
-    /// Like [`run`], but pinned to an account's config dir. `Some(dir)` sets `CLAUDE_CONFIG_DIR`;
-    /// `None` unsets it so the default `~/.claude` account is used regardless of the daemon's own
-    /// environment (the daemon is often started from a `claude-work` shell, which would otherwise
-    /// leak into a bare `claude` and target the wrong account).
+    /// Pins the selected config directory or unsets it to prevent inheritance from another account.
     pub fn run_for(&self, config_dir: Option<&Path>, args: &[&str]) -> Result<String, CliFailure> {
         let mut cmd = std::process::Command::new(&self.bin);
         cmd.args(args);
@@ -449,10 +441,7 @@ pub fn scan(
     }
 }
 
-/// Scans Antigravity's real extension/skill environment:
-/// - User skills from `~/.gemini/config/skills` and `~/.gemini/skills`
-/// - Project skills from `<repo>/.gemini/skills`, `<repo>/.gemini/config/skills`, `<repo>/.agents/skills`
-/// - User plugins from `~/.gemini/config/plugins` and `~/.gemini/plugins`
+/// Scans Antigravity user and project skills and user plugins.
 pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtSnapshot {
     let mut skills = Vec::new();
     let mut plugins = Vec::new();
@@ -604,10 +593,7 @@ pub fn scan_antigravity(repo_root: Option<&Path>, cli_version: Option<String>) -
     }
 }
 
-/// Scans OpenAI Codex extension environment:
-/// - User skills from `~/.codex/skills`
-/// - Project skills from `<repo>/.codex/skills`
-/// - User plugins from `~/.codex/plugins`
+/// Scans Codex user and project extensions.
 pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtSnapshot {
     let mut skills = Vec::new();
     let mut plugins = Vec::new();
@@ -722,10 +708,7 @@ pub fn scan_codex(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtS
     }
 }
 
-/// Scans OpenCode extension environment:
-/// - Global plugin[] and disabled_plugins[] from `~/.config/opencode/opencode.json`
-/// - Project plugin[] and disabled_plugins[] from `<repo>/opencode.json` or `<repo>/.opencode/opencode.json`
-/// - User & Project skills from `skills/` directories
+/// Scans OpenCode skills and enabled or disabled plugins in user and project configuration.
 pub fn scan_opencode(repo_root: Option<&Path>, cli_version: Option<String>) -> ExtSnapshot {
     let mut skills = Vec::new();
     let mut plugins = Vec::new();
@@ -1003,7 +986,7 @@ pub fn set_plugin_enabled(settings: &Path, id: &str, enabled: Option<bool>) -> i
     fs::rename(&tmp, settings)
 }
 
-/// Remove an installed plugin record from `installed_plugins.json` and from `enabledPlugins` in `settings.json`.
+/// Removes an installed plugin record and its enabled setting.
 pub fn clean_claude_plugin_records(
     claude_home: &Path,
     plugin_id: &str,
@@ -1024,11 +1007,9 @@ pub fn clean_claude_plugin_records(
         }
     }
 
-    // Also remove from global settings.json enabledPlugins
     let global_settings = claude_home.join("settings.json");
     let _ = set_plugin_enabled(&global_settings, plugin_id, None);
 
-    // If repo_root is provided, also remove from .claude/settings.local.json and settings.json
     if let Some(repo) = repo_root {
         let local_settings = repo.join(".claude/settings.local.json");
         let _ = set_plugin_enabled(&local_settings, plugin_id, None);
@@ -1114,7 +1095,6 @@ pub fn uninstall_claude_plugin(
         }
     }
 
-    // 3. Always clean up local records and cache cleanly
     let _ = clean_claude_plugin_records(claude_home, plugin_id, repo_root);
 
     if !outputs.is_empty() {
@@ -1316,7 +1296,7 @@ pub fn disable_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io:
     Ok(())
 }
 
-/// Remove an OpenCode plugin reference from `opencode.json` (removes from both plugin and disabled_plugins).
+/// Removes an OpenCode plugin from both active and disabled references.
 pub fn remove_opencode_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let raw_name = plugin_id.split('@').next().unwrap_or(plugin_id);
     let paths = match repo_root {
@@ -1442,7 +1422,7 @@ pub fn install_antigravity_plugin(plugin_ref: &str, repo_root: Option<&Path>) ->
     Ok(())
 }
 
-/// Remove an Antigravity plugin and clear its enabled settings.
+/// Removes an Antigravity plugin and its enabled settings.
 pub fn remove_antigravity_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let name = plugin_id.split('@').next().unwrap_or(plugin_id).trim();
     if let Some(dirs) = directories::BaseDirs::new() {
@@ -1545,7 +1525,7 @@ pub fn install_codex_plugin(plugin_ref: &str, repo_root: Option<&Path>) -> io::R
     Ok(())
 }
 
-/// Remove a Codex plugin and clear settings.
+/// Removes a Codex plugin and its settings.
 pub fn remove_codex_plugin(plugin_id: &str, repo_root: Option<&Path>) -> io::Result<()> {
     let name = plugin_id.split('@').next().unwrap_or(plugin_id).trim();
     if let Some(dirs) = directories::BaseDirs::new() {
@@ -1640,7 +1620,7 @@ pub fn install_cursor_extension(ext_ref: &str, repo_root: Option<&Path>) -> io::
     Ok(())
 }
 
-/// Remove a Cursor extension record and directory.
+/// Removes a Cursor extension record and directory.
 pub fn remove_cursor_extension(ext_id: &str, repo_root: Option<&Path>) -> io::Result<()> {
     if let Some(dirs) = directories::BaseDirs::new() {
         let cursor_dir = dirs.home_dir().join(".cursor");
@@ -1914,24 +1894,14 @@ pub fn delete_skill(
     }
 }
 
-/// Resolve `path` as canonically as possible without requiring it to exist: walk up to the
-/// nearest existing ancestor, canonicalize that ancestor, then rejoin the (possibly
-/// nonexistent) tail. Applying this to both sides of a comparison keeps them on the same
-/// footing when an ancestor is a symlink (e.g. macOS's `/var` -> `/private/var`), whether or
-/// not the full path exists yet. `pub(crate)`: also the basis for `files::worktree_path_allowed`
-/// (D1/D2's containment check for `file.list`/`file.read`/`file.write`), which needs the same
-/// not-yet-existing-tail tolerance for a not-yet-created file.
+/// Canonicalizes the nearest existing ancestor and rejoins a nonexistent tail, rejecting dangling
+/// symlinks so containment checks remain valid for new files.
 pub(crate) fn canonical_prefix(path: &Path) -> Option<PathBuf> {
     let mut probe = path.to_path_buf();
     let mut rest = Vec::new();
     while !probe.exists() {
-        // `Path::exists()` follows symlinks, so a DANGLING symlink (target doesn't exist yet)
-        // reads as absent here, same as a genuinely nonexistent future path component. Left
-        // unchecked, that lets a symlink to an as-yet-nonexistent outside location sail through
-        // this write-time guard and later resolve wherever the symlink points. Detect that case
-        // with `symlink_metadata`, which does NOT follow symlinks: if it succeeds, something
-        // (the symlink itself) really is here, dangling or not, so reject outright rather than
-        // treating it as a plain future component.
+        // A dangling symlink looks absent to exists() but can escape containment; reject it instead
+        // of treating it as a future path component.
         if probe.symlink_metadata().is_ok() {
             return None;
         }
@@ -2327,7 +2297,7 @@ mod tests {
             &["worktree", "add", wt1.to_str().unwrap(), "-b", "l1"],
         );
         set_plugin_enabled(&repo.join(".claude/settings.local.json"), "a@m", Some(true)).unwrap();
-        // Simulate a vanished worktree dir (git still lists it).
+
         std::fs::remove_dir_all(&wt1).unwrap();
 
         let summary = fan_out(&repo);
@@ -2356,10 +2326,8 @@ mod tests {
             &["worktree", "add", wt_gone.to_str().unwrap(), "-b", "gone"],
         );
 
-        // Write source settings to repo root.
         set_plugin_enabled(&repo.join(".claude/settings.local.json"), "a@m", Some(true)).unwrap();
 
-        // Remove wt_gone directory to simulate a mixed batch.
         std::fs::remove_dir_all(&wt_gone).unwrap();
 
         let summary = fan_out(&repo);
@@ -2369,7 +2337,7 @@ mod tests {
         assert!(wt_ok.join(".claude/settings.local.json").is_file());
     }
 
-    /// A fake `claude` CLI that prints `out`, prints `err` to stderr, and exits with `code` —
+    /// A fake `claude` CLI that prints `out`, prints `err` to stderr, and exits with `code` -
     /// a real runnable program on each OS (sh script on Unix, `.cmd` on Windows, where a
     /// shebang script is not executable and `CreateProcess` fails with error 193).
     fn fake_claude(dir: &Path, out: &str, err: &str, code: i32) -> ClaudeCli {
@@ -2657,7 +2625,6 @@ mod tests {
         assert!(p1.enabled);
         assert!(p1.installed);
 
-        // Disable plugin: should not delete, but mark disabled
         disable_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
         let snap2 = scan_for_account("opencode", Some(repo.path()), None);
         let p2 = snap2
@@ -2668,7 +2635,6 @@ mod tests {
         assert!(!p2.enabled);
         assert!(p2.installed);
 
-        // Re-enable plugin
         enable_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
         let snap3 = scan_for_account("opencode", Some(repo.path()), None);
         let p3 = snap3
@@ -2678,7 +2644,6 @@ mod tests {
             .unwrap();
         assert!(p3.enabled);
 
-        // Remove plugin completely
         remove_opencode_plugin("sample-tool@1.0.0", Some(repo.path())).unwrap();
         let snap4 = scan_for_account("opencode", Some(repo.path()), None);
         assert!(!snap4.plugins.iter().any(|p| p.name == "sample-tool"));
@@ -2700,7 +2665,6 @@ mod tests {
             .unwrap();
         assert!(p1.enabled);
 
-        // Disable via settings
         let settings = repo.path().join(".gemini/settings.json");
         set_plugin_enabled(&settings, "test-gem-plugin@antigravity", Some(false)).unwrap();
 
@@ -2712,7 +2676,6 @@ mod tests {
             .unwrap();
         assert!(!p2.enabled);
 
-        // Remove
         remove_antigravity_plugin("test-gem-plugin@antigravity", Some(repo.path())).unwrap();
         assert!(!plugin_dir.exists());
     }

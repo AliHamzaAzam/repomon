@@ -1,11 +1,5 @@
-//! The controller lane's recorded primary window can go stale: a later spawn into the lane
-//! (the operator's Spawn, or another `orchestrator.start` after a restart) unconditionally
-//! overwrites the record. When that later session ends while an earlier one in the same lane is
-//! still live, `repomind.status` and `repomind.instruct` must resolve to the live session rather
-//! than reporting, or typing into, a corpse.
-//!
-//! Every test here points `[repomind] home` at a tempdir and `tmux_session` at a throwaway `-L`
-//! session, so the operator's real `~/repomind` and `repomon` tmux session are never touched.
+//! Tests that a live controller repairs a stale primary-window record, using temporary home and
+//! backend namespaces.
 
 use std::path::Path;
 use std::process::Command;
@@ -72,12 +66,12 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
     let mut stream = connect_retry(&sock).await;
 
     let tmp = std::env::temp_dir();
-    // Window one: the genuine, still-running controller session.
+
     let w1 = ctx
         .backend
         .spawn(home.lane_id, &SpawnSpec::new("sleep 60", &tmp))
         .expect("spawn window one");
-    // Window two: a later spawn into the same lane — mirrors the operator's Spawn button (or a
+    // Window two: a later spawn into the same lane - mirrors the operator's Spawn button (or a
     // second `orchestrator.start` after a restart), which unconditionally records its own window
     // as "the" controller window.
     let w2 = ctx
@@ -107,7 +101,7 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
         "status must report the live window, not the stale record: {result}"
     );
 
-    // `repomind.instruct` reaches the live window despite the stale record — it must not report
+    // `repomind.instruct` reaches the live window despite the stale record - it must not report
     // "no controller is running" for a controller that plainly is.
     let instruct = call(
         &mut stream,
@@ -135,7 +129,7 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
         .output();
 }
 
-/// `repomind.status` reports `window: null` — not the stale record, not an error — when the
+/// `repomind.status` reports `window: null` - not the stale record, not an error - when the
 /// controller lane exists but nothing in it is currently live.
 #[tokio::test]
 async fn repomind_status_reports_null_window_when_nothing_is_live() {

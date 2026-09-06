@@ -1,12 +1,5 @@
-//! Registering the repomind home as a basic-memory project.
-//!
-//! Claude controllers already carry basic-memory's `search_notes` / `read_note` / `write_note`
-//! for the operator's mnemind vault. Adding the home as a second project means they reach the
-//! fleet's own memory with the same tools instead of a bespoke path.
-//!
-//! The daemon is a guest in that config file. It only ever adds the one project it owns, by
-//! asking the CLI to do it; it never rewrites the file itself, never changes the default
-//! project, and never removes anything.
+//! Registers the owned repomind project through the basic-memory CLI without rewriting
+//! configuration, changing defaults, or removing other projects.
 
 use std::path::{Path, PathBuf};
 
@@ -16,10 +9,7 @@ pub const PROJECT: &str = "repomind";
 /// basic-memory's own name for its config file inside the data directory.
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
-/// basic-memory's documented environment override for where its config and database live
-/// (`resolve_data_dir` in `basic_memory/config_models.py`: `BASIC_MEMORY_CONFIG_DIR`, then
-/// `XDG_CONFIG_HOME`, then `~/.basic-memory`). Exporting it is what makes an isolated daemon
-/// airtight: the daemon and the CLI it shells out to then read and write the same throwaway file.
+/// Isolates both CLI and daemon memory configuration from the operator’s account.
 pub const CONFIG_DIR_ENV: &str = "BASIC_MEMORY_CONFIG_DIR";
 
 /// What one registration pass decided. Returned so the caller logs a single line and a test can

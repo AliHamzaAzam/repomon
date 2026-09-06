@@ -1,7 +1,4 @@
-//! The daily LiteLLM price refresh: fetch, cache, and report status for `usage.rates` /
-//! `usage.refresh_rates`.
-//!
-//! This module owns refresh and publication. Ingest and queries only read the validated cache.
+//! Owns LiteLLM snapshot refresh and publication; ingest and queries only read the validated cache.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,13 +66,8 @@ pub fn is_due(last_attempt_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> boo
     }
 }
 
-/// Tracks the single ten-minute retry a caller schedules when a refresh leaves models unpriced.
-///
-/// Not persisted across a daemon restart: a restart is itself a fresh chance, and if the model is
-/// genuinely still unpriced the next `note_unpriced` call (from the next ledger read) schedules a
-/// new one anyway. One retry per gap, not a loop: `mark_fired` spends it even if the retry itself
-/// doesn't resolve the gap, so a permanently-unpriced model doesn't refetch every ten minutes
-/// forever.
+/// Tracks one retry per unpriced-model gap, consuming it even on failure so permanently unknown
+/// models cannot cause an endless refresh loop.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RetryTracker {
     pending: Option<DateTime<Utc>>,
@@ -118,15 +110,8 @@ impl RetryTracker {
     }
 }
 
-/// The daemon-held state behind `usage.rates` / `usage.refresh_rates`.
-///
-/// Only the in-memory, restart-safe-to-lose piece (the unpriced-model retry) lives here. The
-/// fetch metadata (etag / timestamps / last error) is not cached in `Ctx`; it's read fresh from
-/// disk on every `status()`/`run_refresh()` call instead, the same way `usage_ingest::price_table`
-/// re-reads its snapshot file rather than caching it in `Ctx`. That keeps `Ctx::new` free of disk
-/// I/O against the real data dir (tests construct a `Ctx` without an isolated `REPOMON_DATA_DIR`
-/// far more often than they set one), at the cost of one small file read per call, cheap next to
-/// the 24h cadence this is on.
+/// Holds disposable retry state while fetch metadata is read from disk on demand, keeping context
+/// construction free of data-directory I/O.
 #[derive(Default)]
 pub struct RatesRuntime {
     pub retry: RetryTracker,
@@ -297,10 +282,8 @@ pub async fn note_unpriced(ctx: &Arc<Ctx>, unpriced: bool) {
     }
 }
 
-/// The background task: once a day (and once at startup, since the cache starts stale), fetch the
-/// LiteLLM snapshot; between times, fire the one unpriced-model retry when it comes due. Reads
-/// `[usage] refresh_prices` fresh every tick, so toggling it at runtime takes effect within one
-/// poll interval without a daemon restart.
+/// Starts daily snapshot refresh and scheduled unpriced-model retries, rereading the refresh
+/// setting each poll.
 pub fn spawn_daily_task(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
         loop {
@@ -361,8 +344,6 @@ mod tests {
         chrono::Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
     }
 
-    // --- is_due / cache age ---
-
     #[test]
     fn a_never_attempted_cache_is_due() {
         assert!(is_due(None, at(2026, 9, 1, 0)));
@@ -391,8 +372,6 @@ mod tests {
         let now = at(2026, 9, 3, 0);
         assert!(is_due(Some(now - chrono::Duration::days(2)), now));
     }
-
-    // --- RetryTracker: the retry for unpriced models ---
 
     #[test]
     fn no_retry_is_scheduled_until_something_is_unpriced() {
@@ -449,8 +428,6 @@ mod tests {
         tracker.note_unpriced(now + chrono::Duration::hours(1));
         assert!(tracker.due(now + chrono::Duration::hours(1) + UNPRICED_RETRY_DELAY));
     }
-
-    // --- fetch(): a local TCP server stands in for LiteLLM, no real network in tests ---
 
     /// Serve one HTTP/1.1 response per accepted connection, in order, and report each request's
     /// `If-None-Match` header (empty string when absent) back over the channel.
@@ -533,8 +510,6 @@ mod tests {
         let (url, _rx) = spawn_http(vec![(500, vec![], b"boom".to_vec())]);
         assert!(fetch(&url, None).is_err());
     }
-
-    // --- status() shape, against a throwaway Ctx ---
 
     fn test_ctx() -> Arc<Ctx> {
         Ctx::new(

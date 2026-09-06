@@ -1,7 +1,4 @@
-//! `repomond` — the repomon background daemon.
-//!
-//! Opens the SQLite store, starts the file watcher, and serves the JSON-RPC API over a Unix
-//! socket until interrupted.
+//! Serves the JSON-RPC API over platform IPC with a persistent store and file watchers.
 
 use std::path::PathBuf;
 
@@ -62,11 +59,7 @@ async fn run() {
         .init();
 
     let mut config = Config::load().unwrap_or_default();
-    // Reflect a `--socket` override into the in-memory config: everything that later derives the
-    // socket from config — most importantly the orchestrator spawn path, which points the fleet
-    // MCP server (`repomond mcp`) back at the daemon via `REPOMON_MCP_SOCKET` — must name the
-    // socket this process actually binds, or repomind's MCP server connects to a socket nobody
-    // is listening on and dies during its initialize handshake.
+    // Keep derived MCP connection settings aligned with the endpoint this daemon actually binds.
     if let Some(sock) = &args.socket {
         config.socket_path = Some(sock.clone());
     }
@@ -91,10 +84,7 @@ async fn run() {
         tokio::spawn(async move { repomon_daemon::repomind::start(&ctx_r).await });
     }
 
-    // Watch registered repos; rebroadcast changes so clients can refresh. Done in a background
-    // task (and the watcher is owned by it) so the socket binds immediately — registering a
-    // recursive watch on a large tree like ~/.claude/projects can take a few seconds, and we
-    // don't want clients to see a "not running" gap while it sets up.
+    // Bind the socket while recursive watcher setup runs in the background.
     {
         let ctx_w = ctx.clone();
         tokio::spawn(async move {
@@ -119,12 +109,12 @@ async fn run() {
             }
             let mut rx = watcher.subscribe();
             // Hand the watcher to the shared context so repo.add / repo.remove can watch / unwatch
-            // a tree at runtime — otherwise the watch set only reflects startup, and a removed repo
+            // a tree at runtime - otherwise the watch set only reflects startup, and a removed repo
             // keeps churning fsevents until the next restart.
             *ctx_w.watcher.lock().await = Some(watcher);
             while let Ok(change) = rx.recv().await {
                 // Drop this worktree's cached git state so it re-walks (rate-limited) on the next
-                // list — the only thing that should trigger a fresh gix status walk.
+                // list - the only thing that should trigger a fresh gix status walk.
                 ctx_w.lanes.invalidate_state(&change.path);
                 ctx_w.broadcast(
                     "event.repo.changed",
@@ -139,7 +129,7 @@ async fn run() {
         let ctx_t = ctx.clone();
         tokio::spawn(async move {
             let mut tick = interval(Duration::from_secs(60));
-            tick.tick().await; // fire immediately once, then every 60s
+            tick.tick().await;
             loop {
                 tick.tick().await;
                 ctx_t.broadcast("event.repo.changed", json!({ "path": null }));
@@ -147,28 +137,24 @@ async fn run() {
         });
     }
 
-    // Stream visible agents' output to subscribed TUIs.
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
-    // Sweep legacy pipe-panes from daemon versions before control-mode streaming: a pipe left on
-    // with no reader would make tmux buffer that pane's output in memory without bound.
+    // Clear unread pipe-panes so tmux cannot buffer their output indefinitely.
     tokio::spawn(repomon_daemon::bytes_stream::sweep(ctx.backend.clone()));
 
     // Stream the repomind orchestrator's pane to a watching command-center view (self-gates on a
     // running session + a watcher, so it's free until the orchestrator is opened).
     tokio::spawn(repomon_daemon::stream_orchestrator(ctx.clone()));
 
-    // Remote-access bridge (companion apps over Tailscale) — only when explicitly enabled
+    // Remote-access bridge (companion apps over Tailscale) - only when explicitly enabled
     // and a token exists; without both, no network listener is ever opened.
     {
         let remote = ctx.config.read().await.remote.clone();
         if remote.enabled {
             match remote.bind {
                 Some(bind) => {
-                    // Seed the auth cache (paired device tokens + the legacy config token) before
-                    // the listener accepts, so the first handshake matches against a current set.
-                    // Under the mutate lock for consistency with pair/revoke (nothing races here yet,
-                    // but the choke point stays uniform).
+                    // Seed authentication before accepting clients, under the mutation lock to
+                    // avoid publishing stale state.
                     {
                         let _guard = ctx.remote_mutate_lock.lock().await;
                         if let Err(e) = repomon_daemon::rpc::refresh_remote_tokens(&ctx).await {
@@ -177,11 +163,8 @@ async fn run() {
                     }
                     let ctx_r = ctx.clone();
                     tokio::spawn(async move {
-                        // Keep retrying, not just at startup: the bind is typically a Tailscale
-                        // IP, which isn't assignable until the tailnet interface is up — a
-                        // daemon started at login (or a Mac waking from sleep) raced it and the
-                        // bridge stayed dead until the next manual restart. Ok(()) means a
-                        // clean shutdown; any Err waits out a short delay and binds again.
+                        // Retry binding because the tailnet interface may become available after
+                        // daemon startup or wake.
                         loop {
                             match repomon_daemon::remote::serve_remote(ctx_r.clone(), &bind).await {
                                 Ok(()) => break,
@@ -209,7 +192,7 @@ async fn run() {
     ));
 
     // Daemon-side notification engine for subscribed clients (event.notification + optional push). Spawned
-    // unconditionally — it self-gates per tick on `[remote] enabled`, so flipping the config
+    // unconditionally - it self-gates per tick on `[remote] enabled`, so flipping the config
     // live (config.set) starts/stops it without a restart.
     tokio::spawn(repomon_daemon::notify_watch::notify_watch(ctx.clone()));
 
@@ -244,10 +227,6 @@ async fn run() {
     // cache starts stale, so this also covers "fetch at daemon start when older than 24h".
     repomon_daemon::usage_rates::spawn_daily_task(ctx.clone());
 
-    // Reap orphaned `lane-<id>` windows whose id no longer maps to the worktree they claim —
-    // leftovers from a re-registered worktree or a store reset the long-lived tmux server
-    // outlived. Sweeps immediately on startup, then slowly, so phantom "exited" sessions
-    // (idle `claude` processes that never exit on their own) clean themselves up.
     tokio::spawn(repomon_daemon::reap::reap_watcher(ctx.clone()));
 
     // Index commit history in the background (timeline / sessions / search).
@@ -258,7 +237,6 @@ async fn run() {
         });
     }
 
-    // Graceful shutdown on Ctrl-C / SIGTERM.
     {
         let ctx_s = ctx.clone();
         tokio::spawn(async move {
@@ -274,7 +252,7 @@ async fn run() {
     }
 }
 
-/// `repomond mcp` — serve the MCP protocol over stdio for the repomind orchestrator.
+/// `repomond mcp` - serve the MCP protocol over stdio for the repomind orchestrator.
 async fn run_mcp(socket_override: Option<PathBuf>) {
     // Logs to stderr only: stdout carries the newline-delimited MCP JSON-RPC stream.
     tracing_subscriber::fmt()

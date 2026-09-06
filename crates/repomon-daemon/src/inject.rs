@@ -1,9 +1,5 @@
-//! Single verified-injection module for supervision actions.
-//!
-//! Spec constraint: ALL supervision pane interaction goes through ONE module with pre-send
-//! state re-verification; no supervision code may call send-keys anywhere else; and NO supervision
-//! action may ever be unlogged — every attempt, including skips and failures, writes exactly one
-//! `supervision_log` row and broadcasts `event.supervision.acted`.
+//! Routes supervision input through fresh state verification and records exactly one audit row and
+//! event per attempt, including skips and failures.
 
 use std::time::{Duration, Instant};
 
@@ -144,7 +140,6 @@ pub async fn verified_send_with_timeout(
     seed: AuditSeed,
     capture_timeout: Duration,
 ) -> SendOutcome {
-    // 1. Latch check
     let fingerprint = expectation_fingerprint(&expect, &payload);
     {
         let latch = ctx.inject_latch.lock().await;
@@ -161,7 +156,6 @@ pub async fn verified_send_with_timeout(
         }
     }
 
-    // 2. Fresh capture
     let window = seed.window.clone();
     let backend = ctx.backend.clone();
     let capture_result = tokio::time::timeout(
@@ -206,15 +200,13 @@ pub async fn verified_send_with_timeout(
 
     let excerpt = Some(tail_chars(&pane_text, 800).to_string());
 
-    // 3. Detect dialog and usage limit
     let dialog_opt = detect_dialog(&pane_text);
     let limit_opt = detect_usage_limit(&pane_text);
 
-    // 4. Verify expectation
     match &expect {
         Expectation::DialogSummary(expected_summary) => match dialog_opt {
             Some(ref d) if &d.summary() == expected_summary => {
-                // Expectation met
+                // Only an unchanged dialog may receive the preselected keys.
             }
             Some(ref d) => {
                 return finish(
@@ -273,7 +265,6 @@ pub async fn verified_send_with_timeout(
         }
     }
 
-    // 5. Send
     let recorded_keys = match &payload {
         Payload::Keys(keys) => {
             let send_keys = keys.clone();
@@ -338,17 +329,14 @@ pub async fn verified_send_with_timeout(
         }
     };
 
-    // 6. Mark input and invalidate overlay
     crate::rpc::mark_input(ctx, seed.lane_id, &seed.window).await;
     ctx.invalidate_overlay().await;
 
-    // 7. Latch stamp
     ctx.inject_latch
         .lock()
         .await
         .insert(seed.window.clone(), (fingerprint, Instant::now()));
 
-    // 8-9. Audit and broadcast
     finish(ctx, seed, excerpt, InternalOutcome::Sent(recorded_keys)).await
 }
 
@@ -984,12 +972,11 @@ mod tests {
             other => panic!("expected Skipped(LatchHeld), got {:?}", other),
         }
 
-        // Only the first send's keys reached the backend
         assert_eq!(backend.sent_keys.lock().unwrap().len(), 2);
 
         let log = ctx.store.supervision_log(None, 10, None).await.unwrap();
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].outcome, "skipped"); // newest first
+        assert_eq!(log[0].outcome, "skipped");
         assert_eq!(log[1].outcome, "sent");
     }
 
@@ -1034,7 +1021,6 @@ mod tests {
         ]));
         let ctx = make_ctx(backend.clone());
 
-        // 1. Sent (keys)
         let s1 = verified_send(
             &ctx,
             Expectation::DialogSummary("Bash command — Do you want to proceed?".into()),
@@ -1044,7 +1030,6 @@ mod tests {
         .await;
         assert!(matches!(s1, SendOutcome::Sent { .. }));
 
-        // 2. Sent (line)
         let s2 = verified_send(
             &ctx,
             Expectation::IdleNoDialog,
@@ -1054,7 +1039,6 @@ mod tests {
         .await;
         assert!(matches!(s2, SendOutcome::Sent { .. }));
 
-        // 3. Skipped (StateChanged)
         let s3 = verified_send(
             &ctx,
             Expectation::DialogSummary("Bash command — Do you want to proceed?".into()),
@@ -1070,7 +1054,6 @@ mod tests {
             }
         ));
 
-        // 4. Skipped (DialogPresent)
         let s4 = verified_send(
             &ctx,
             Expectation::IdleNoDialog,
@@ -1086,7 +1069,6 @@ mod tests {
             }
         ));
 
-        // 5. Skipped (UsageLimitMenu)
         let s5 = verified_send(
             &ctx,
             Expectation::IdleNoDialog,
@@ -1102,7 +1084,6 @@ mod tests {
             }
         ));
 
-        // 6. Skipped (LatchHeld)
         let s6 = verified_send(
             &ctx,
             Expectation::IdleNoDialog,
@@ -1118,7 +1099,6 @@ mod tests {
             }
         ));
 
-        // 7. Failed (backend send error)
         let fail_backend = Arc::new(
             ScriptedBackend::new(vec![DIALOG_A.to_string()]).with_send_error("tmux pipe broke"),
         );
@@ -1132,7 +1112,6 @@ mod tests {
         .await;
         assert!(matches!(s7, SendOutcome::Failed { .. }));
 
-        // 8. Held
         let held_id = record_hold(&ctx, test_seed("lane-7")).await;
         assert!(held_id > 0);
 

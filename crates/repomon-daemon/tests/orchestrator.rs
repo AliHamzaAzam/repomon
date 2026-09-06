@@ -1,10 +1,5 @@
-//! Orchestrator lifecycle: a genuine `orchestrator.start` (no window pre-exists) must record the
-//! requested autonomy on the session; a tmux window named `orchestrator` that survives a daemon
-//! (re)start must be adopted by `orchestrator.start` rather than duplicated, with its autonomy
-//! read back as unknown (the prior process's request is gone); and a window killed out from
-//! under the daemon must be reconciled away instead of read as still running. The spawned
-//! `claude` process itself is never exercised (nothing here waits on or inspects it) — only the
-//! daemon's own spawn/adopt/reconcile bookkeeping.
+//! Tests orchestrator spawn, adoption, autonomy bookkeeping, and reconciliation with fixture
+//! processes rather than live agents.
 
 use std::process::Command;
 use std::time::Duration;
@@ -80,36 +75,25 @@ async fn orchestrator_adopts_a_surviving_window() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // A genuine `orchestrator.start` below writes its `--mcp-config` file under
-    // `config::config_dir()`; redirect that to a tempdir so the test doesn't touch the
-    // developer's real `~/.config/repomon`. Safe to mutate process env here — this is the only
-    // test in this integration binary.
+    // Redirect MCP configuration writes to a temporary directory; this integration binary has one
+    // test, so environment mutation is isolated.
     let cfg_home = tempfile::tempdir().expect("tempdir");
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", cfg_home.path());
     }
-    // Point the genuine-spawn scenario below at a harmless custom "agent" instead of real
-    // `claude` — this is a dev machine running Claude Code, so `claude` is almost certainly on
-    // PATH, and we do NOT want a test to launch a real autonomous session wired to the fleet MCP
-    // tools. `build_orchestrator_command` always appends `--mcp-config ... --append-system-prompt
-    // ... --allowedTools ... --session-id ...`; `true` ignores all arguments and exits 0, so it
-    // exercises the real `orchestrator_base_command`/`build_orchestrator_command`/
-    // `tmux.spawn_named` path safely.
+    // A harmless stand-in exercises launch flags without starting a real autonomous agent wired to
+    // fleet tools.
     {
         let mut cfg = ctx.config.write().await;
         cfg.agents.insert("noop".to_string(), "true".to_string());
     }
 
-    // 2. Nothing tracked yet.
     let r = call(&mut stream, 1, "orchestrator.status", None).await;
     let status = r.result.unwrap();
     assert_eq!(status["running"], json!(false), "status: {status}");
 
-    // 2b. A genuine start (no window pre-exists, so this hits the real spawn path rather than
-    // adopt) records the requested autonomy on the session in `orchestrator.start`'s own
-    // response. (Not asserted via a follow-up `orchestrator.status`: `true` — deliberately
-    // chosen so this doesn't launch a real `claude` — exits immediately, and `orchestrator.status`
-    // reconciles a since-vanished window away, which would flakily race this check.)
+    // Read autonomy from the start response because the stand-in exits immediately and a later
+    // status call may reconcile it away.
     let r = call(
         &mut stream,
         2,
@@ -126,7 +110,7 @@ async fn orchestrator_adopts_a_surviving_window() {
     assert_eq!(status["running"], json!(true), "status: {status}");
     assert_eq!(status["autonomy"], json!("supervised"), "status: {status}");
     // A genuine spawn always mints and pins a `--session-id`, appended to `true`'s command line
-    // (which — deliberately — ignores it, exiting 0 regardless); the daemon still records it so
+    // (which - deliberately - ignores it, exiting 0 regardless); the daemon still records it so
     // the transcript picker can pin to this exact session instead of guessing by recency.
     let session_id = status["session_id"]
         .as_str()
@@ -136,9 +120,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         36,
         "session_id must be UUID-shaped: {session_id}"
     );
-    // The genuine spawn lands in the controller lane, not the old daemon-owned `orchestrator`
-    // window: the window is a `lane-*` name, and `lane.list` shows that lane with role
-    // "controller" and the running window recorded on it.
+    // The spawned controller must appear in lane.list with its recorded managed window.
     let window = status["window"].as_str().expect("a window").to_string();
     assert!(
         window.starts_with("lane-"),
@@ -173,7 +155,7 @@ async fn orchestrator_adopts_a_surviving_window() {
     let status = r.result.unwrap();
     assert_eq!(status["running"], json!(false), "status: {status}");
 
-    // 3. Spawn a fake orchestrator window directly via the same TmuxRuntime the daemon uses —
+    // 3. Spawn a fake orchestrator window directly via the same TmuxRuntime the daemon uses -
     // as if a window from a previous daemon lifetime survived a restart.
     let home = std::env::temp_dir();
     ctx.backend
@@ -224,7 +206,6 @@ async fn orchestrator_adopts_a_surviving_window() {
     .await;
     assert!(r.error.is_none(), "send_input errored: {:?}", r.error);
 
-    // 6. Kill the window out from under the daemon.
     ctx.backend
         .kill_named("orchestrator")
         .expect("kill fake orchestrator window");

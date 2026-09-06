@@ -1,15 +1,5 @@
-//! A6 design call, made explicit: on a broadcast, `reply_to` is not given any special multi-
-//! recipient handling — it's passed through unchanged to `send_message` for every expansion
-//! result, exactly like `body`. `send_message` already requires a reply to reverse the parent
-//! message's sender/recipient pair, so on a fan-out only the one address (if any) that's the
-//! actual other party in that thread accepts the reply; every other address reports a
-//! `delivery_error` instead of silently misfiling the reply or aborting the whole send.
-//!
-//! Kept in its own file/process (not folded into `fleet_mail_broadcast.rs`) for two independent
-//! reasons: it mutates process-wide `PATH`/`XDG_CONFIG_HOME` env vars like `fleet_mail_invariant.rs`
-//! (safe only with exactly one test per file), and it needs its own budget against
-//! `send_message`'s per-sender rate limit (ten sends per rolling minute) rather than sharing one
-//! with that file's six broadcast scenarios.
+//! Verifies that broadcast replies are accepted only by the reverse partner of the parent message.
+//! Process isolation protects environment changes and sender rate-limit budgets.
 
 use std::process::Command;
 use std::time::Duration;
@@ -183,7 +173,6 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
     let addr_a2 = format!("lane-{lane_a}/2");
     let addr_b1 = format!("lane-{lane_b}/1");
 
-    // Seed a thread: lane-A/1 -> lane-B/1.
     let seed = call(
         &mut stream,
         20,

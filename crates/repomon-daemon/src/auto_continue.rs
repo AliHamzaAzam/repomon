@@ -1,14 +1,5 @@
-//! Auto-continue agents that pause on a usage limit.
-//!
-//! Claude's transcript doesn't record usage-limit pauses, so we detect them by reading each
-//! managed agent's tmux pane (`repomon_core::agent::detect_usage_limit`). When an agent is
-//! blocked we schedule a resume — at the parsed reset time if known, else on a periodic retry —
-//! and type the configured continue message (`continue` + Enter). The decision is a pure
-//! function ([`decide`]) so the state machine is unit-tested; the loop only does the IO.
-//!
-//! Runs in the daemon regardless of whether a TUI is attached, so agents you left running get
-//! resumed even with repomon closed. Only repomon-managed lanes (with a tmux window) are
-//! touched — external sessions have no window to send keys to.
+//! Detects quota holds from managed panes and schedules continuation at the reset deadline. It runs
+//! without a desktop connection and never sends keys to external windows.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,18 +18,11 @@ const RETRY_MIN: i64 = 5; // retry cadence after a known reset time, or when a s
 const UNKNOWN_RETRY_MIN: i64 = 20; // coarse retry when no reset time is known (don't spam)
 const GIVE_UP_AFTER_HOURS: i64 = 6; // stop this long after first detecting the pause (>5h window)
 const SEND_COOLDOWN_SECS: i64 = 90; // suppress re-detect of the stale on-screen message
-const RESET_BUFFER_SECS: i64 = 60; // resume a little after the stated reset, never before
-// Hard ceiling on a single lane's pane capture. The per-lane scan is serialized, so without a
-// timeout one wedged tmux pane (a hung tmux server, a stuck `capture-pane`) would freeze
-// auto-continue for *every* lane. On a timeout we skip that lane this tick and move on; the
-// orphaned blocking capture is left to finish on its own. Mirrors `usage_watch`'s PROBE_TIMEOUT.
+const RESET_BUFFER_SECS: i64 = 60; // Bound each serialized capture so one wedged backend cannot stall continuation for every lane; a
+// timed-out blocking capture may still finish later.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
-// Consecutive ticks with no limit message before we believe the pause is really gone. The
-// detection is a pane screen-scrape (`detect_usage_limit`) that misfires for a tick when the
-// menu redraws or scrolls; clearing on a single miss flips the public status RateLimited→running
-// and back, re-firing the rate-limit / resumed notifications repeatedly across the multi-hour
-// pause. Requiring two consecutive misses (~40s at the 20s TICK) rides out a single flaky capture;
-// a genuine resume keeps the menu gone, so the real Clear lags by only one tick.
+// Require consecutive misses so a transient redraw does not clear a quota hold and re-fire
+// notifications.
 const CLEAR_AFTER_MISSES: u8 = 2;
 
 /// The public view of one agent window's rate-limit pause, read by `overlay_agents` for the TUI.
@@ -54,7 +38,7 @@ pub struct RateLimit {
 /// The watcher's private scheduling state for one lane.
 #[derive(Debug, Clone)]
 struct Sched {
-    /// When the pause was first detected — gives the wall-clock give-up horizon.
+    /// When the pause was first detected - gives the wall-clock give-up horizon.
     started: DateTime<Utc>,
     /// The parsed reset time, if any (drives the retry cadence: precise vs coarse).
     reset_at: Option<DateTime<Utc>>,
@@ -85,9 +69,9 @@ enum Action {
     },
     /// Type the continue message now.
     Send,
-    /// Waited too long without resuming — stop and surface needs-you.
+    /// Waited too long without resuming - stop and surface needs-you.
     GiveUp,
-    /// The pause is gone — the agent resumed.
+    /// The pause is gone - the agent resumed.
     Clear,
     Nothing,
 }
@@ -134,7 +118,7 @@ fn decide(
                 if s.cooldown_until.map(|c| now < c).unwrap_or(false) {
                     return Action::Nothing;
                 }
-                // Pick "Stop and wait for limit to reset" once, before ever typing `continue` —
+                // Pick "Stop and wait for limit to reset" once, before ever typing `continue` -
                 // otherwise the continue text would land in the menu. The pane was captured
                 // moments ago, so the parsed positions reflect what's actually on screen.
                 if let Some(menu) = lim.menu.as_ref().filter(|_| !s.menu_confirmed) {
@@ -149,7 +133,7 @@ fn decide(
                 }
             }
         },
-        // No limit message on screen — if we were tracking one, the agent *may* have resumed, but
+        // No limit message on screen - if we were tracking one, the agent *may* have resumed, but
         // the detection flaps, so only believe it once the message has been gone for a couple of
         // consecutive ticks (the loop bumps `miss_streak`). A single miss is treated as noise.
         None => match current {
@@ -160,10 +144,8 @@ fn decide(
     }
 }
 
-/// Managed agent windows with their lane ids — EVERY slot window (`lane-7`, `lane-7-2`, …) is a
-/// separate entry, scanned and typed-at individually. Collapsing a lane's slots to one entry
-/// only fixed enumeration: the per-lane capture still read slot 1's pane, so a rate-limit pause
-/// in slot 2+ never reached `detect_usage_limit` and the agent never auto-resumed.
+/// Capture every managed slot independently because a lane can contain multiple agents with
+/// different prompts.
 fn managed_windows(names: Vec<String>) -> Vec<(String, LaneId)> {
     let mut windows: Vec<(String, LaneId)> = names
         .into_iter()
@@ -240,7 +222,7 @@ pub async fn auto_continue_watcher(ctx: Arc<Ctx>) {
 
 /// Perform the IO for a decided action and update both the private schedule and the public
 /// rate-limit view (which the TUI reads via `overlay_agents`). All keys and text go to the
-/// specific slot `window` the pause was detected in — never the lane's first slot.
+/// specific slot `window` the pause was detected in - never the lane's first slot.
 async fn apply(
     ctx: &Arc<Ctx>,
     sched: &mut HashMap<String, Sched>,
@@ -280,7 +262,7 @@ async fn apply(
             );
         }
         Action::ChooseWait { keys } => {
-            // Walk the cursor to "Stop and wait …" and confirm — the exact keys were derived
+            // Walk the cursor to "Stop and wait …" and confirm - the exact keys were derived
             // from the menu's on-screen positions. A short gap between keys lets the menu's
             // renderer keep up with repeated arrows.
             let tmux = ctx.backend.clone();
@@ -415,7 +397,7 @@ mod tests {
 
     #[test]
     fn waits_until_next_attempt() {
-        let s = sched(120, false, None); // attempt is in the future
+        let s = sched(120, false, None);
         assert_eq!(
             decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Nothing
@@ -433,7 +415,7 @@ mod tests {
 
     #[test]
     fn cooldown_suppresses_send() {
-        let s = sched(-1, false, Some(60)); // due, but cooling down
+        let s = sched(-1, false, Some(60));
         assert_eq!(
             decide(Some(&s), Some(&lim(None, None)), true, now()),
             Action::Nothing
@@ -462,7 +444,7 @@ mod tests {
     #[test]
     fn single_missed_detection_does_not_clear() {
         // One tick with the limit message absent (miss_streak just bumped to 1) is treated as a
-        // flaky capture, not a resume — clearing here is what re-fired RateLimited/Resumed in a
+        // flaky capture, not a resume - clearing here is what re-fired RateLimited/Resumed in a
         // loop across the pause.
         let mut s = sched(-1, false, None);
         s.miss_streak = 1;
@@ -479,10 +461,7 @@ mod tests {
 
     #[test]
     fn confirms_menu_before_continue() {
-        // The interactive menu is up and we haven't chosen yet: select the wait option, don't
-        // type `continue` — even though a send is otherwise due. The wait option here is row 2
-        // with the cursor on row 0 (the options move around), so the keys walk down to it: a
-        // blind Enter would have confirmed the wrong option.
+        // Choose the parsed wait option before continuing; menu positions are not fixed.
         let mut s = sched(-1, false, None);
         s.menu_confirmed = false;
         assert_eq!(
@@ -509,21 +488,16 @@ mod tests {
     #[test]
     fn does_not_reconfirm_menu_once_chosen() {
         // Menu text still on screen but already confirmed → proceed to send `continue`.
-        let s = sched(-1, false, None); // menu_confirmed: true by default
+        let s = sched(-1, false, None);
         assert_eq!(
             decide(Some(&s), Some(&lim(None, Some(menu_at(0)))), true, now()),
             Action::Send
         );
     }
 
-    /// The lane-id extraction `managed_lanes` runs over each window name: it must keep slot
-    /// windows (`lane-7-2`, …) — the old `strip_prefix("lane-").parse()` dropped them, so a
+    /// Managed-lane extraction must include numbered slot windows.
     #[test]
     fn managed_windows_scans_every_slot_window() {
-        // Every slot window is scanned individually: collapsing a lane's slots to one entry made
-        // the watcher read only slot 1's pane, so a rate-limit pause in slot 2+ was invisible
-        // (the message never reached `detect_usage_limit`) and the lane never auto-resumed.
-        // Non-lane windows (terminals, the usage probe) and malformed names are ignored.
         let names = [
             "lane-3",
             "lane-3-2",

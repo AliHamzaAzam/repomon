@@ -1,12 +1,5 @@
-//! Windows-native agent runtime, end to end — the `tests/integration.rs` flows without tmux.
-//!
-//! Each test gets its own session name and registry data dir (tempdir), spawns real
-//! `repomon-agent-host.exe` processes (built by `cargo test --workspace`; the backend finds
-//! the binary one directory above the test executable in `target\debug`), and drives them
-//! through the `SessionBackend` trait exactly as the daemon does: spawn (cmd.exe stand-ins
-//! for agents), capture, input, kill, stale-entry GC, owner back-off, byte streaming, and —
-//! the point of the host architecture — re-adoption of live hosts by a fresh backend, which
-//! is what a daemon restart does.
+//! Exercises isolated Windows hosts with command-shell stand-ins, covering spawn, I/O, cleanup, and
+//! adoption.
 
 #![cfg(windows)]
 
@@ -45,7 +38,7 @@ fn capture(b: &WindowsBackend, window: &str) -> String {
 }
 
 /// A cmd.exe stand-in for an agent: prints `marker`, then sits at an interactive prompt
-/// (`/K`), alive until killed — the Windows analogue of `sh -c 'echo X; sleep 30'`.
+/// (`/K`), alive until killed - the Windows analogue of `sh -c 'echo X; sleep 30'`.
 fn echo_agent(marker: &str, cwd: &Path) -> SpawnSpec {
     SpawnSpec::new(format!("cmd.exe /Q /K echo {marker}"), cwd)
 }
@@ -87,7 +80,7 @@ fn spawn_capture_input_kill_roundtrip() {
     });
 
     // Kill is exact: lane-1 dies, lane-1-2 survives, and the dead window reads as empty
-    // output (benign absence — capture parity with the tmux impl).
+    // output (benign absence - capture parity with the tmux impl).
     b.kill_named("lane-1").unwrap();
     wait_for("lane-1 gone", || {
         b.windows_for(1).unwrap() == vec!["lane-1-2"]
@@ -139,7 +132,6 @@ fn re_adopts_live_hosts_after_a_daemon_restart() {
     assert_eq!(acts[0].cwd, dir.path());
     assert!(acts[0].last_activity > 0);
 
-    // And the re-adopted window is fully drivable.
     second
         .send_text_named("lane-1", "echo AFTER_RESTART")
         .unwrap();
@@ -174,8 +166,8 @@ fn stale_registry_entries_are_garbage_collected() {
     assert!(!stale.exists(), "dead-pipe entry was GC'd by the scan");
 }
 
-/// PROTOCOL.md §6: another daemon's hosts are invisible and untouchable — never adopted,
-/// reaped, or killed — and the registry-level owner stamp locks the second daemon out of
+/// PROTOCOL.md §6: another daemon's hosts are invisible and untouchable - never adopted,
+/// reaped, or killed - and the registry-level owner stamp locks the second daemon out of
 /// destructive sweeps.
 #[test]
 fn foreign_owned_hosts_are_backed_off_from() {
@@ -196,11 +188,10 @@ fn foreign_owned_hosts_are_backed_off_from() {
     // A's host never shows up in B's world: not listed, not adopted...
     assert!(b.list_windows().unwrap().is_empty());
     assert!(b.list_windows_with_activity().unwrap().is_empty());
-    // ...and its registry entry is NOT GC'd — the pipe is alive, just not B's.
+    // ...and its registry entry is NOT GC'd - the pipe is alive, just not B's.
     let entry = dir.path().join("hosts").join(&session).join("lane-1.json");
     assert!(entry.exists());
 
-    // The rightful owner still sees and controls it.
     assert_eq!(a.list_windows().unwrap(), vec!["lane-1"]);
     a.kill_named("lane-1").unwrap();
     wait_for("owner killed its host", || {
@@ -246,7 +237,6 @@ fn byte_stream_replays_then_follows_live_output() {
     // Frame 1 is a full-screen replay: output from BEFORE the subscription is in the stream.
     wait_for("replay frame", || text(&got).contains("STREAM_START"));
 
-    // Live output follows.
     b.send_text_named("lane-1", "echo STREAM_LIVE").unwrap();
     wait_for("live frames", || text(&got).contains("STREAM_LIVE"));
 

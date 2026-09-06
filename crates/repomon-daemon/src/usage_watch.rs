@@ -1,17 +1,5 @@
-//! Probing agent usage screens (Claude `/usage`, Codex `/status`) for the TUI's corner indicator.
-//!
-//! Subscription usage has no CLI flag, file, or supported endpoint, so per account this watcher
-//! spawns a hidden throwaway session, drives it to the prompt (accepting the one-time folder-trust
-//! prompt), sends the usage command, captures the pane, parses it
-//! ([`repomon_core::agent::parse_usage`] / [`parse_codex_status`]), then kills the window. Results
-//! land in [`Ctx::usage`] for the `usage.get` RPC, keyed so the TUI can attribute usage to the
-//! focused agent's account (Claude config dir, or `"codex"`).
-//!
-//! It is opt-in and frugal: nothing runs unless `[usage_probe]` is enabled AND a local UI is
-//! attached; it re-probes only every few minutes and never sends a model prompt (just the usage
-//! command + Esc). Probe windows are named `usage-probe-…` (not `lane-…`) and run in a neutral cwd,
-//! so they never pollute repomon's own lane/agent detection. The parsing is the pure, fixture-
-//! tested part; this module is the IO around it. See `docs/agents.md`.
+//! Probes account usage in isolated hidden windows when enabled and a local UI is connected.
+//! Neutral working directories and non-lane window names keep probes out of the fleet.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,18 +25,11 @@ const REFRESH: Duration = Duration::from_secs(300);
 /// How long since the local UI's last request before we treat it as gone and stop probing (we
 /// keep the last reading so reopening shows it instantly).
 const LOCAL_TTL: Duration = Duration::from_secs(60);
-/// Hard ceiling on a single probe. One normally finishes in well under 35s; if a `tmux` call ever
-/// hangs (a wedged tmux server, an agent that never reaches its prompt), abandon the probe rather
-/// than let it `await` forever — otherwise one stuck probe freezes the whole watcher and every
-/// account's usage goes stale (the bug this guards against).
+/// Bound each probe so a hung account cannot freeze usage updates for every account.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(75);
 
-/// Cooperative cancellation for a blocking probe. A probe runs on a `spawn_blocking` thread that
-/// the watcher stops `await`ing once [`PROBE_TIMEOUT`] elapses, but that thread keeps executing —
-/// sleeping and sending keys to tmux. Without a way to tell it to stop, those abandoned threads
-/// pile up (one per stuck round). [`probe_once`] polls this between its sleep/retry steps and
-/// self-aborts once the deadline passes or the watcher flips the flag, so it dies promptly instead
-/// of running to completion.
+/// Blocking probes must poll cancellation because timing out their await does not stop the thread
+/// or its later key sends.
 #[derive(Clone)]
 struct Cancel {
     deadline: Instant,
@@ -272,36 +253,22 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
         }
 
         let accounts = accounts();
-        // Cache-retention key set: every *installed* account (has a Claude config dir with
-        // history, or `~/.codex`/`~/.gemini` present), independent of whether its kind has a
-        // live session this round. Gating below only skips the expensive probe IO for inactive
-        // kinds - it must never also evict that account's last reading, or the TUI's usage
-        // corner would blank the instant an agent of that kind exits instead of just going
-        // stale. Locked in by `gating_does_not_evict_cache_for_inactive_kind` below.
+        // Retain installed accounts’ last readings even when an inactive kind skips probing.
         let live: HashSet<String> = accounts.iter().map(|a| a.key.clone()).collect();
 
-        // Only probe an agent kind when the fleet currently has a lane session of that kind -
-        // probing spawns a full hidden CLI session per account, so this is the expensive part
-        // this gate exists to skip. One `list_windows_meta` call for the whole round, not one
-        // per account.
+        // Probe only active agent kinds because each account requires an expensive hidden CLI
+        // session.
         let backend = ctx.backend.clone();
         let active = match tokio::task::spawn_blocking(move || backend.list_windows_meta()).await {
             Ok(Ok(windows)) => {
                 let mut active = active_kinds(&windows);
-                // Widen with agent kinds detected running OUTSIDE tmux (a `claude`/`codex`
-                // started in the user's own terminal, not one repomon spawned) - those show in
-                // the sidebar with usage attribution too, so an active external session should
-                // keep its kind's probe alive the same as a managed lane window does. See
-                // `external_active_kinds` for why this is a cheap, best-effort cache read
-                // rather than a fresh scan.
+                // External active sessions also justify probing their agent kind.
                 active.extend(external_active_kinds(&ctx).await);
                 Some(active)
             }
             Ok(Err(e)) => {
-                // Fail OPEN: probe every account this round rather than gate on a listing we
-                // couldn't get. A transient backend error then costs one round of the old
-                // always-probe behavior instead of leaving usage stuck stale indefinitely
-                // because we can no longer tell what's active.
+                // Probe all accounts when window listing fails so a transient backend error cannot
+                // leave usage stale indefinitely.
                 tracing::warn!(
                     "usage watcher: list_windows_meta failed ({e}); probing all accounts this round"
                 );
@@ -363,10 +330,7 @@ pub async fn usage_watcher(ctx: Arc<Ctx>) {
                 );
             }
         }
-        // Retain against `live` (installed accounts), not `active` (this round's gate) - an
-        // account whose kind was skipped this round keeps its last reading untouched until it
-        // drops out of `accounts()` entirely (e.g. its Claude config dir goes unused, or
-        // `~/.codex` is removed).
+        // Retain readings for installed accounts even when their kind was inactive this round.
         ctx.usage.lock().await.retain(|k, _| live.contains(k));
         last_round = Some(Instant::now());
         finish_round(
@@ -481,11 +445,8 @@ fn accounts() -> Vec<Account> {
         .filter(|base| base.join("projects").is_dir())
         .map(|base| {
             let cfg_dir = (base != default).then(|| base.clone());
-            // `launch_command` is immune to the daemon's own env: the default account unsets
-            // CLAUDE_CONFIG_DIR (`env -u …`) while variants pin their dir. A bare `claude` here
-            // would instead inherit the daemon's CLAUDE_CONFIG_DIR (it's started from a claude-work
-            // shell) and probe the wrong account, making two accounts read as one.
-            // `account_key`/`account_label` stay keyed on `cfg_dir`, so identity is intact.
+            // Use account-isolated launch commands so inherited CLAUDE_CONFIG_DIR cannot redirect
+            // the default account’s probe.
             let command = agent::claude::launch_command(&base);
             Account {
                 key: agent::claude::account_key(cfg_dir.as_deref()),
@@ -512,30 +473,14 @@ fn accounts() -> Vec<Account> {
     out
 }
 
-/// The agent kinds currently running in the fleet, derived from lane windows only. This is the
-/// gate [`account_is_active`] checks against: usage probing is opt-in *and* frugal, so an agent
-/// kind with no live session is never worth spawning a hidden CLI session to check.
-///
-/// Filters to lane windows (`lane-<id>`/`lane-<id>-<slot>`) via [`TmuxRuntime::lane_id_of`], so
-/// this module's own `usage-probe-*` windows (and plain `term-*` windows) never count as active
-/// sessions. Counting them would make the gate self-sustaining: a probe window's mere existence
-/// would justify the next probe, and it would never stop.
-///
-/// A lane window with no `@repomon_agent_kind` stamp is treated as `claude-code`, the default
-/// agent kind - windows created before kind-stamping shipped (or before the overlay's binder
-/// reaches them) simply predate the option, and defaulting them to the fallback kind is correct,
-/// not merely convenient.
+/// Count only lane windows so probes cannot sustain their own activity gate; unstamped windows use
+/// the default Claude kind.
 fn active_kinds(windows: &[WindowMeta]) -> HashSet<String> {
     windows
         .iter()
         .filter(|w| TmuxRuntime::lane_id_of(&w.name).is_some())
         .map(|w| {
-            // Normalize through `AgentKind` rather than comparing the raw option string, so an
-            // alias the window option might carry (e.g. `"agy"`, which `AgentKind::short()` uses
-            // for Antigravity) still lands on the same canonical key `account_is_active` checks
-            // against. Every stamp this daemon writes today already uses `AgentKind::as_str()`'s
-            // canonical form (`agent.spawn`/`agent.adopt` stamp via `kind.as_str()`), so this
-            // guards future/legacy stamps rather than something today's data needs.
+            // Normalize aliases to the canonical kind used by the activity gate.
             match w.agent_kind.as_deref() {
                 Some(k) => AgentKind::from_kind_str(k).as_str().into_owned(),
                 None => AgentKind::ClaudeCode.as_str().into_owned(),
@@ -544,20 +489,8 @@ fn active_kinds(windows: &[WindowMeta]) -> HashSet<String> {
         .collect()
 }
 
-/// Agent kinds with an active EXTERNAL session - one the daemon detected from a transcript but
-/// did not spawn (the user ran `claude`/`codex`/`agy` in their own terminal). These show in the
-/// sidebar with usage attribution exactly like a managed lane session, so they widen the gate
-/// [`active_kinds`] computes from managed tmux windows alone.
-///
-/// Reads the daemon's existing lane-overlay cache ([`Ctx::overlay_cache`]) instead of
-/// recomputing it: re-running the overlay (tmux + transcript IO) just to decide whether to gate
-/// a probe would be exactly the expensive mechanism this change exists to avoid. This is
-/// opportunistic - the cache can be empty (nothing has called `lane.list` yet since the daemon
-/// started) or a little stale - in which case external sessions simply don't widen the gate this
-/// round; [`active_kinds`] alone (always freshly probed) still decides. Not separately unit
-/// tested: it is a thin cache read with no branching logic of its own, and constructing
-/// `AgentSession`/`Lane` fixtures here would pull lane-modeling detail into a module whose job is
-/// usage probing, not lane state.
+/// Widen the probe gate using cached external activity; an empty or stale overlay may defer probing
+/// until another round.
 async fn external_active_kinds(ctx: &Ctx) -> HashSet<String> {
     let cache = ctx.overlay_cache.lock().await;
     let Some((_, lanes)) = cache.entry() else {
@@ -571,14 +504,8 @@ async fn external_active_kinds(ctx: &Ctx) -> HashSet<String> {
         .collect()
 }
 
-/// Should `key` (an [`Account::key`]: a Claude config-dir path, `"default"`, or the sentinel
-/// `"codex"` / `"antigravity"`) be probed this round, given `active` from [`active_kinds`]?
-///
-/// Claude accounts are gated on *any* `claude-code` lane window existing, not per-account: tmux
-/// window metadata says which agent *kind* a window runs, not which Claude config dir backs it,
-/// so per-account precision isn't derivable here. That's an accepted approximation - a fleet with
-/// only a "work" Claude session open still probes every Claude account, the same cost this kind
-/// always paid; the gate only removes that cost when *no* Claude session is open at all.
+/// Gate Claude accounts by agent kind because window metadata does not identify the underlying
+/// config directory.
 fn account_is_active(key: &str, active: &HashSet<String>) -> bool {
     match key {
         "codex" => active.contains("codex"),
@@ -607,7 +534,7 @@ fn probe_window(label: &str) -> String {
 }
 
 /// Spawn a hidden session, drive it to a ready prompt, run the usage command, parse the pane, then
-/// dismiss and kill the window. Blocking (tmux IO + waits) — call from `spawn_blocking`. Returns
+/// dismiss and kill the window. Blocking (tmux IO + waits) - call from `spawn_blocking`. Returns
 /// `None` on any failure (the caller keeps the previous reading).
 fn probe_once(
     tmux: &dyn SessionBackend,
@@ -645,10 +572,8 @@ fn probe_once(
                 break;
             }
             ProbeState::Trust => {
-                // Claude 2.1.251 defaults its safety prompt to "No, exit". Pressing Enter here
-                // used to terminate the hidden session before `/usage` could run. Preserve the
-                // simple Enter path for older Claude/Codex/Antigravity prompts whose affirmative
-                // choice is already selected, but explicitly move off the known rejection row.
+                // Claude can default its safety prompt to rejection; move off that row before
+                // confirming while preserving prompts already selecting acceptance.
                 for key in trust_accept_keys(&pane) {
                     let _ = tmux.send_key_named(window, key);
                 }
@@ -662,7 +587,7 @@ fn probe_once(
         // The banner can show before the composer accepts input (notably Codex), so settle first.
         sleep(Duration::from_millis(1200));
         // Re-send the slash-command up to a few times: a typed-too-early send (composer not ready)
-        // or a slow render shouldn't lose the round. Re-sending is idempotent — the parse succeeds
+        // or a slow render shouldn't lose the round. Re-sending is idempotent - the parse succeeds
         // as soon as the screen is up. Claude renders on the first try, so it never retries.
         'attempts: for _ in 0..3 {
             if cancel.is_cancelled() {
@@ -808,17 +733,11 @@ mod tests {
 
     #[test]
     fn gating_does_not_evict_cache_for_inactive_kind() {
-        // Design decision: an inactive kind's last usage reading stays visible in the UI (it
-        // just stops refreshing) rather than being blanked the instant its lane session exits.
-        // In `usage_watcher`, the cache-retention key set (`live`) comes from the full
-        // `accounts()` list, unfiltered by `active_kinds`/`account_is_active` - so an account
-        // gated out of *probing* this round is never gated out of the *cache*. This test locks
-        // in that the two checks are genuinely independent: an account can fail
-        // `account_is_active` while still belonging to the retention set.
+        // An inactive account must stop probing without losing its retained reading.
         let installed_keys: HashSet<String> = ["default".to_string(), "codex".to_string()]
             .into_iter()
             .collect();
-        let windows = [wm("lane-1", Some("claude-code"))]; // no codex lane window this round
+        let windows = [wm("lane-1", Some("claude-code"))];
         let active = active_kinds(&windows);
 
         assert!(
@@ -893,7 +812,7 @@ mod tests {
     }
 
     /// Full end-to-end probe against a real `claude` on the default account, in an isolated tmux
-    /// server. Ignored by default — spawns a real session (a little quota + a tiny transcript).
+    /// server. Ignored by default - spawns a real session (a little quota + a tiny transcript).
     ///   cargo test -p repomon-daemon probe_once_reads_real_claude -- --ignored --nocapture
     #[test]
     #[ignore = "spawns a real `claude` and runs /usage; run manually with --ignored"]

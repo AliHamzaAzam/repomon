@@ -65,7 +65,6 @@ async fn scheduler_fires_due_schedules_once_and_journals() {
         .await
         .unwrap();
 
-    // Not due yet: created just now, interval 30m.
     standing::scheduler_tick(&ctx, chrono::Local::now()).await;
     assert!(
         ctx.store.recent_journal(10).await.unwrap().is_empty(),

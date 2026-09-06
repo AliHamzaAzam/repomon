@@ -1,11 +1,5 @@
-//! APNs push — how agent alerts reach the phone when the companion app is closed.
-//!
-//! The daemon talks to Apple directly over HTTP/2 (`a2`), signing with the `.p8` key from
-//! `[push]` in the config; no relay in between. `notify_watch` calls [`send_all`] with the
-//! same title/body it broadcast as `event.notification`. Pushes carry the lane/session/prompt
-//! as custom data so the app can deep-link, and a category — `AGENT_PROMPT` when there's a
-//! pending question to act on (the app attaches an Approve action), `AGENT_ALERT` otherwise.
-//! Tokens APNs reports dead (`Unregistered`/`BadDeviceToken`) are evicted from the store.
+//! Sends APNs alerts directly with lane, session, and prompt routing data, and evicts tokens Apple
+//! reports as invalid.
 
 use a2::{
     Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, ErrorReason,
@@ -22,7 +16,7 @@ pub const CATEGORY_PROMPT: &str = "AGENT_PROMPT";
 pub const CATEGORY_ALERT: &str = "AGENT_ALERT";
 
 /// A ready APNs sender, built from a complete `[push]` config. `None` when push isn't
-/// (fully) configured — callers just skip sending.
+/// (fully) configured - callers just skip sending.
 pub struct Push {
     client: Client,
     topic: String,
@@ -76,16 +70,13 @@ impl Push {
             .set_body(body)
             .set_sound("default")
             .set_category(category);
-        // Collapse duplicates of the same alert on the lock screen: the daemon stamps each payload
-        // with a stable `id` (lane:session:kind:activity) that only changes on real new activity,
-        // so a flapped re-send replaces rather than stacks. APNs caps the value at 64 bytes; our
-        // ids are ASCII, so a byte slice is a safe truncation.
+        // Stable activity IDs collapse duplicate alerts; cap the APNs identifier at a UTF-8
+        // boundary.
         let collapse = data
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| {
-                // Cap at 64 bytes (APNs limit), backing up to a char boundary so a future
-                // multibyte id can't panic the slice (today's ids are ASCII).
+                // Respect the 64-byte APNs limit without slicing through a UTF-8 character.
                 let mut end = s.len().min(64);
                 while end > 0 && !s.is_char_boundary(end) {
                     end -= 1;
@@ -122,7 +113,7 @@ impl Push {
 }
 
 /// Push `title`/`body` to every registered device, evicting tokens APNs reports dead.
-/// Builds the sender fresh per call — alerts are rare and the key parse is cheap, and this
+/// Builds the sender fresh per call - alerts are rare and the key parse is cheap, and this
 /// way `[push]` config changes apply immediately.
 pub async fn send_all(ctx: &Ctx, title: &str, body: &str, category: &str, data: &Value) {
     let devices = ctx.store.list_devices().await.unwrap_or_default();

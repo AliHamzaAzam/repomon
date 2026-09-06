@@ -1,8 +1,4 @@
-//! The query side of the ledger: resolve a range, read the rows, price them, and put readable
-//! labels on repo and lane groups before any of it reaches a client.
-//!
-//! These helpers exist so the RPC arms in [`crate::rpc`] stay one-liners and so the parts worth
-//! testing are testable without a socket.
+//! Resolves ledger query ranges, prices rows, and labels repository and lane groups for clients.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,15 +14,8 @@ use repomon_core::usage_ledger::{
 
 use crate::Ctx;
 
-/// Turn a range and its optional explicit bounds into a `[from, to]` window.
-///
-/// Explicit bounds always win, whatever the range is named. A day-aligned range means local
-/// calendar days, and the client is the one that knows which zone the operator is reading in, so
-/// a client that resolved its own preset sends the two instants and keeps the name only as a
-/// label. A range with no bounds is resolved here instead, in the daemon's own zone.
-///
-/// A custom range with no bounds is treated as today rather than as all of history: a client that
-/// forgot to send them gets a cheap answer, not the whole ledger.
+/// Resolves explicit bounds before named local-day ranges, treating a custom range without bounds
+/// as today rather than the entire ledger.
 pub fn resolve_window(
     range: Range,
     since: Option<DateTime<Utc>>,
@@ -257,10 +246,8 @@ pub struct UsageExport {
     pub bytes: u64,
 }
 
-/// Write the events in `[from, to]` to a file under the data directory and say where it went.
-///
-/// The daemon writes the file rather than returning its bytes: an export of a busy month is
-/// megabytes, and a path is what the operator wants to do something with anyway.
+/// Exports events in the inclusive time range to a data-directory file and returns its path instead
+/// of sending a large response.
 pub async fn export(
     ctx: &Arc<Ctx>,
     (from, to): (DateTime<Utc>, DateTime<Utc>),

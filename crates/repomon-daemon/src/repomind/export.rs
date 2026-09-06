@@ -1,23 +1,5 @@
-//! One-way export of the daemon's own records into the repomind home.
-//!
-//! SQLite stays canonical for everything a machine writes: the orchestration journal, the
-//! standing schedules, and the learned approval rules. This module mirrors those rows into
-//! markdown so a controller (or a human, or basic-memory) can read them as files:
-//!
-//! - `journal/YYYY-MM-DD.md`, one section per journal row, keyed by row id in an HTML comment so
-//!   a re-run appends only rows the file does not already carry.
-//! - `plans/standing/<slug>.md`, one file per schedule.
-//! - `profile/approvals.md`, the approval rules grouped by repo.
-//!
-//! Three rules hold the whole thing together:
-//!
-//! - **One way.** Nothing here reads a file back into the store. An operator edit to a mirrored
-//!   file is overwritten on the next export, which is why every one of them says so in its body.
-//! - **Idempotent.** A second run with the same rows writes nothing and commits nothing. Files
-//!   are compared before they are written, and the journal is keyed by row id rather than by a
-//!   cursor alone, so even a lost state file cannot duplicate a section.
-//! - **Bounded blast radius.** Only the three targets above are ever written, and only files the
-//!   daemon itself wrote (frontmatter `source: repomond`) are ever removed.
+//! Exports canonical SQLite journals, schedules, and approvals to Markdown. Repeated exports are
+//! idempotent, and stale files are deleted only when their frontmatter identifies daemon ownership.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -649,8 +631,6 @@ pub fn commit(
     ))
 }
 
-// ---- daemon driver ---------------------------------------------------------
-
 /// Ask for an export because a journal, schedule, or approval-rule row changed. Debounced.
 pub async fn request(ctx: &crate::Ctx) {
     ctx.repomind_export.lock().await.records = true;
@@ -998,7 +978,7 @@ mod tests {
         assert!(body.contains("## repomon"), "{body}");
         assert!(body.contains("cargo test"), "{body}");
         assert!(body.contains("bun test"), "{body}");
-        // One heading per repo, not one per rule.
+
         assert_eq!(body.matches("## repomon").count(), 1, "{body}");
     }
 
@@ -1065,8 +1045,6 @@ mod tests {
         save_state(&home, &state).unwrap();
         assert_eq!(load_state(&home), state);
     }
-
-    // ---- commits (brief item 4) ---------------------------------------------
 
     fn git(home: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
@@ -1228,8 +1206,6 @@ mod tests {
         assert!(state.last_commit_at.is_none());
     }
 
-    // ---- daemon driver ------------------------------------------------------
-
     async fn test_ctx(home: &Path) -> std::sync::Arc<crate::Ctx> {
         let store = repomon_core::Store::open_in_memory().unwrap();
         let mut config = repomon_core::Config::default();
@@ -1256,7 +1232,7 @@ mod tests {
             git(&home, &["log", "-1", "--format=%an"]),
             COMMIT_AUTHOR_NAME
         );
-        // The cursor and the run stamp survive for `repomind.status`.
+
         let state = load_state(&home);
         assert!(state.last_journal_id > 0);
         assert!(state.last_run.is_some());

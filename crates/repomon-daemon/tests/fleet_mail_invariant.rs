@@ -1,22 +1,6 @@
-//! Universal fleet-mail invariant (A5.1): every managed agent session the daemon creates — via
-//! `agent.spawn` or `agent.adopt`, whether its kind wires the MCP server through command-line
-//! flags (ClaudeCode) or a global config file (Antigravity, gated behind
-//! `REPOMON_ANTIGRAVITY_MCP_CONFIG`) — must get its own restricted MCP identity, must have the
-//! daemon store only a hash of that identity's token (never the plaintext), and any MCP config
-//! file the daemon writes to disk must reference the `repomond mcp` command without ever
-//! containing the raw token.
-//!
-//! The daemon never returns the plaintext token over RPC (only the spawned process's environment
-//! carries it — see `rpc.rs`'s `agent.spawn`/`agent.adopt` handlers), so this test stands in fake
-//! `claude`/`agy` binaries on `PATH` that dump `$REPOMON_MCP_IDENTITY_TOKEN` to a file and exit.
-//! That recovered plaintext token is then fed back through `Store::resolve_mcp_identity` — the
-//! same public lookup the real fleet-mail MCP server uses to authenticate a connecting agent —
-//! to prove the daemon actually stored a hash that resolves back to this exact session (window,
-//! lane, agent kind). A tampered token is asserted to resolve to nothing, so a broken hash check
-//! (e.g. one that accepts any string) would fail this test, not just "no RPC error".
-//!
-//! Mutates process env (`PATH`, `XDG_CONFIG_HOME`, `REPOMON_ANTIGRAVITY_MCP_CONFIG`) — like
-//! `orchestrator.rs`, safe only because this file has exactly one test.
+//! Verifies restricted fleet-mail identities for managed windows: tokens are stored only as hashes,
+//! with plaintext passed through the child environment. Fake backends inspect that environment and
+//! exercise tamper rejection.
 
 use std::process::Command;
 use std::time::Duration;
@@ -147,7 +131,7 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
 
     let mut stream = connect_retry(&sock).await;
 
-    // Register a repo and grab its lane — every spawn/adopt call below targets it.
+    // Register a repo and grab its lane - every spawn/adopt call below targets it.
     let repo_dir = tempfile::tempdir().unwrap();
     git(repo_dir.path(), &["init", "-b", "main"]);
     git(repo_dir.path(), &["commit", "--allow-empty", "-m", "init"]);
@@ -167,7 +151,6 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
     let repomond = repomon_core::service::repomond_path();
     let mut next_id = 10u64;
 
-    // ---- ClaudeCode: agent.spawn (command-line-flag wiring) ------------------------------
     let _ = std::fs::remove_file(&claude_token_file);
     let r = call(
         &mut stream,
@@ -209,7 +192,7 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         Some("claude-code"),
         "identity: {identity:?}"
     );
-    // A tampered token must not resolve — this is what actually fails if hash-checking breaks.
+    // A tampered token must not resolve - this is what actually fails if hash-checking breaks.
     assert!(
         ctx.store
             .resolve_mcp_identity(format!("{token}00"))
@@ -235,7 +218,6 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         "claude per-window mcp config must never contain the raw identity token: {claude_cfg_content}"
     );
 
-    // ---- ClaudeCode: agent.adopt (same wiring, adopt call path) ---------------------------
     let _ = std::fs::remove_file(&claude_token_file);
     let r = call(
         &mut stream,
@@ -290,7 +272,6 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         "adopted claude per-window mcp config must never contain the raw identity token: {claude_cfg_content}"
     );
 
-    // ---- Antigravity: agent.spawn (global config-file wiring) -----------------------------
     let _ = std::fs::remove_file(&agy_token_file);
     let r = call(
         &mut stream,
@@ -351,7 +332,6 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
         "antigravity global mcp config must never contain the raw identity token: {agy_cfg_content}"
     );
 
-    // ---- Antigravity: agent.adopt (same wiring, adopt call path) --------------------------
     let _ = std::fs::remove_file(&agy_token_file);
     let r = call(
         &mut stream,

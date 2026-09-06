@@ -1,29 +1,5 @@
-//! Streaming one pane's raw PTY bytes — the embedded renderer's feed, shared across watchers.
-//!
-//! The mediated view is a poll → capture → re-parse pipeline; the embedded renderer instead
-//! wants the pane's actual byte stream. The backend provides it via
-//! [`SessionBackend::open_byte_stream`] (on tmux: one ignore-size control client); ordered output
-//! chunks and grid changes are broadcast as `event.agent.bytes` / `event.agent.grid`. If the
-//! target window disappears, `event.agent.stream_closed` tells each renderer to release its watch.
-//!
-//! ONE STREAM PER WINDOW, SHARED. A window has exactly one backend observer no matter how many
-//! clients watch it. The event bus already broadcasts every chunk to every subscriber; who actually
-//! *receives* a window's bytes is decided per connection at the forwarding loops (a connection
-//! forwards `event.agent.bytes` only for windows in its `watched_bytes` set). This module
-//! therefore refcounts watchers per window: the first watcher starts the stream, later watchers
-//! just join the readership, and the stream is torn down only when the last watcher leaves. A
-//! phone, an iPad, and the Mac TUI can all watch the same (or different) windows at once — the
-//! old single global slot let any new watch kill the previous one, which is exactly what broke
-//! concurrency.
-//!
-//! GENERATION / EOF race: closing the stream (or the backend detecting that its target window
-//! died) ends the backend's byte channel, whose closure the forwarder task sees, and it then removes
-//! its own map entry. Each fresh stream (a first watcher creating a new entry) gets a
-//! globally-unique `generation`, and the forwarder drops its entry ONLY if the entry's
-//! generation still matches the one it was started with; without that, a rapid unwatch→rewatch
-//! of the same window could have the dying forwarder delete the freshly-started entry, leaving
-//! `watched_bytes` pointing at a live window whose entry is gone — it would accept refs and
-//! stream nothing. The tmux backend applies the same generation guard to control-client cleanup.
+//! Shares one backend byte stream per window across subscribers. Generation checks prevent a stale
+//! stream’s EOF from removing its replacement.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -77,27 +53,21 @@ impl WatchEntry {
 /// across all windows is all the EOF guard needs.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Release `conn_id` from an entry's readership; returns true once no watcher remains (the stream
-/// must then be torn down). Pure — the refcount transition unit tests drive this directly.
-///
-/// An entry always holds at least one ref (it is created with one and removed the moment it
-/// empties), so `is_empty()` can only become true right after removing the entry's last watcher.
-/// Releasing a `conn_id` the entry never held is a harmless no-op that leaves it non-empty.
+/// Remove one watcher and report whether the last reference was released; unknown connection IDs
+/// leave an active entry unchanged.
 fn release_ref(entry: &mut WatchEntry, conn_id: u64) -> bool {
     entry.refs.remove(&conn_id);
     entry.refs.is_empty()
 }
 
-/// Whether the forwarder that started at `generation` still owns `window`'s entry — the
+/// Whether the forwarder that started at `generation` still owns `window`'s entry - the
 /// EOF-cleanup guard. False if the entry is gone or has been superseded by a newer stream. Pure.
 fn eof_entry_is_current(map: &HashMap<String, WatchEntry>, window: &str, generation: u64) -> bool {
     map.get(window).is_some_and(|e| e.generation == generation)
 }
 
-/// Record an authoritative grid for a live byte watch. `generation` guards the asynchronous
-/// external-resize probe from updating a replacement stream; mediated RPCs pass `None` because
-/// they address the current named window directly. `None` means there is no matching live watch,
-/// while `Some(false)` suppresses a duplicate notification for an unchanged grid.
+/// Records a grid for the optional watch generation, returning None for an absent watch and
+/// Some(false) for an unchanged grid.
 pub async fn note_grid(
     watches: &Watches,
     window: &str,
@@ -116,11 +86,7 @@ pub async fn note_grid(
     Some(true)
 }
 
-/// Start (or join) a byte watch on `window` for `conn_id`.
-///
-/// - Entry exists → the stream is already flowing; `conn_id` just joins the readership.
-/// - No entry → open the window's single backend byte stream with a fresh generation and
-///   `refs = {conn_id}`, and spawn the forwarder that broadcasts its chunks.
+/// Starts or joins the window’s shared byte stream for the connection.
 pub async fn watch(
     backend: Arc<dyn SessionBackend>,
     events: EventTx,
@@ -130,7 +96,7 @@ pub async fn watch(
     conn_id: u64,
 ) -> Result<StreamCursor, String> {
     // Hold the lock across setup: a concurrent watcher of the SAME window must either join the
-    // entry we create or wait and find it — never start a second stream (the backend allows only
+    // entry we create or wait and find it - never start a second stream (the backend allows only
     // one per window).
     let mut map = watches.lock().await;
     if let Some(entry) = map.get_mut(&window) {
@@ -165,11 +131,8 @@ pub async fn watch(
         },
     );
 
-    // The forwarder: drain the backend's ordered terminal events onto the event bus. Grid and
-    // byte notifications receive positions in the same sequence, so clients can resize before
-    // interpreting output produced for the new dimensions. When the channel closes
-    // (stream turned off or window died) it drops its own entry, but only while the entry is
-    // still this stream's (generation match) — a later watch of the same window supersedes it.
+    // Sequence grid changes with bytes so clients resize before decoding new output; generation
+    // checks prevent stale EOF from removing a replacement stream.
     {
         let forward_window = window.clone();
         let forward_watches = watches.clone();
@@ -294,7 +257,7 @@ pub async fn unwatch_all(backend: &Arc<dyn SessionBackend>, watches: &Watches, c
         map.retain(|window, entry| {
             if release_ref(entry, conn_id) {
                 stopped.push(window.clone());
-                false // this window's last watcher left: drop the entry
+                false
             } else {
                 true
             }
@@ -307,7 +270,7 @@ pub async fn unwatch_all(backend: &Arc<dyn SessionBackend>, watches: &Watches, c
 }
 
 /// Startup sweep: close the byte stream on every window of our session. A daemon that died with
-/// a watch active leaves the backend's pipe running with no reader — on tmux that makes the
+/// a watch active leaves the backend's pipe running with no reader - on tmux that makes the
 /// server buffer the pane's output in memory without bound.
 pub async fn sweep(backend: Arc<dyn SessionBackend>) {
     let _ = tokio::task::spawn_blocking(move || {
@@ -335,10 +298,10 @@ mod tests {
     #[test]
     fn release_ref_reports_empty_only_when_last_watcher_leaves() {
         let mut e = entry(&[1, 2], 0);
-        // Removing one of two watchers leaves the stream live.
+
         assert!(!release_ref(&mut e, 1));
         assert_eq!(e.refs.iter().copied().collect::<Vec<_>>(), vec![2]);
-        // Removing the last watcher empties it — the caller must stop the stream.
+        // Removing the last watcher empties it - the caller must stop the stream.
         assert!(release_ref(&mut e, 2));
         assert!(e.refs.is_empty());
     }
@@ -357,7 +320,7 @@ mod tests {
         let mut e = entry(&[1], 5);
         e.refs.insert(2);
         assert_eq!(e.refs.len(), 2);
-        // The generation is untouched — the same stream, not a new one.
+        // The generation is untouched - the same stream, not a new one.
         assert_eq!(e.generation, 5);
     }
 
@@ -385,11 +348,11 @@ mod tests {
     fn eof_guard_removes_only_the_current_generation() {
         let mut map = HashMap::new();
         map.insert("lane-1".to_string(), entry(&[1], 3));
-        // A forwarder from the current stream (gen 3) owns the entry.
+
         assert!(eof_entry_is_current(&map, "lane-1", 3));
         // A stale forwarder (gen 2) from a superseded stream must NOT delete the live entry.
         assert!(!eof_entry_is_current(&map, "lane-1", 2));
-        // A window with no entry at all.
+
         assert!(!eof_entry_is_current(&map, "lane-9", 3));
     }
 

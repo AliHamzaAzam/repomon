@@ -1,8 +1,5 @@
-//! End-to-end: a journal row written over the RPC surface reaches the repomind home as a
-//! markdown day file, and the export batch lands as one commit authored by Repomind.
-//!
-//! Every test here points `[repomind] home` at a tempdir. The operator's real `~/repomind` is
-//! never created, read, or written by the suite.
+//! Tests journal export into a temporary home and its batched commit without accessing the
+//! operator’s fleet memory.
 
 mod common;
 
@@ -108,8 +105,8 @@ async fn journal_append_then_repomind_export_writes_the_day_file_and_commits() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// Repo notes are file-first: `repo.notes.set` writes `fleet/<repo>/notes.md` in the home, and
-/// `repo.notes.get` reads it back. The app-support `repo-notes/` directory is no longer written.
+/// Stores and reads repository notes in fleet/<repo>/notes.md under the home without writing the
+/// app-support notes directory.
 #[tokio::test]
 async fn repo_notes_are_written_to_and_read_from_the_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -262,8 +259,7 @@ async fn a_playbook_draft_is_inert_until_approval_moves_the_file() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// `repomind.status` carries the export state and the home's counts, so the R4 panel can render
-/// them without a second round trip.
+/// Repomind status includes export state and home counts in one response.
 #[tokio::test]
 async fn repomind_status_reports_the_export_state_and_home_counts() {
     let dir = tempfile::tempdir().unwrap();
@@ -284,7 +280,6 @@ async fn repomind_status_reports_the_export_state_and_home_counts() {
     };
     let mut stream = connect_retry(&sock).await;
 
-    // A save leaves an export pending; nothing has run yet.
     call(
         &mut stream,
         1,

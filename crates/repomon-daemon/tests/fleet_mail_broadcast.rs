@@ -1,12 +1,6 @@
-//! Multi-recipient / broadcast fleet mail (A6): an agent-mode MCP client can send `message_send`
-//! to a JSON array of addresses and to `"lane-X/*"`, each target's durable inbox receives its own
-//! copy, the caller gets back a per-recipient result instead of a bare `FleetMessage`, `"*"`
-//! excludes the sender's own session while an explicit self-address still delivers, and a plain
-//! single-address `to` (the pre-A6 shape) is untouched.
-//!
-//! Uses the same real-tmux-plus-fake-CLI harness as `fleet_mail_invariant.rs`: three managed
-//! `claude-code` sessions across two lanes, each with its own minted MCP identity, standing in
-//! for the fleet. Skips (like that test) when tmux is unavailable.
+//! Verifies per-recipient broadcast delivery: wildcard expansion excludes the sender, but an
+//! explicit self-address is allowed. Process isolation protects environment changes; tmux-dependent
+//! cases skip when tmux is unavailable.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -284,7 +278,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     let addr_a2 = format!("lane-{lane_a}/2");
     let addr_b1 = format!("lane-{lane_b}/1");
 
-    // Sender: an agent-mode MCP client authenticated as lane-B/1.
     let mut sender = spawn_mcp_child(
         &sock,
         &[
@@ -351,9 +344,8 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
         "{inbox_a2:?}"
     );
 
-    // Each fan-out send reuses `send_message`'s existing per-sender rate limiter unchanged (a
-    // deliberate A6 design call — see the report), so pace these steps >1s apart to stay clear
-    // of its rolling burst window instead of exercising that limiter here.
+    // Space sends beyond the burst window so this delivery test does not exercise the sender rate
+    // limiter.
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
     // ---- 2. lane wildcard send: "lane-A/*" ---------------------------------------------------
@@ -472,7 +464,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
-    // ---- 4. explicit self-address single send still delivers ---------------------------------
     let (result, is_error) = call_tool(
         &mut sender_stdin,
         &mut sender_lines,
@@ -507,7 +498,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
-    // ---- 5. plain single address: exact pre-A6 shape and behavior ----------------------------
     let (result, is_error) = call_tool(
         &mut sender_stdin,
         &mut sender_lines,
@@ -538,7 +528,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
 
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
-    // ---- 6. mixed list: one good address, one malformed --------------------------------------
     let (result, is_error) = call_tool(
         &mut sender_stdin,
         &mut sender_lines,
@@ -562,7 +551,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     assert_eq!(by_to[addr_a1.as_str()], "sent", "{result:?}");
     assert_eq!(by_to["not-a-real-address"], "no_such_session", "{result:?}");
 
-    // ---- 7. empty list is rejected up front ---------------------------------------------------
     let (_result, is_error) = call_tool(
         &mut sender_stdin,
         &mut sender_lines,
@@ -589,7 +577,5 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
     }
 }
 
-// The reply_to-on-a-broadcast design call is covered separately in
-// `fleet_mail_broadcast_reply.rs` — its own file/process, both to keep the "exactly one test
-// mutates process env per file" invariant this file also relies on, and to give it its own
-// rate-limit budget against `send_message`'s ten-per-minute sender cap.
+// Broadcast-reply tests use a separate process to isolate environment mutation and the sender
+// rate-limit budget.

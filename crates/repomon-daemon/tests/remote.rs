@@ -15,11 +15,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Serve a prepared `ctx` on an exclusive ephemeral localhost port. The listener is bound here
-/// (never released before `serve_remote_on` takes it), so there is no bind-then-rebind window for a
-/// concurrent test to steal the port — the socket accepts connections from the moment this returns.
-/// Tokens must already be seeded into `ctx.remote_tokens` (that is the auth source, not a
-/// serve_remote argument).
+/// Serve an already-bound ephemeral listener without a port-reuse gap; seed tokens in the context
+/// before calling.
 async fn serve(ctx: Arc<Ctx>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -41,7 +38,7 @@ async fn serve_with_timeout(ctx: Arc<Ctx>, handshake_timeout: Duration) -> Strin
 async fn start_bridge(token: &str) -> (Arc<Ctx>, String) {
     let store = Store::open_in_memory().unwrap();
     let ctx = Ctx::new(store, Config::default(), None);
-    // Seed a shared token (device name None) — the legacy config-token path.
+
     ctx.remote_tokens
         .write()
         .unwrap()
@@ -69,7 +66,6 @@ async fn bridge_round_trips_rpc_and_events_with_token() {
         .await
         .expect("authorized connect");
 
-    // ping → pong.
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string(),
     ))
@@ -81,7 +77,6 @@ async fn bridge_round_trips_rpc_and_events_with_token() {
     };
     assert_eq!(resp["result"], json!("pong"));
 
-    // A real method works over the bridge.
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":2,"method":"repo.list"}).to_string(),
     ))
@@ -113,7 +108,6 @@ async fn bridge_round_trips_rpc_and_events_with_token() {
         assert!(resp["error"].is_null(), "{method} errored: {resp}");
     }
 
-    // subscribe, then a broadcast arrives as an event frame.
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":3,"method":"subscribe"}).to_string(),
     ))
@@ -153,10 +147,8 @@ async fn bridge_rejects_bad_or_missing_token_before_upgrade() {
 const SAMPLE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const SAMPLE_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-/// Open a raw TCP connection, send `request` verbatim, and read the response head (up to and
-/// including the terminating CRLFCRLF, or EOF). Returns the still-open stream and the head as a
-/// string so tests can assert on the exact response bytes without a WS client that normalizes
-/// header casing.
+/// Sends a raw handshake and returns its unnormalized response head with the open stream for
+/// byte-level protocol assertions.
 async fn raw_handshake(addr: &str, request: &str) -> (tokio::net::TcpStream, String) {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
@@ -300,10 +292,7 @@ async fn handshake_bad_version_gets_426_with_supported_version() {
     );
 }
 
-/// A peer that connects and then dribbles half a request line (never completing the head) must be
-/// dropped by the pre-upgrade handshake deadline rather than held open forever. The slot it briefly
-/// occupied must be freed, so a later legit handshake still succeeds. Uses a short injected deadline
-/// (200ms) so the test is fast and deterministic; production uses the 10s default.
+/// A partial handshake must time out and release its slot for a later client.
 #[tokio::test]
 async fn handshake_deadline_drops_a_dribbling_client_and_frees_the_slot() {
     let store = Store::open_in_memory().unwrap();
@@ -334,7 +323,7 @@ async fn handshake_deadline_drops_a_dribbling_client_and_frees_the_slot() {
         "a client that never completes the handshake is disconnected by the deadline"
     );
 
-    // A subsequent legit handshake still succeeds — the dribbling client's slot was freed.
+    // A subsequent legit handshake still succeeds - the dribbling client's slot was freed.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/?token=tok"))
         .await
         .expect("a legit client connects after the dribbling one is reaped");
@@ -368,7 +357,7 @@ async fn bridge_authenticates_a_named_device_and_stamps_last_seen() {
     .unwrap();
     assert_eq!(recv_json(&mut ws).await["result"], json!("pong"));
 
-    // The handshake stamps last_seen_at for the named device (poll — it happens in the handler).
+    // The handshake stamps last_seen_at for the named device (poll - it happens in the handler).
     let mut stamped = false;
     for _ in 0..100 {
         let d = &ctx.store.remote_device_list().await.unwrap()[0];
@@ -391,7 +380,6 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
         .await
         .expect("authorized connect");
 
-    // A request works while the token is live.
     ws.send(Message::text(
         json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string(),
     ))
@@ -411,7 +399,7 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
     let resp = recv_json(&mut ws).await;
     assert_eq!(resp["error"]["code"], json!(-32000));
     assert_eq!(resp["error"]["message"], json!("device revoked"));
-    // Server closed the connection after the error.
+
     let closed = matches!(
         ws.next().await,
         None | Some(Ok(Message::Close(_))) | Some(Err(_))
@@ -422,10 +410,8 @@ async fn bridge_kicks_a_revoked_token_mid_session() {
     );
 }
 
-/// Passive revocation: a device that subscribes and watches, then is revoked while sending NO
-/// further requests, must stop receiving events. The request-arm revocation check never fires for
-/// a silent device, so the event-forward arm has to re-check the token itself and close the socket
-/// within one event delivery.
+/// Recheck revocation while forwarding events because a passive subscriber may never send another
+/// request.
 #[tokio::test]
 async fn bridge_stops_events_to_a_silently_revoked_device() {
     let (ctx, addr) = start_bridge("live-token").await;
@@ -442,7 +428,7 @@ async fn bridge_stops_events_to_a_silently_revoked_device() {
     .unwrap();
     let _ack = recv_json(&mut ws).await;
 
-    // A pre-revocation broadcast is delivered — the stream is live.
+    // A pre-revocation broadcast is delivered - the stream is live.
     ctx.broadcast("event.test", json!({ "n": 1 }));
     let ev = recv_json(&mut ws).await;
     assert_eq!(ev["method"], json!("event.test"));
@@ -474,18 +460,14 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     // A session is required by the dispatch signature; these local-only RPCs don't touch it.
     let sess = ctx.open_session(ConnKind::Local).await;
 
-    // pair → {name, token, url}; seeds the auth cache.
     let pair = rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "phone" })))
         .await
         .unwrap();
     assert_eq!(pair["name"], json!("phone"));
     let token = pair["token"].as_str().unwrap();
     assert!(token.len() >= 32);
-    // The app parses the token as the ENTIRE fragment and the device name from a `?name=`
-    // query item; the shipped phone build knows only the fragment. So the name must ride as
-    // a query item BEFORE the fragment, and the fragment must be the bare token — appending
-    // `&name=` inside the fragment corrupted the token every named pairing stored (seen live:
-    // the iPad 401'd on every handshake with "seen never").
+    // The fragment is exclusively the bearer token; device metadata must precede it in query
+    // parameters.
     let url = pair["url"].as_str().unwrap();
     assert_eq!(url, &format!("repomon://?name=phone#{token}"));
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
@@ -497,7 +479,6 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     assert_eq!(pair["token"], again["token"]);
     assert_eq!(ctx.remote_tokens.read().unwrap().len(), 1);
 
-    // devices lists the device WITHOUT the token.
     let devices = rpc::dispatch(&ctx, &sess, "remote.devices", None)
         .await
         .unwrap();
@@ -509,7 +490,6 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
         "the listing never exposes the token"
     );
 
-    // revoke → {revoked:true}, and the auth cache empties.
     let rev = rpc::dispatch(
         &ctx,
         &sess,
@@ -521,7 +501,6 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     assert_eq!(rev["revoked"], json!(true));
     assert!(ctx.remote_tokens.read().unwrap().is_empty());
 
-    // revoking again → {revoked:false}.
     let rev2 = rpc::dispatch(
         &ctx,
         &sess,
@@ -533,11 +512,8 @@ async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     assert_eq!(rev2["revoked"], json!(false));
 }
 
-/// Auth-cache refresh race (Finding 4): a `remote.pair` and a `remote.revoke` running at once must
-/// leave the cache consistent with the store. `refresh_remote_tokens` is read-then-write, so an
-/// unserialized pair could rebuild from a pre-revoke snapshot and resurrect the revoked token. With
-/// the mutate lock serializing each mutate+refresh, the final cache always mirrors the store — the
-/// revoked device is gone and the paired one is present, regardless of interleaving.
+/// Concurrent pair and revoke must leave the auth cache consistent with the store, never restoring
+/// a revoked token.
 #[tokio::test]
 async fn concurrent_pair_and_revoke_leave_the_cache_consistent() {
     use std::collections::HashSet;
@@ -546,12 +522,10 @@ async fn concurrent_pair_and_revoke_leave_the_cache_consistent() {
     let ctx = Ctx::new(store, Config::default(), None);
     let sess = ctx.open_session(ConnKind::Local).await;
 
-    // Start with device "a" paired and in the cache.
     rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "a" })))
         .await
         .unwrap();
 
-    // Concurrently pair "b" and revoke "a".
     let (c1, s1) = (ctx.clone(), sess.clone());
     let (c2, s2) = (ctx.clone(), sess.clone());
     let pair = tokio::spawn(async move {
@@ -613,9 +587,8 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed");
 }
 
-/// Defense-in-depth (Finding 5): a remote `lane.create` must NOT honor a caller-supplied `path` —
-/// the bridge withholds `fs.browse`, so a paired device has no legitimate way to have chosen one.
-/// The daemon strips it and derives the template worktree location; a LOCAL caller is unaffected.
+/// Remote lane creation ignores caller-supplied filesystem paths while local callers retain that
+/// capability.
 #[tokio::test]
 async fn remote_lane_create_ignores_caller_path() {
     let store = Store::open_in_memory().unwrap();
@@ -636,10 +609,8 @@ async fn remote_lane_create_ignores_caller_path() {
         })
         .await;
     let outside = tempfile::tempdir().unwrap();
-    // Canonicalize the base: the daemon returns canonical worktree paths, and on macOS the tempdir
-    // lives under a `/private` symlink, so a raw join wouldn't compare equal. On Windows,
-    // `canonicalize` yields a `\\?\` verbatim path that git refuses to create directories
-    // under, so strip the prefix (path comparisons below are component-wise and unaffected).
+    // Canonicalize temporary paths for macOS comparisons, then strip the Windows verbatim prefix
+    // that git cannot create directories under.
     let outside_base = std::fs::canonicalize(outside.path()).unwrap();
     #[cfg(windows)]
     let outside_base = PathBuf::from(
@@ -674,7 +645,7 @@ async fn remote_lane_create_ignores_caller_path() {
         "nothing may be created at the attacker path"
     );
 
-    // Sanity: a LOCAL caller's path IS honored — the strip is remote-only.
+    // Sanity: a LOCAL caller's path IS honored - the strip is remote-only.
     let local = ctx.open_session(ConnKind::Local).await;
     let local_path = outside_base.join("local-ok");
     let lane2 = rpc::dispatch(
@@ -714,11 +685,8 @@ async fn session_for_device(ctx: &Ctx, device: &str) -> Arc<ConnSession> {
     panic!("no live session for device {device}");
 }
 
-/// Two connections, each byte-watching a DIFFERENT window, receive ONLY their own window's
-/// `event.agent.bytes` — while every non-bytes topic reaches both. This is the per-connection
-/// delivery filter at the forwarding loop, exercised end to end over the real bridge. (The pipe
-/// machinery itself is unit-tested; we seed each session's `watched_bytes` directly here so the
-/// test needs no live tmux.)
+/// Verify per-connection byte filtering over the bridge with seeded watches, avoiding a live
+/// backend dependency.
 #[tokio::test]
 async fn bytes_events_are_delivered_per_connection() {
     let store = Store::open_in_memory().unwrap();
@@ -741,7 +709,6 @@ async fn bytes_events_are_delivered_per_connection() {
             .await
             .expect("ipad connects");
 
-    // Each connection watches a different window.
     session_for_device(&ctx, "phone")
         .await
         .watched_bytes
@@ -784,7 +751,6 @@ async fn bytes_events_are_delivered_per_connection() {
     let p2 = recv_json(&mut ws_p).await;
     assert_eq!(p2["method"], json!("event.repo.changed"));
 
-    // The iPad sees ONLY lane-2's bytes, then the shared event.
     let i1 = recv_json(&mut ws_i).await;
     assert_eq!(i1["method"], json!("event.agent.bytes"));
     assert_eq!(i1["params"]["window"], json!("lane-2"));
@@ -792,16 +758,8 @@ async fn bytes_events_are_delivered_per_connection() {
     assert_eq!(i2["method"], json!("event.repo.changed"));
 }
 
-/// Sibling of `bytes_events_are_delivered_per_connection` for A5: two connections with DIFFERENT
-/// viewports each receive ONLY their own lane's `event.agent.output`, a third connection that never
-/// asserted a viewport receives NONE, and every connection still gets a non-output topic. This is
-/// the per-connection output filter at the forwarding loop, end to end over the real bridge. We seed
-/// each session's `output_filter` snapshot directly (the same snapshot `viewport.set` writes) so the
-/// test needs no live tmux.
-///
-/// The no-viewport case is the whole point of A5: TODAY's shipping iPhone app never calls
-/// `viewport.set` and never consumes `event.agent.output` (it polls `agent.capture`), so filtering
-/// it to nothing wastes none of its bandwidth and drops nothing it relies on.
+/// Verify requested viewport delivery, no output before a viewport claim, and unchanged delivery of
+/// other topics.
 #[tokio::test]
 async fn output_events_are_delivered_per_connection() {
     let store = Store::open_in_memory().unwrap();
@@ -876,14 +834,13 @@ async fn output_events_are_delivered_per_connection() {
     let p2 = recv_json(&mut ws_p).await;
     assert_eq!(p2["method"], json!("event.repo.changed"));
 
-    // The iPad sees ONLY lane 2's output, then the shared event.
     let i1 = recv_json(&mut ws_i).await;
     assert_eq!(i1["method"], json!("event.agent.output"));
     assert_eq!(i1["params"]["lane_id"], json!(2));
     let i2 = recv_json(&mut ws_i).await;
     assert_eq!(i2["method"], json!("event.repo.changed"));
 
-    // The laptop, with no viewport, sees NEITHER output event — its first frame is the shared event.
+    // The laptop, with no viewport, sees NEITHER output event - its first frame is the shared event.
     let l1 = recv_json(&mut ws_l).await;
     assert_eq!(l1["method"], json!("event.repo.changed"));
 }
@@ -904,7 +861,7 @@ async fn close_session_releases_only_this_connections_watches() {
 
     {
         let mut map = ctx.bytes_watches.lock().await;
-        // Shared window watched by both A and B.
+
         map.insert(
             "lane-1".to_string(),
             WatchEntry {
@@ -915,7 +872,7 @@ async fn close_session_releases_only_this_connections_watches() {
                 grid: None,
             },
         );
-        // A window only A watches.
+
         map.insert(
             "lane-2".to_string(),
             WatchEntry {
@@ -945,10 +902,7 @@ async fn close_session_releases_only_this_connections_watches() {
     );
 }
 
-/// `agent.fit` arbitration through real dispatch (covers the A3 wiring: interaction stamping +
-/// cross-session snapshots). Session B drives an agent (stamping its `last_interaction`) and holds
-/// a fresh focus on a window; session A's fit on that window is denied, while A's fit on an
-/// uncontested window applies. tmux-gated (the apply path resizes a real pane).
+/// A fresh competing focus claim must deny fit, while an uncontested window can resize.
 #[tokio::test]
 async fn fit_arbitrates_between_two_remote_sessions() {
     if !TmuxRuntime::available() {
@@ -964,7 +918,6 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     let ctx = Ctx::new(store, config, None);
     let mut events = ctx.events.subscribe();
 
-    // A real, uncontested window for the apply case.
     let cwd = std::env::temp_dir();
     ctx.backend
         .spawn_named(
@@ -984,7 +937,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         })
         .await;
 
-    // B "types" — dispatch stamps B's last_interaction before the handler runs, so the (absent
+    // B "types" - dispatch stamps B's last_interaction before the handler runs, so the (absent
     // "lane-1" window) tmux error is irrelevant to the arbitration under test.
     let _ = rpc::dispatch(
         &ctx,
@@ -993,7 +946,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         Some(json!({ "lane_id": 1, "window": "lane-1", "text": "x" })),
     )
     .await;
-    // ...and holds a fresh focus beat on the contested window.
+
     *b.viewport_focus.lock().await = Some((1, "lane-1".to_string()));
     *b.viewport_focus_at.lock().await = Some(std::time::Instant::now());
 
@@ -1019,7 +972,6 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         "a denied fit must not announce a grid change"
     );
 
-    // A fits the uncontested real window → applied.
     let applied = rpc::dispatch(
         &ctx,
         &a,
@@ -1096,12 +1048,8 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         .output();
 }
 
-/// The `agent.watch_bytes` handler through real dispatch: `on:true` starts real streams and records
-/// the windows in the session; `{lane_id, on:false}` with NO window (the TUI's stop path) releases
-/// exactly this session's watches on that lane — matched by the WatchEntry.lane field, so a
-/// non-default window is found too — while another lane's watch survives. Also covers the
-/// stale-name purge: a watched name whose registry entry already died is dropped from
-/// `watched_bytes` so later window-name reuse can't deliver unrequested bytes. tmux-gated.
+/// Verify lane-wide watch release preserves other lanes and purges dead registry names so name
+/// reuse cannot deliver unrequested bytes.
 #[tokio::test]
 async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     if !TmuxRuntime::available() {
@@ -1215,8 +1163,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         );
     }
 
-    // Releasing the first viewer leaves the shared control stream alive; releasing the second
-    // removes it. This is the two-live-viewer lifecycle that originally exposed corruption.
+    // The shared control stream must remain live until its last viewer releases it.
     rpc::dispatch(
         &ctx,
         &sess,
@@ -1241,10 +1188,8 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         .output();
 }
 
-/// A tmux control client is session-scoped, so killing its target while another window survives
-/// must explicitly terminate the stream. The daemon then drops its watch entry and tells the
-/// watching connection which generation ended; otherwise the core reader, daemon forwarder, and
-/// desktop route task all wait forever.
+/// Terminate a watched stream when its target dies even if sibling windows keep the session-scoped
+/// control client alive.
 #[tokio::test]
 async fn watched_window_death_closes_stream_while_sibling_survives() {
     if !TmuxRuntime::available() {

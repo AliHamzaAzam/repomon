@@ -1,9 +1,5 @@
-//! Markdown helpers shared by every repomind home writer: frontmatter rendering and parsing,
-//! and the slug rule for file names.
-//!
-//! The home follows the mnemind note conventions (`title`, `type`, `permalink`, `source` in
-//! YAML frontmatter, see `~/repomind/AGENTS.md`), so every file the daemon writes there has to
-//! render the same shape a hand-written note does, and has to be able to read one back.
+//! Renders and parses the shared mnemind frontmatter convention and filesystem slugs used by home
+//! writers.
 
 /// Render a YAML frontmatter block from ordered key/value pairs, including the `---` fences and
 /// the blank line after them.
@@ -19,8 +15,7 @@ pub fn frontmatter(fields: &[(&str, String)]) -> String {
     out
 }
 
-/// Quote a frontmatter value when leaving it bare would produce something YAML reads as a map,
-/// a list, or a comment. Titles carry schedule specs like `daily 09:00`, so this matters.
+/// Quotes YAML scalars that could otherwise parse as maps, lists, or comments.
 fn scalar(value: &str) -> String {
     let needs_quotes = value.is_empty()
         || value.trim() != value
@@ -40,8 +35,7 @@ fn scalar(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Split a document into its frontmatter body (without the fences) and the rest. A document with
-/// no leading `---` fence yields `(None, whole document)`.
+/// Splits frontmatter from the body, returning the whole document when no leading fence exists.
 pub fn split_frontmatter(doc: &str) -> (Option<String>, String) {
     let Some(rest) = doc.strip_prefix("---\n") else {
         return (None, doc.to_string());
@@ -54,8 +48,7 @@ pub fn split_frontmatter(doc: &str) -> (Option<String>, String) {
     (Some(block), body.to_string())
 }
 
-/// Read one scalar field out of a frontmatter block (as produced by [`split_frontmatter`]).
-/// Quotes around the value are stripped.
+/// Reads one scalar field from frontmatter and strips its surrounding quotes.
 pub fn field(frontmatter: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     frontmatter.lines().find_map(|line| {
@@ -77,8 +70,8 @@ fn unquote(value: &str) -> String {
     value.to_string()
 }
 
-/// Reduce free text to a filesystem-safe slug: lowercase, `[a-z0-9-]` only, runs of anything
-/// else collapsed to one `-`, trimmed, capped at 48 chars. Empty results fall back to `note`.
+/// Builds a lowercase ASCII slug capped at 48 characters with collapsed separators, falling back to
+/// note when empty.
 pub fn slug(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -116,7 +109,6 @@ mod tests {
 
     #[test]
     fn frontmatter_quotes_a_value_that_would_break_yaml() {
-        // Schedule titles carry the spec, and "daily 09:00" has a colon in it.
         let out = frontmatter(&[("title", "Standing: daily 09:00".to_string())]);
         assert!(
             out.contains("title: \"Standing: daily 09:00\""),

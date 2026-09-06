@@ -1,8 +1,5 @@
-//! `repomon_daemon` — the daemon's library surface.
-//!
-//! Holds the shared [`Ctx`] (store + registry + lanes + config + event bus), the JSON-RPC
-//! [`rpc`] dispatch, the [`socket`] server, and [`pubsub`]. The `repomond` binary is a thin
-//! wrapper around [`serve`]; the integration tests drive [`Ctx`] + [`serve`] directly.
+//! Exposes shared daemon state, JSON-RPC dispatch, IPC serving, and event delivery for the binary
+//! and integration tests.
 
 pub mod auto_continue;
 pub mod bytes_stream;
@@ -60,10 +57,7 @@ pub struct OverlaySession {
     pub worktree: PathBuf,
 }
 
-/// Generation-guarded `lane.list` overlay cache. A fresh scan captures [`Self::generation`]
-/// before doing slow transcript/tmux work and may publish only if no structural invalidation
-/// happened meanwhile. This prevents an older notify-watcher scan from republishing a pre-spawn
-/// snapshot after `agent.spawn` cleared the cache.
+/// Validate the generation after I/O so an invalidated computation cannot publish a stale overlay.
 pub struct OverlayCache {
     generation: u64,
     entry: Option<(Instant, Vec<Lane>)>,
@@ -99,32 +93,21 @@ impl OverlayCache {
     }
 }
 
-/// The legacy daemon-owned tmux window the repomind orchestrator used to run in. Repomind now
-/// runs in the controller lane like any other agent (see [`crate::repomind`]), so this name is
-/// only a fallback: a window from a pre-R1 daemon that outlived its process is still adopted and
-/// driven by the `orchestrator.*` aliases, and it is what the resolvers return when no controller
-/// lane window has ever been recorded.
+/// Names the fallback window for adopted orchestrators without a recorded controller-lane window.
 pub(crate) const ORCHESTRATOR_WINDOW: &str = "orchestrator";
 
-/// Which agent CLI powers the orchestrator session. This is the seam every backend-specific
-/// capability routes through: command construction lives in one
-/// `rpc::build_{claude,codex}_orchestrator_command` per variant, and everything else asks the
-/// predicates here. A future backend is a new variant — the compiler then walks you to every
-/// match site that needs an answer.
+/// Identifies the orchestrator CLI and its backend-specific capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrchestratorBackend {
-    /// Claude Code — the default, and the only backend with full monitoring: its `~/.claude`
+    /// Claude Code - the default, and the only backend with full monitoring: its `~/.claude`
     /// JSONL transcript is parseable and `--session-id` pins it at spawn.
     Claude,
-    /// Codex CLI — MCP-capable, so it can drive the fleet tools, but monitored best-effort only:
-    /// its on-disk session format is unstable (same reason core's `CodexMonitor` reads nothing),
-    /// so no transcript chat view, no end-of-turn attention, no session pinning — pane-based
-    /// dialog detection only.
+    /// Runs Codex orchestration with pane-based attention and no orchestrator transcript lookup.
     Codex,
-    /// Antigravity CLI — MCP-capable, but no reliably parseable on-disk transcript (protobuf
-    /// payload without a stable status contract) — pane-based dialog detection only.
+    /// Antigravity CLI - MCP-capable, but no reliably parseable on-disk transcript (protobuf
+    /// payload without a stable status contract) - pane-based dialog detection only.
     Antigravity,
-    /// OpenCode CLI — MCP-capable, but no reliably parseable on-disk transcript — pane-based
+    /// OpenCode CLI - MCP-capable, but no reliably parseable on-disk transcript - pane-based
     /// dialog detection only.
     OpenCode,
 }
@@ -140,41 +123,26 @@ impl OrchestratorBackend {
         }
     }
 
-    /// Whether this backend has a parseable on-disk transcript the daemon may read
-    /// (`orchestrator.transcript`, the end-of-turn attention check). When false, callers must
-    /// skip the transcript path entirely — NOT fall through to the "newest `~/.claude` transcript
-    /// with content" recency heuristic, which would misattribute some other live Claude session's
-    /// chat as this orchestrator's.
+    /// Reports transcript support; unsupported backends must skip transcript lookup to avoid
+    /// attributing another Claude session’s chat to the orchestrator.
     pub fn has_transcript(self) -> bool {
         matches!(self, Self::Claude)
     }
 }
 
-/// The daemon-owned repomind orchestrator: a single agent session (`backend` says which CLI) in a
-/// dedicated tmux window named `orchestrator` (deliberately NOT `lane-*`, so it stays out of the
-/// lane overlay/reaper and never pollutes the fleet `lane.list`). `agent`/`model` record what it
-/// was launched with. `autonomy` is the autonomy level it was started with
-/// (`REPOMON_MCP_AUTONOMY`); `None` when the session was adopted from a tmux window that survived
-/// a daemon restart, whose actual autonomy is unknown to this process.
+/// Tracks the orchestrator’s controller-lane or adopted fallback window, with unknown launch
+/// autonomy represented by None.
 #[derive(Clone)]
 pub struct OrchestratorSession {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub window: String,
     pub autonomy: Option<String>,
-    /// Which agent CLI this session runs — see [`OrchestratorBackend`]. For an adopted window
-    /// this is derived from the current request/config, not from the surviving window itself
-    /// (best-effort, the same caveat as `agent`): a wrong guess degrades to an empty transcript
-    /// or the recency-heuristic fallback, never an error.
+    /// Tracks the orchestrator backend, inferred from the request configuration when adopting a
+    /// window.
     pub backend: OrchestratorBackend,
-    /// The `--session-id` UUID this session's `claude` was launched with (minted at spawn time —
-    /// see `rpc::mint_session_id`), so the transcript picker
-    /// (`rpc::pick_orchestrator_transcript`) can pin `orchestrator.transcript` and the end-of-turn
-    /// attention check to *this* session's own transcript file instead of guessing "the newest
-    /// $HOME transcript" — a guess that misattributes any other active Claude session on the
-    /// machine as repomind's. `None` — same "unknown" semantics as `autonomy` — when the session
-    /// was adopted from a tmux window that survived a daemon restart: this process never captured
-    /// the prior one's session id, so the picker falls back to the old recency heuristic.
+    /// Pins transcript lookup to the captured Claude session ID, or permits recency fallback when
+    /// adoption did not recover an ID.
     pub session_id: Option<String>,
 }
 
@@ -184,11 +152,8 @@ pub type GateCacheEntry = (
     Option<repomon_core::agent::gate::GateVerdict>,
 );
 
-/// One `prompt_cache` entry, keyed by window: when it was sniffed, the transcript-derived base
-/// status at that point (when the overlay supplied it), the dialog found (if any), the running
-/// subagents found (if any), the live spinner phrase found (if any), and the quota wall found (if
-/// any). The status snapshot prevents a pane result captured for a prior turn state from being
-/// reused after the transcript flips Running↔Waiting.
+/// Caches pane evidence with the transcript status at capture time so a result from a previous turn
+/// state is not reused.
 pub type PromptCacheEntry = (
     Instant,
     Option<repomon_core::model::AgentStatus>,
@@ -206,20 +171,14 @@ pub struct Ctx {
     /// User config. Behind a lock because the agent-manager RPCs mutate it (and persist to
     /// disk) at runtime; most fields are static after startup.
     pub config: RwLock<Config>,
-    /// Where [`Config::save`] writes — `config::config_path()` in prod, a tempdir in tests.
+    /// Where [`Config::save`] writes - `config::config_path()` in prod, a tempdir in tests.
     pub config_path: PathBuf,
     pub backend: Arc<dyn SessionBackend>,
     /// Serializes slot allocation, MCP identity creation, and agent launch.
     pub spawn_lock: Mutex<()>,
-    /// Serializes [`crate::repomind::ensure_home`]. It runs on daemon start and on every
-    /// `orchestrator.start`, and two concurrent starts are a real scenario (the TUI's auto-start
-    /// racing `repomon orchestrate`) - without this they race on `git init` in the same folder
-    /// and one of them fails.
+    /// Serializes home initialization across concurrent starts.
     pub repomind_lock: Mutex<()>,
-    /// Work waiting for the next repomind export run, plus the wake that starts its debounce.
-    /// Store writes (journal, schedules, approval rules) set `records`; the file-first writers
-    /// (repo notes, playbooks) add their own home-relative paths so those land in the same
-    /// export commit. See [`crate::repomind::export`].
+    /// Tracks pending home exports and paths for a batched commit.
     pub repomind_export: Mutex<crate::repomind::export::Pending>,
     /// Wakes [`crate::repomind::export::export_watch`] so a burst of store writes costs one
     /// export instead of one per write.
@@ -233,21 +192,15 @@ pub struct Ctx {
     pub started: Instant,
     pub db_path: Option<PathBuf>,
     pub events: pubsub::EventTx,
-    /// Every live client connection's per-device streaming state, keyed by connection id. The
-    /// local TUI and each companion app each register one on connect and drop it on disconnect;
-    /// the capture poll loop streams the union of their viewports (see [`Ctx::viewport_snapshot`])
-    /// and `agent.fit` arbitrates pane sizing across them. Replaces the old daemon-global viewport
-    /// slots, which a second device would clobber.
+    /// Tracks each live client’s stream and focus claims for viewport union and resize arbitration.
     pub sessions: Mutex<HashMap<u64, Arc<ConnSession>>>,
     /// Hands out monotonic connection ids for [`Ctx::open_session`].
     pub next_conn: AtomicU64,
     /// Cache of how many live `claude` processes have each working dir (ps/lsof, 10s TTL), so
     /// `/exit`ed sessions whose transcripts linger aren't counted as running.
     pub live_cwds: Mutex<Option<(Instant, HashMap<PathBuf, usize>)>>,
-    /// Per-worktree "highest count seen recently" used to make [`live_cwds`] sticky-high: a single
-    /// `pgrep`/`lsof` undercount can otherwise drop a session from the overlay (then re-add it next
-    /// probe), churning the lane list and — before the notification activity-latch — re-firing
-    /// alerts. We hold the higher count for a short grace so one bad sample can't hide a session.
+    /// Holds recent higher process counts briefly so one undercount cannot hide and re-add a live
+    /// session.
     pub cwds_sticky: Mutex<HashMap<PathBuf, (usize, Instant)>>,
     /// The composite `lane.list` overlay (lanes + live agent sessions), cached for a short TTL so
     /// many clients polling every ~1s don't each re-run the tmux/lsof/transcript scan. Invalidated
@@ -257,32 +210,27 @@ pub struct Ctx {
     /// callers miss the TTL cache at once (two clients polling `lane.list` plus the notify watcher),
     /// exactly one runs the expensive scan and the rest reuse its result instead of stampeding.
     pub overlay_flight: Mutex<()>,
-    /// Cache of the pending-prompt pane sniff per tmux window — a `capture-pane` per Running/Waiting
-    /// session is the bulk of the overlay's subprocess cost. Short TTL: a dialog appearing is seen
-    /// within it; until then the session reads as it last did. Keyed by window name. Any input sent
-    /// to a window drops its entry, so an answered dialog can't ride out the TTL as a ghost.
+    /// Expire or invalidate prompt captures on input so dismissed dialogs do not linger.
     pub prompt_cache: Mutex<HashMap<String, PromptCacheEntry>>,
-    /// Per window: the last sniffed pane-content hash and when it last CHANGED — the stall
+    /// Per window: the last sniffed pane-content hash and when it last CHANGED - the stall
     /// detector's clock. Never TTL-pruned (its point is remembering how long a pane has sat
     /// still); entries drop only when their window vanishes.
     pub pane_seen: Mutex<HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>>,
     /// Per worktree: the dxkit loop ledger's mtime and the verdict parsed from its tail, so
     /// the overlay re-reads only when the gate actually ran again. Keyed by worktree path.
     pub gate_cache: Mutex<HashMap<PathBuf, GateCacheEntry>>,
-    /// Live PTY byte watches, keyed by window — the embedded renderer's feed. Each window has one
+    /// Live PTY byte watches, keyed by window - the embedded renderer's feed. Each window has one
     /// shared backend stream; the entry refcounts its watching connections (see [`bytes_stream`]).
     /// `Arc<Mutex<…>>` lets the forwarder clean up when the backend detects target closure.
     pub bytes_watches: bytes_stream::Watches,
-    /// Agent windows currently paused on a usage limit, with their reset time — written by the
+    /// Agent windows currently paused on a usage limit, with their reset time - written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     /// Keyed by slot window (`lane-7-2`), not lane: each slot pauses independently.
     pub rate_limits: Mutex<HashMap<String, auto_continue::RateLimit>>,
-    /// Per window: the absolute instant an Antigravity quota wall's "resets in Xh Ym" window
-    /// resolves to, fixed the first time that window text is seen for the window so a stale
-    /// wall message lingering in a short pane capture can't keep reporting quota-exhausted past
-    /// its own countdown. See `rpc::gate_quota_reading`.
+    /// Anchor relative countdowns on first observation so stale pane text cannot extend a quota
+    /// hold.
     pub quota_deadlines: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
-    /// Per Claude account (config-dir key) usage from the `/usage` probe — written by the usage
+    /// Per Claude account (config-dir key) usage from the `/usage` probe - written by the usage
     /// watcher, read by `usage.get`. Empty unless `[usage_probe]` is enabled and a local UI is active.
     pub usage: Mutex<HashMap<String, usage_watch::UsageEntry>>,
     /// Wakes a manual probe, bypassing freshness and UI-heartbeat checks while keeping the
@@ -306,56 +254,37 @@ pub struct Ctx {
     /// Lanes where the user disabled auto-continue this session (the `C` key).
     pub auto_continue_off: Mutex<HashSet<LaneId>>,
     /// The filesystem watcher (set once the background task brings it up). Held here so `repo.add`
-    /// / `repo.remove` can watch / unwatch a tree at runtime — otherwise the watcher only ever
+    /// / `repo.remove` can watch / unwatch a tree at runtime - otherwise the watcher only ever
     /// reflects the repos present at startup, and a removed repo keeps churning fsevents.
     pub watcher: Mutex<Option<Watcher>>,
-    /// When a *local* client (the TUI) was last seen making a request — its 1s `lane.list` refresh
-    /// is a built-in heartbeat that stops the moment the TUI parks in an attach or closes. The
-    /// notification engine fires desktop popups itself once this goes stale, so an alert still
-    /// reaches you when you're heads-down full-screen in an agent.
+    /// Tracks local watcher freshness so popup ownership can fall back when the UI is absent or
+    /// parked.
     pub local_watcher_seen: Mutex<Option<Instant>>,
     /// When a key/text/signal was last sent to each lane's agent. The output streamer reads this
     /// to capture an actively-typed pane at frame-rate (so keystroke echo feels instant), then
     /// relaxes back to the normal cadence once typing stops.
     pub input_seen: Mutex<HashMap<LaneId, Instant>>,
-    /// The set of managed (`lane-…`) tmux windows seen on the previous overlay. When one
-    /// disappears (an agent `/exit`ed or was stopped), the overlay refreshes the live-process
-    /// count immediately so the vanished agent drops from the `×N` count without waiting out the
-    /// `live_cwds` cache TTL.
+    /// Invalidate process and prompt caches when managed windows disappear.
     pub last_managed_windows: Mutex<HashSet<String>>,
     /// Session IDs of all agent sessions managed by repomon (spawned, adopted, or bound to tmux windows),
     /// so their transcripts are never misclassified as external sessions when their windows close or on probe lag.
     pub known_managed_sessions: Mutex<HashSet<String>>,
-    /// Last tmux window list a probe returned successfully (names + window ids +
-    /// `@repomon_session` bindings). Reused for one overlay tick when `list_windows_meta`
-    /// fails transiently (fork/connection fault under load), so a single bad snapshot doesn't
-    /// drop every managed agent — see `rpc::resolve_windows`.
+    /// Retains the last successful window metadata through transient probe failure.
     pub last_good_windows: Mutex<Vec<repomon_core::agent::WindowMeta>>,
     /// Consecutive empty `list_windows` results. A sudden total-empty is usually a tmux server
-    /// bounce, not every agent exiting at once — `resolve_windows` reuses last-good until this
+    /// bounce, not every agent exiting at once - `resolve_windows` reuses last-good until this
     /// reaches the confirm threshold, so a server restart doesn't mass-fire Idle.
     pub window_empty_misses: Mutex<u8>,
-    /// Consecutive-sweep orphan counts for `reap::reap_orphan_windows`, keyed by window name. A
-    /// window must be classified orphaned on back-to-back sweeps before it's actually killed —
-    /// same "don't trust a single bad snapshot" idea as `window_empty_misses` above, applied to
-    /// the reaper. See `reap::confirm_orphans` for why and `reap::ORPHAN_CONFIRM` for the
-    /// threshold.
+    /// Counts consecutive orphan sightings so a transient bad snapshot cannot trigger window
+    /// termination.
     pub orphan_confirm: Mutex<HashMap<String, u32>>,
-    /// Consecutive-sweep count of "the store lists live lanes but the tmux server has zero
-    /// windows at all" — the whole-session-loss case `reap::reap_orphan_windows` used to return
-    /// from silently (see the disappearing-sessions bug: the backing `tmux -L <session>` server
-    /// itself dies — killed out from under the daemon, not reaped by it — and every agent in it
-    /// dies too, with nothing surfaced to the user). Same "don't trust a single bad snapshot"
-    /// debounce as `orphan_confirm`, so a transient tmux hiccup can't fire a false alarm; see
-    /// `reap::SESSION_LOSS_CONFIRM`.
+    /// Counts consecutive empty-backend observations after managed windows were seen, debouncing
+    /// total-session-loss alerts.
     pub session_loss_confirm: Mutex<u32>,
-    /// Set once `reap::reap_orphan_windows` has observed at least one managed window this daemon
-    /// run. Guards `session_loss_confirm`: a cold boot has zero tmux windows until something
-    /// spawns one, which is the ordinary, healthy startup state, not a loss — the counter must
-    /// only start once there was something to lose.
+    /// Distinguish a fresh boot from the disappearance of previously observed managed windows.
     pub saw_managed_windows: Mutex<bool>,
     /// Last successful per-worktree transcript scan, keyed by worktree path. Reused for one overlay
-    /// tick if the scan task panics or its join fails — so a parse panic in one lane can't empty
+    /// tick if the scan task panics or its join fails - so a parse panic in one lane can't empty
     /// every lane's sessions. See `rpc::reuse_per_path_on_failure`.
     pub last_good_sessions: Mutex<HashMap<PathBuf, Vec<repomon_core::agent::TranscriptSummary>>>,
     /// What the overlay surfaced per lane on the previous tick, so a session that vanishes this
@@ -369,26 +298,14 @@ pub struct Ctx {
     /// `stream_orchestrator` captures it at frame-rate while you type to repomind, the same
     /// keystroke-echo speedup `input_seen` gives a focused lane. Goes quiet on its own.
     pub orchestrator_input_seen: Mutex<Option<Instant>>,
-    /// The repomind orchestrator's current attention word (`"none"`, `"permission"`,
-    /// `"decision"`, or `"end_of_turn"`) plus an optional headline — computed every
-    /// `notify_watch` tick (even while notifications are disabled, so the TUI's pinned row and
-    /// command-center header stay live) and folded into `orchestrator_status_value`'s payload on
-    /// change. See `notify_watch::check_orchestrator_attention`.
+    /// Carries current orchestrator attention and an optional headline, refreshed even when
+    /// notifications are disabled.
     pub orchestrator_attention: Mutex<(String, Option<String>)>,
-    /// The valid remote bearer tokens, each paired with its device name (`None` for the legacy
-    /// shared `[remote] token` from config). This is a **std** `RwLock`, not the tokio locks the
-    /// rest of `Ctx` uses, because it is read synchronously inside the tungstenite WebSocket
-    /// handshake callback (which is not an async context). Rebuilt from the store by
-    /// [`rpc::refresh_remote_tokens`] at startup and after every pair/revoke.
+    /// Caches remote tokens behind a synchronous lock because the WebSocket handshake callback
+    /// cannot await.
     pub remote_tokens: std::sync::RwLock<Vec<(String, Option<String>)>>,
-    /// Serializes the *mutate-then-refresh* pair behind every `remote.pair` / `remote.revoke` (and
-    /// the startup seed). [`rpc::refresh_remote_tokens`] is read-then-write (read the store's device
-    /// list, then overwrite `remote_tokens`); running two of them concurrently races. Interleaving a
-    /// `remote.pair` and a `remote.revoke` can otherwise let the pair's stale post-mutation read land
-    /// AFTER the revoke's write, resurrecting a just-revoked token in the auth cache. Holding this
-    /// lock across the store mutation and the refresh makes each token change atomic. It is separate
-    /// from `remote_tokens`'s own (std) `RwLock`, which only guards a single read/write of the Vec —
-    /// not the compound mutate+rebuild transaction.
+    /// Serializes store mutation and token-cache refresh so a concurrent pair cannot restore a
+    /// revoked token from a stale snapshot.
     pub remote_mutate_lock: Mutex<()>,
     /// In-flight local LLM session naming tasks, keyed by transcript session_id, to prevent duplicate background workers.
     pub in_flight_naming: Arc<Mutex<HashSet<String>>>,
@@ -454,7 +371,7 @@ impl Ctx {
             Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
         #[cfg(windows)]
         let backend: Arc<dyn SessionBackend> = {
-            // Owner identity mirrors `reap::owner_token`: the db path — stable across
+            // Owner identity mirrors `reap::owner_token`: the db path - stable across
             // restarts (so this daemon re-adopts its own hosts) and distinct per instance
             // (so a stray test daemon's hosts are never adopted, reaped, or killed).
             let me = db_path
@@ -481,10 +398,7 @@ impl Ctx {
     ) -> Arc<Self> {
         let registry = Registry::new(store.clone());
         let lanes = Lanes::new(store.clone(), config.clone());
-        // Make any already-running session attach-native (mouse, clipboard, deep scrollback);
-        // spawns reapply it, but an existing backend server (a tmux server, or detached
-        // Windows host processes) outlives a daemon restart — on Windows this scan is the
-        // re-adoption pass.
+        // Configure the existing backend runtime so adopted sessions survive daemon restarts.
         if backend.session_exists() {
             backend.configure();
         }
@@ -615,7 +529,7 @@ impl Ctx {
         entry.truncated = false;
     }
 
-    /// Drop the cached `lane.list` overlay so the next read recomputes — call after a structural
+    /// Drop the cached `lane.list` overlay so the next read recomputes - call after a structural
     /// change (spawn / adopt / stop / lane create / delete) so the action shows up immediately
     /// instead of waiting out the cache TTL.
     pub async fn invalidate_overlay(&self) {
@@ -624,7 +538,7 @@ impl Ctx {
 
     /// Register a new client connection's session and return it. Each transport calls this once on
     /// connect (Local for the Unix socket, Remote for the bridge) and drops the session via
-    /// [`close_session`](Self::close_session) — or a `conn::SessionGuard` — on every exit path.
+    /// [`close_session`](Self::close_session) - or a `conn::SessionGuard` - on every exit path.
     pub async fn open_session(self: &Arc<Self>, kind: ConnKind) -> Arc<ConnSession> {
         let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
         let sess = Arc::new(ConnSession::new(id, kind));
@@ -638,23 +552,14 @@ impl Ctx {
         if self.sessions.lock().await.remove(&id).is_none() {
             return;
         }
-        // A connection's byte watches die with it: release every window this connection held from
-        // the shared byte-stream registry (stopping the pipes no other connection still watches).
-        // Keyed by connection id, so it cleans up whatever the session was watching without relying
-        // on `watched_bytes` being in sync.
+        // Remove watches by session ID regardless of source so stale connection sets cannot retain
+        // them.
         crate::bytes_stream::unwatch_all(&self.backend, &self.bytes_watches, id).await;
         self.reconcile_lane_watchers().await;
     }
 
-    /// Union of every live session's stream targets, plus the set of windows any fresh-beat session
-    /// focuses (those get the fast cadence and cursor capture). The capture poll loop drives itself
-    /// off this instead of the old daemon-global viewport slots.
-    ///
-    /// Single-connection equivalence (the wire-compat proof): with exactly one session, `targets`
-    /// is that session's viewport built exactly as the loop built it before (a `stream_window_for`
-    /// target per lane, then its filtered terminal windows, deduped by window), and `focused` is
-    /// `{its focus window}` when its beat is fresh — which a live client's `viewport.set` heartbeat
-    /// keeps it. So every observable capture is identical to before the per-connection refactor.
+    /// Combines live clients’ stream targets and identifies windows focused by clients with fresh
+    /// heartbeats.
     pub async fn viewport_snapshot(&self) -> ViewportSnapshot {
         let now = Instant::now();
         let sessions: Vec<Arc<ConnSession>> =
@@ -729,7 +634,7 @@ impl Ctx {
 /// The capture poll loop's view of every live session, from [`Ctx::viewport_snapshot`].
 #[derive(Debug, Default, Clone)]
 pub struct ViewportSnapshot {
-    /// Every window to stream this tick — the union across sessions, deduped by window, each
+    /// Every window to stream this tick - the union across sessions, deduped by window, each
     /// tagged with the lane it belongs to for the output event payload.
     pub targets: Vec<(LaneId, String)>,
     /// Windows any fresh-beat session focuses: fast cadence floor/cap + cursor capture.
@@ -751,39 +656,30 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         /// The focused pane's last-seen cursor `(col, row)`, so a cursor-only move still re-pushes.
         cursor: Option<(u16, u16)>,
     }
-    // Activity-driven cadence: a lane is captured at its FLOOR while its pane keeps changing, and
-    // its interval doubles toward a CAP once the pane goes quiet (reset to FLOOR on any change).
-    // The FOCUSED lane — what the user is actively driving — streams fast; background/Grid tiles
-    // get a slower floor and a longer idle ceiling (a phone mirror needn't render idle panes at
-    // 10Hz). This turns the old flat 8-lanes×10Hz tmux-fork storm into a few captures/sec.
+    // Back off capture of unchanged panes while keeping focused and actively typed panes
+    // responsive.
     const FOCUS_FLOOR: Duration = Duration::from_millis(150);
     const FOCUS_CAP: Duration = Duration::from_millis(600);
     const BG_FLOOR: Duration = Duration::from_millis(700);
     const BG_CAP: Duration = Duration::from_millis(3000);
     // While a pane is being actively typed into, capture it at ~frame-rate so keystroke echo
     // feels instant. This regime applies for TYPING_WINDOW after the last key, then relaxes back
-    // to the focused/background cadence above — a brief single-pane burst, only while typing.
+    // to the focused/background cadence above - a brief single-pane burst, only while typing.
     const TYPING_FLOOR: Duration = Duration::from_millis(30);
     const TYPING_CAP: Duration = Duration::from_millis(60);
     const TYPING_WINDOW: Duration = Duration::from_millis(400);
-    // Hard ceiling on captures per tick so entering a busy Grid (every pane "fresh" at once) can't
-    // burst the whole viewport in one tick — the focused lane always goes first, the rest are
-    // serviced round-robin across ticks. A multi-device union is only larger, so the same cap just
-    // amortizes it across more ticks; no per-device budget is needed.
+    // Bound each tick’s capture work, prioritizing focus while rotating background windows fairly.
     const MAX_PER_TICK: usize = 3;
 
     let mut state: HashMap<String, St> = HashMap::new();
-    let mut rr: usize = 0; // round-robin offset so background panes share the per-tick budget fairly
-    // The base tick must be at least as fast as the tightest regime (TYPING_FLOOR); per-lane
-    // gating below keeps non-typing lanes at their slower cadence, so these extra wakeups are
-    // cheap no-ops (no captures) when nothing is being typed.
+    let mut rr: usize = 0; // Keep the base tick responsive to typing; per-window limits suppress redundant captures.
     let mut tick = tokio::time::interval(TYPING_FLOOR);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
         let now = Instant::now();
         // Prune lanes typed into longer ago than TYPING_WINDOW. This runs BEFORE the empty-viewport
-        // early-return below so `input_seen` is bounded even when no TUI viewport is set — otherwise
+        // early-return below so `input_seen` is bounded even when no TUI viewport is set - otherwise
         // a lane typed into while nothing is visible would leak its entry forever.
         {
             let mut m = ctx.input_seen.lock().await;
@@ -791,14 +687,14 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         }
         // The union of every live session's stream targets, plus the windows any fresh-beat
         // session focuses. With one connection this is exactly that connection's viewport and
-        // focus window — see `Ctx::viewport_snapshot` for the single-connection equivalence proof.
+        // focus window - see `Ctx::viewport_snapshot` for the single-connection equivalence proof.
         let ViewportSnapshot { targets, focused } = ctx.viewport_snapshot().await;
         if targets.is_empty() {
             state.clear();
             continue;
         }
         state.retain(|w, _| targets.iter().any(|(_, tw)| tw == w));
-        // Snapshot which lanes were typed into recently — they capture at frame-rate. The map was
+        // Snapshot which lanes were typed into recently - they capture at frame-rate. The map was
         // just pruned above, so this is the live set of within-TYPING_WINDOW lanes.
         let typing_lanes: HashMap<LaneId, Instant> = ctx.input_seen.lock().await.clone();
 
@@ -834,7 +730,7 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
             } else {
                 (BG_FLOOR, BG_CAP)
             };
-            // The poll interval, re-clamped to the current regime each tick — so the moment a lane
+            // The poll interval, re-clamped to the current regime each tick - so the moment a lane
             // starts being typed into, a stale 150ms wait shrinks to <=60ms and it captures on the
             // next tick (prompt first-keystroke echo without coupling to the input handler).
             let interval = state
@@ -864,7 +760,7 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
                 Ok(Ok(c)) => c,
                 _ => continue,
             };
-            // Only the focused pane carries a cursor (the TUI renders it where you're typing) — one
+            // Only the focused pane carries a cursor (the TUI renders it where you're typing) - one
             // extra tmux fork on a single pane, never on background/Grid tiles.
             let cursor = if is_focused {
                 let tmux = ctx.backend.clone();
@@ -919,10 +815,8 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     }
 }
 
-/// The window a viewport lane streams: the TUI-selected agent window when this lane is the
-/// focus (Tab in Focus/Split), else the lane's first slot. A focused plain terminal never
-/// hijacks its lane's stream — the terminal is its own target via `viewport_windows`, so the
-/// lane's agent tile keeps updating beside it.
+/// Resolve the lane’s agent separately from a plain terminal so terminal focus cannot steal its
+/// stream.
 fn stream_window_for(lane: LaneId, focus: &Option<(LaneId, String)>) -> String {
     match focus {
         Some((l, w)) if *l == lane && TmuxRuntime::parse_term_window(w).is_none() => w.clone(),
@@ -930,16 +824,8 @@ fn stream_window_for(lane: LaneId, focus: &Option<(LaneId, String)>) -> String {
     }
 }
 
-/// Stream the repomind orchestrator's pane to subscribed clients. While a session is running AND a
-/// client has asked to watch it, capture the `orchestrator` window and
-/// broadcast `event.orchestrator.output` whenever the pane text or cursor changes. Idle (no session
-/// or nobody watching) it does nothing but a cheap flag check.
-///
-/// Cadence mirrors the focused-lane regime in [`stream_output`], for this single pane: while you are
-/// typing to repomind (within `TYPING_WINDOW` of the last `orchestrator.send_input`/`key`) it
-/// captures at frame-rate so keystroke echo feels instant; once typing goes quiet it relaxes to a
-/// focused cadence and backs off toward a cap while the pane is unchanged. The old flat 200ms tick
-/// made typing in repomind echo at ~5fps versus a lane's ~30Hz.
+/// Streams changed orchestrator output to interested clients, accelerating during typing and
+/// backing off while the pane remains unchanged.
 pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     use std::time::{Duration, Instant};
 
@@ -1099,9 +985,9 @@ mod stream_tests {
         assert_eq!(
             snap.targets,
             vec![
-                (7, "lane-7-2".to_string()), // focused lane streams its selected window
-                (9, "lane-9".to_string()),   // other lane streams its first slot
-                (9, "term-9-1".to_string()), // the tiled terminal
+                (7, "lane-7-2".to_string()),
+                (9, "lane-9".to_string()),
+                (9, "term-9-1".to_string()),
             ]
         );
         assert_eq!(
@@ -1121,7 +1007,7 @@ mod stream_tests {
         *a.viewport_focus_at.lock().await = Some(Instant::now());
 
         let b = ctx.open_session(ConnKind::Remote { device: None }).await;
-        *b.viewport.lock().await = vec![9, 12]; // 9 overlaps with A
+        *b.viewport.lock().await = vec![9, 12];
         *b.viewport_focus.lock().await = Some((12, "lane-12".to_string()));
         *b.viewport_focus_at.lock().await = Some(Instant::now());
 
@@ -1136,12 +1022,12 @@ mod stream_tests {
             ]),
             "the union covers every lane exactly once (lane 9 deduped)"
         );
-        // lane 9 appears once despite being in both viewports.
+
         assert_eq!(
             snap.targets.iter().filter(|(_, w)| w == "lane-9").count(),
             1
         );
-        // Both fresh focuses union into the focused set.
+
         assert_eq!(
             snap.focused,
             HashSet::from(["lane-7".to_string(), "lane-12".to_string()])
@@ -1151,7 +1037,7 @@ mod stream_tests {
     #[tokio::test]
     async fn viewport_snapshot_focuses_only_fresh_beats() {
         // A session that focuses a window but whose beat has gone stale (or was never stamped) does
-        // not contribute to the focused set — though its viewport still streams (it is a target).
+        // not contribute to the focused set - though its viewport still streams (it is a target).
         let ctx = test_ctx().await;
         let stale = ctx.open_session(ConnKind::Remote { device: None }).await;
         *stale.viewport.lock().await = vec![7];

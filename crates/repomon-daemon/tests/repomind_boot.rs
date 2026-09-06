@@ -1,8 +1,5 @@
-//! End-to-end: `repomind.boot` regenerates the daemon-owned boot document from the home, and
-//! `repomind.status` reports what the last regeneration produced.
-//!
-//! Every test here points `[repomind] home` at a tempdir. The operator's real `~/repomind` is
-//! never created, read, or written by the suite.
+//! Tests boot regeneration and status with temporary homes that isolate the operator’s fleet
+//! memory.
 
 mod common;
 
@@ -83,7 +80,7 @@ async fn repomind_boot_regenerates_the_document_and_status_reports_it() {
         "{body}"
     );
     assert!(body.contains("land the boot document"), "{body}");
-    // The home itself is a registered repo with a controller lane, so it is in the snapshot.
+
     assert!(body.contains("## Fleet snapshot"), "{body}");
 
     let status = call(&mut stream, 2, "repomind.status", None).await;
@@ -127,8 +124,8 @@ async fn status_reports_no_boot_state_before_the_first_regeneration() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// The budget is configurable so an operator on a small model can shrink the boot document, and
-/// a document that had to be cut says so in both the file and the RPC result.
+/// A reduced boot budget must truncate content and report truncation in both the file and RPC
+/// response.
 #[tokio::test]
 async fn a_tiny_budget_trims_the_document_and_the_result_names_what_went() {
     let dir = tempfile::tempdir().unwrap();

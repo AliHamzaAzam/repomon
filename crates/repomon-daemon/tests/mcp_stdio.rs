@@ -27,7 +27,7 @@ async fn connect_retry(sock: &std::path::Path) -> IpcStream {
     panic!("daemon endpoint {} never came up", sock.display());
 }
 
-/// Every read (daemon socket or MCP child) is guarded by this — a hang must fail the test, not
+/// Every read (daemon socket or MCP child) is guarded by this - a hang must fail the test, not
 /// wedge CI.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -47,8 +47,7 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
-/// Call the daemon directly over its length-prefixed JSON-RPC socket — same helper as
-/// tests/integration.rs's `call()`. Used to seed a repo before the MCP child ever connects.
+/// Calls the daemon over framed local IPC to seed fixtures before the MCP child connects.
 async fn daemon_call(
     stream: &mut IpcStream,
     id: u64,
@@ -65,10 +64,8 @@ async fn daemon_call(
     serde_json::from_slice(&frame).unwrap()
 }
 
-/// Boot an in-process daemon on a short temp socket path (macOS caps UDS paths at ~104 chars),
-/// exactly like tests/integration.rs, and return a connected control stream for seeding state.
-/// Config and repo-notes paths live in the returned tempdir (kept alive by the caller) so the
-/// daemon under test never touches the real `~/.config` / data dir.
+/// Boots an isolated daemon on a short socket path and returns its control stream with the
+/// temporary directory that owns its state.
 async fn boot_daemon(tag: &str) -> (PathBuf, IpcStream, tempfile::TempDir) {
     boot_daemon_cfg(tag, Config::default()).await
 }
@@ -80,8 +77,8 @@ async fn boot_daemon_cfg(tag: &str, mut config: Config) -> (PathBuf, IpcStream, 
     let store = Store::open_in_memory().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     config.worktree_template = format!("{}/wt/{{repo}}/{{branch}}", state_dir.path().display());
-    // The repomind home is redirected too: repo notes and playbooks are files in it since R2,
-    // so a default `~/repomind` would write into the operator's real fleet memory.
+    // Redirect repomind home so fixture notes and playbooks cannot reach the operator’s memory
+    // repository.
     config.repomind.home = state_dir
         .path()
         .join("repomind")
@@ -194,7 +191,7 @@ fn tool_result(resp: &Value) -> (String, bool) {
     (text, is_error)
 }
 
-/// Close stdin (EOF, the documented clean-shutdown path — see mcp.rs's `run_stdio`) and wait for
+/// Close stdin (EOF, the documented clean-shutdown path - see mcp.rs's `run_stdio`) and wait for
 /// the child to exit; fall back to a hard kill if it doesn't.
 async fn shutdown_mcp_child(mut child: Child, stdin: ChildStdin) {
     drop(stdin);
@@ -309,7 +306,6 @@ async fn mcp_stdio_end_to_end() {
     let mut stdin = child.stdin.take().expect("child stdin");
     let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
 
-    // 1. initialize -> serverInfo.name == "repomon".
     mcp_request(
         &mut stdin,
         1,
@@ -362,7 +358,6 @@ async fn mcp_stdio_end_to_end() {
     .collect();
     assert_eq!(names, expected);
 
-    // 3. tools/call list_repos -> the registered repo appears.
     mcp_request(
         &mut stdin,
         3,
@@ -406,7 +401,6 @@ async fn mcp_stdio_end_to_end() {
     assert_eq!(lanes.len(), 1, "fleet_status result: {parsed}");
     assert_eq!(lanes[0]["lane_id"], json!(lane_id));
 
-    // 5. tools/call read_agent with a bogus lane_id -> MCP tool error (isError: true).
     mcp_request(
         &mut stdin,
         5,
@@ -425,7 +419,7 @@ async fn mcp_stdio_end_to_end() {
         "unexpected error text: {text}"
     );
 
-    // 6. Concurrency: wait_for_change (2s) must not block a concurrent ping behind it — each
+    // 6. Concurrency: wait_for_change (2s) must not block a concurrent ping behind it - each
     // tools/call runs in its own task (see mcp.rs), so the cheap request answers first.
     mcp_request(
         &mut stdin,
@@ -588,7 +582,7 @@ async fn mcp_stdio_repo_notes_round_trip() {
     assert!(!is_error, "repo_notes_write errored: {text}");
     let parsed: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(parsed["ok"], json!(true));
-    // File-first since R2: notes live at `fleet/<repo>/notes.md` inside the repomind home.
+
     let path = PathBuf::from(parsed["path"].as_str().unwrap());
     assert!(
         path.starts_with(state_dir.path().join("repomind").join("fleet")),
@@ -615,7 +609,6 @@ async fn mcp_stdio_repo_notes_round_trip() {
         "no hint once notes exist: {parsed}"
     );
 
-    // Unknown repo: error that points at list_repos.
     mcp_request(
         &mut stdin,
         5,
@@ -628,7 +621,6 @@ async fn mcp_stdio_repo_notes_round_trip() {
     assert!(is_error, "unknown repo should error, got: {text}");
     assert!(text.contains("list_repos"), "unhelpful error: {text}");
 
-    // Over the cap: rejected with an error naming the limit.
     mcp_request(
         &mut stdin,
         6,
@@ -644,7 +636,7 @@ async fn mcp_stdio_repo_notes_round_trip() {
     assert!(is_error, "oversized write should error, got: {text}");
     assert!(text.contains("8192"), "unhelpful error: {text}");
 
-    // create_lane embeds the repo's notes in its own result — the orchestrator gets them with
+    // create_lane embeds the repo's notes in its own result - the orchestrator gets them with
     // no extra tool call, ready to fold into the worker's task.
     mcp_request(
         &mut stdin,
@@ -780,7 +772,6 @@ async fn mcp_stdio_journal_and_cold_start_recap() {
         .to_string_lossy()
         .into_owned();
 
-    // Session 1: one journaled mutation, then a clean exit.
     let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
     mcp_request(
         &mut stdin,
@@ -836,7 +827,6 @@ async fn mcp_stdio_journal_and_cold_start_recap() {
         "recap must appear only on the first call: {parsed}"
     );
 
-    // fleet_history searches the journal.
     mcp_request(
         &mut stdin,
         4,
@@ -853,7 +843,6 @@ async fn mcp_stdio_journal_and_cold_start_recap() {
     assert_eq!(entries[0]["action"], json!("repo_notes_write"));
     assert_eq!(entries[0]["outcome"], json!("ok"));
 
-    // Failed mutations are journaled too, with outcome error.
     mcp_request(
         &mut stdin,
         5,
@@ -942,7 +931,6 @@ async fn mcp_stdio_playbook_draft_approval_flow() {
         "save result must explain the approval step: {parsed}"
     );
 
-    // Unapproved: search returns nothing, with a hint.
     mcp_request(
         &mut stdin,
         3,
@@ -970,7 +958,6 @@ async fn mcp_stdio_playbook_draft_approval_flow() {
     .await;
     assert!(r.error.is_none(), "approve errored: {:?}", r.error);
 
-    // Now the playbook is followable.
     mcp_request(
         &mut stdin,
         4,
@@ -1097,7 +1084,6 @@ async fn mcp_stdio_approval_allow_two_phase() {
 
     let (child, mut stdin, mut lines) = init_mcp_child(&sock, &[]).await;
 
-    // No rules yet.
     mcp_request(
         &mut stdin,
         2,
@@ -1111,7 +1097,6 @@ async fn mcp_stdio_approval_allow_two_phase() {
     let parsed: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(parsed["rules"], json!([]));
 
-    // Phase 1: no confirm mints a token and stores nothing.
     mcp_request(
         &mut stdin,
         3,
@@ -1150,7 +1135,6 @@ async fn mcp_stdio_approval_allow_two_phase() {
         "phase 1 must not store the rule"
     );
 
-    // A fabricated token is rejected.
     mcp_request(
         &mut stdin,
         5,
@@ -1165,7 +1149,6 @@ async fn mcp_stdio_approval_allow_two_phase() {
     let (text, is_error) = tool_result(&resp);
     assert!(is_error, "bogus token must fail: {text}");
 
-    // Phase 2 with the real token stores the rule.
     mcp_request(
         &mut stdin,
         6,

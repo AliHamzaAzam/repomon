@@ -1,17 +1,5 @@
-//! The repomind home repo and its controller lane.
-//!
-//! Repomind's memory lives in a git repo on disk (`~/repomind` by default, `[repomind] home` in
-//! the config) rather than only in the daemon's SQLite. This module makes sure that repo exists,
-//! is registered like any other repo, and has exactly one lane marked `role = "controller"`:
-//! the lane every controller agent runs in.
-//!
-//! Two rules shape everything here:
-//!
-//! - **Never overwrite.** The operator (and, in phase R0, another agent) authors the real
-//!   `AGENTS.md` / `REPOMIND.md` content. Ensure-home only ever fills in what is missing, so a
-//!   daemon restart can never clobber a hand-written protocol file.
-//! - **Idempotent.** It runs on every daemon start and on every `orchestrator.start`, and a
-//!   second run does nothing and logs nothing.
+//! Bootstraps the repomind home repository and controller lane idempotently without overwriting
+//! operator-owned files.
 
 pub mod basic_memory;
 pub mod boot;
@@ -215,20 +203,8 @@ pub async fn ensure_home(ctx: &Ctx) -> repomon_core::Result<RepomindHome> {
     })
 }
 
-/// Resolve the controller lane's primary window: the store's recorded window when a live session
-/// still runs there, otherwise the lane's earliest live session (slot order), with the record
-/// corrected to match so the next read is cheap and stays true. `None` when the controller lane
-/// has no live session at all — `repomind.status` reports `window: null` and `repomind.instruct`
-/// refuses rather than typing into, or reporting, a window nobody is in.
-///
-/// "Live" means a tmux window presently exists for one of the lane's agent slots (`lane-{id}` /
-/// `lane-{id}-{slot}`) — the same liveness `agent.spawn`'s controller cap check already uses.
-/// This is what catches the staleness `agent.spawn` leaves behind: every spawn into the
-/// controller lane (`orchestrator.start`'s first spawn, then an operator's Spawn to add another
-/// controller, or the next `orchestrator.start` after a restart) unconditionally records its own
-/// window as "the" controller window, even when an earlier session in the same lane is still the
-/// one actually running. When that later window's session ends, the record is left pointing at a
-/// corpse while the earlier session lives on.
+/// Resolves and repairs the controller’s recorded primary window against live lane slots, returning
+/// None when no session remains.
 pub async fn primary_window(ctx: &Ctx, lane_id: LaneId) -> repomon_core::Result<Option<String>> {
     let backend = ctx.backend.clone();
     let names = tokio::task::spawn_blocking(move || backend.list_windows())
@@ -253,17 +229,8 @@ pub async fn primary_window(ctx: &Ctx, lane_id: LaneId) -> repomon_core::Result<
     Ok(Some(earliest))
 }
 
-/// [`primary_window`], for callers that need a window to act on unconditionally — the deprecated
-/// `orchestrator.*` aliases — rather than one that handles "no controller" itself.
-///
-/// The in-memory tracked session, when this process has one, takes priority over the lane
-/// resolution below: it is what `orchestrator.stop`'s kill and `reconcile_orchestrator` actually
-/// keep truthful, and it is the only record of a window the lane system doesn't recognize as its
-/// own — an adopted legacy `orchestrator` window surviving from a pre-R1 daemon, whose adoption
-/// deliberately does not write the lane's `tmux_window` (see `orchestrator.start`). Only when
-/// nothing is tracked (typically: this process hasn't adopted or spawned a controller since it
-/// started) does resolution fall to the controller lane's live session, then the legacy window
-/// name as a last resort.
+/// Resolves the tracked orchestrator window before the controller lane and legacy fallback,
+/// preserving adopted windows outside lane naming.
 pub async fn primary_window_or_legacy(ctx: &Ctx) -> String {
     if let Some(session) = ctx.orchestrator.lock().await.as_ref() {
         return session.window.clone();
@@ -289,12 +256,8 @@ const CONTROLLER_HOLD_CLASSES: &[DialogClass] = &[
     DialogClass::DeviceAccess,
 ];
 
-/// Give the controller lane its supervision default the first time the home is ensured: `hold` on
-/// every destructive class, supervision itself left off so the operator opts in exactly as they do
-/// for any other lane.
-///
-/// Written once and never again. An operator who relaxes a class here keeps that choice across
-/// daemon restarts, which is why this refuses to touch a lane that already has a policy row.
+/// Seed a default hold policy only when no policy exists, preserving operator choices across
+/// restarts.
 async fn seed_controller_policy(ctx: &Ctx, lane_id: LaneId) -> repomon_core::Result<()> {
     if ctx.store.lane_policy(lane_id).await?.is_some() {
         return Ok(());
@@ -345,17 +308,8 @@ fn markdown_files(dir: &Path) -> usize {
         .count()
 }
 
-/// Everything the repomind home needs at daemon start, in order: make the home and its
-/// controller lane exist, migrate records that still only live in the daemon's own storage,
-/// register the home as a basic-memory project, roll expired journal days into the archive, and
-/// queue one export.
-///
-/// That last step is what makes a fresh install (or a restart that missed a burst of rows) catch
-/// up: exports are otherwise only triggered by a new store write or the `repomind.export` RPC,
-/// so rows written before the home existed would sit unexported forever. It goes through the
-/// ordinary debounced path, so it costs one commit, batched with anything else in flight.
-///
-/// Never fails the daemon: each step logs its own failure and the next one still runs.
+/// Bootstraps and reconciles the home, registers memory, archives journals, and queues an export,
+/// logging individual failures without stopping daemon startup.
 pub async fn start(ctx: &Ctx) {
     if let Err(e) = ensure_home(ctx).await {
         tracing::warn!("repomind home unavailable: {e}");
@@ -375,10 +329,8 @@ pub async fn start(ctx: &Ctx) {
     export::request(ctx).await;
 }
 
-/// One-time file-first migration, run once per daemon start right after [`ensure_home`]: records
-/// that only exist in the daemon's own storage are written into the home so an agent can read
-/// them as files. Nothing is ever deleted from the old location, so a rollback still finds it.
-/// Idempotent: a repo or playbook already present in the home is left exactly as it is.
+/// Copies daemon-only records into the home idempotently, preserving both existing home files and
+/// migration sources for rollback.
 pub async fn migrate_records(ctx: &Ctx) -> repomon_core::Result<Vec<String>> {
     let home = ctx.config.read().await.repomind_home();
     if !home.is_dir() {
@@ -623,8 +575,8 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// A home the operator already wrote (R0's template files, a git repo of their own) is
-    /// adopted as-is: no file is rewritten and no second `git init` runs.
+    /// An existing operator-owned home must be adopted without rewriting files or reinitializing
+    /// git.
     #[tokio::test]
     async fn ensure_home_adopts_a_home_the_operator_already_wrote() {
         let dir = tempfile::tempdir().unwrap();
@@ -642,8 +594,7 @@ mod tests {
         );
     }
 
-    /// Repo notes that only exist in the app-support directory are copied into the home on the
-    /// first start after R2, and the old file is left where it was.
+    /// Migrating repository notes must preserve the source file.
     #[tokio::test]
     async fn migrate_records_copies_legacy_repo_notes_into_the_home() {
         let dir = tempfile::tempdir().unwrap();
@@ -682,8 +633,7 @@ mod tests {
         );
     }
 
-    /// Playbook rows that only exist in SQLite become files on the first start after R2: an
-    /// approved one at the root, a draft under `drafts/`, and the approval gate is unchanged.
+    /// Migrating playbooks must preserve the published/draft approval boundary.
     #[tokio::test]
     async fn migrate_records_writes_playbook_rows_as_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -788,10 +738,7 @@ mod tests {
         );
     }
 
-    /// The exact production scenario: Start recorded window one, a later Spawn (or a second
-    /// Start after a restart) recorded window two, and window two's session has since ended
-    /// while window one is still the live controller. `primary_window` must resolve to the live
-    /// window one, not the stale recorded window two, and must correct the record.
+    /// A live fallback controller must repair a stale primary record.
     #[tokio::test]
     async fn primary_window_resolves_a_stale_recorded_window_to_the_live_session() {
         if !TmuxRuntime::available() {
@@ -820,7 +767,7 @@ mod tests {
             .set_lane_tmux_window(lane_id, Some(w2.clone()))
             .await
             .unwrap();
-        // Window two's session ends; window one is still live.
+
         ctx.backend.kill_named(&w2).expect("kill window two");
 
         let resolved = primary_window(&ctx, lane_id).await.unwrap();
@@ -879,8 +826,8 @@ mod tests {
         kill_tmux_session(&session);
     }
 
-    /// No live session in the controller lane at all — the recorded window is stale and nothing
-    /// replaces it — resolves to `None`, which is what makes `repomind.status` report
+    /// No live session in the controller lane at all - the recorded window is stale and nothing
+    /// replaces it - resolves to `None`, which is what makes `repomind.status` report
     /// `window: null` and `repomind.instruct` refuse.
     #[tokio::test]
     async fn primary_window_is_none_when_no_session_is_live() {
