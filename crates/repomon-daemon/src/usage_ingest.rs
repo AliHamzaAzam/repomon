@@ -442,11 +442,10 @@ pub async fn price_table(ctx: &Arc<Ctx>) -> PriceTable {
         if let Ok(text) = std::fs::read_to_string(price_cache_path()) {
             // A stable floor after the built-in date lets the snapshot beat built-in rows
             // while pricing stored events, independently of when this table is constructed.
-            if let Ok(rows) =
-                repomon_core::pricing::parse_litellm_snapshot(
-                    &text, repomon_core::pricing::snapshot_effective_from(),
-                )
-            {
+            if let Ok(rows) = repomon_core::pricing::parse_litellm_snapshot(
+                &text,
+                repomon_core::pricing::snapshot_effective_from(),
+            ) {
                 for row in rows {
                     table.insert(row);
                 }
@@ -460,35 +459,6 @@ pub async fn price_table(ctx: &Arc<Ctx>) -> PriceTable {
 /// Where a refreshed price snapshot is cached.
 pub fn price_cache_path() -> PathBuf {
     repomon_core::config::data_dir().join("prices/litellm.json")
-}
-
-/// Refresh the cached price snapshot if it is missing or older than a day.
-///
-/// The transport is `curl`, on purpose: the ledger is offline by default and pulling an HTTP
-/// stack into the daemon to serve an off-by-default flag would be a poor trade.
-fn refresh_price_cache(url: &str) {
-    let path = price_cache_path();
-    if let Ok(meta) = std::fs::metadata(&path) {
-        let fresh = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(24 * 60 * 60));
-        if fresh {
-            return;
-        }
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let out = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "20", url])
-        .output();
-    if let Ok(out) = out {
-        if out.status.success() && !out.stdout.is_empty() {
-            let _ = std::fs::write(&path, out.stdout);
-        }
-    }
 }
 
 /// Build the repo and lane index, and the lane-to-window map, from the store.
@@ -542,14 +512,6 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
     if !config.enabled {
         return Ok(IngestReport::default());
     }
-    if config.refresh_prices {
-        let url = config
-            .price_url
-            .clone()
-            .unwrap_or_else(|| repomon_core::config::DEFAULT_USAGE_PRICE_URL.to_string());
-        let _ = tokio::task::spawn_blocking(move || refresh_price_cache(&url)).await;
-    }
-
     let budget = config.max_files_per_scan;
     let all = tokio::task::spawn_blocking(discover_all_sources)
         .await
@@ -1839,6 +1801,24 @@ mod tests {
         assert_eq!(
             table.lookup("claude-sonnet-5", at).unwrap().input_per_mtok,
             99.0
+        );
+    }
+    #[tokio::test]
+    async fn ingest_does_not_fetch_prices_when_refresh_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = with_seeded_sources(dir.path());
+        let ctx = seeded_ctx(dir.path()).await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        {
+            let mut config = ctx.config.write().await;
+            config.usage.refresh_prices = true;
+            config.usage.price_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+        }
+        assert!(ingest_once(&ctx).await.unwrap().events > 0);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
         );
     }
 }

@@ -1,21 +1,12 @@
 //! The daily LiteLLM price refresh: fetch, cache, and report status for `usage.rates` /
 //! `usage.refresh_rates`.
 //!
-//! Deliberately its own module rather than living inside [`crate::usage_ingest`]: that module is
-//! a concurrent-edit hotspot (the Claude transcript reader and source discovery). This module
-//! owns the network fetch and its metadata; the fetched snapshot body itself lands at
-//! [`crate::usage_ingest::price_cache_path`], the same file [`crate::usage_ingest::price_table`]
-//! already reads when `[usage] refresh_prices` is on, so the two modules cooperate through one
-//! shared file path rather than a direct dependency in either direction.
-//!
-//! ```text
-//! spawn_daily_task ── every tick ──> is_due? / retry.due? ──> run_refresh ──> writes:
-//!   - crate::usage_ingest::price_cache_path()   (the snapshot body; price_table() reads this)
-//!   - usage_rates::meta_cache_path()            (etag / fetched_at / last_error)
-//! ```
+//! This module owns refresh and publication. Ingest and queries only read the validated cache.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
@@ -64,14 +55,9 @@ impl CacheMeta {
             .unwrap_or_default()
     }
 
-    fn save(&self) {
-        let path = meta_cache_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
-        }
+    fn save(&self) -> std::io::Result<()> {
+        let text = serde_json::to_vec_pretty(self)?;
+        write_atomic(&meta_cache_path(), &text)
     }
 }
 
@@ -183,19 +169,53 @@ fn fetch(url: &str, etag: Option<&str>) -> Result<FetchOutcome, String> {
     })
 }
 
-/// Write a fetched snapshot body to the same path `usage_ingest::price_table` reads.
-fn write_snapshot(body: &str) -> std::io::Result<()> {
-    let path = crate::usage_ingest::price_cache_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+// All refresh entry points share one publication owner, including separate contexts in tests.
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".rates-{}-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let result = (|| {
+        file.write_all(body)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::write(path, body)
+    result
+}
+
+fn write_snapshot(body: &str) -> std::io::Result<()> {
+    write_atomic(&crate::usage_ingest::price_cache_path(), body.as_bytes())
 }
 
 /// Run one fetch attempt now, unconditionally (the daily/retry cadence is the caller's job, see
 /// [`spawn_daily_task`]). Updates the cached metadata and, on a 200 that parses, the cached
 /// snapshot body.
 pub async fn run_refresh(ctx: &Arc<Ctx>) {
+    let _refresh = REFRESH_LOCK.lock().await;
     let url = {
         let config = ctx.config.read().await;
         config
@@ -241,7 +261,9 @@ pub async fn run_refresh(ctx: &Arc<Ctx>) {
             meta.last_error = Some(e);
         }
     }
-    meta.save();
+    if let Err(error) = meta.save() {
+        tracing::warn!("could not persist price refresh metadata: {error}");
+    }
 }
 
 /// What the ledger knows about its price rates right now, for `usage.rates` and the CLI/desktop
@@ -322,13 +344,16 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK, so no other test reads or writes the variable while
         // this guard lives.
         unsafe { std::env::set_var("REPOMON_DATA_DIR", dir.path()) };
-        DataDirGuard { _dir: dir, _held: held }
+        DataDirGuard {
+            _dir: dir,
+            _held: held,
+        }
     }
 
     impl Drop for DataDirGuard {
         fn drop(&mut self) {
             // SAFETY: still serialized by the lock this guard holds.
-            }
+        }
     }
 
     fn at(y: i32, m: u32, d: u32, h: u32) -> DateTime<Utc> {
@@ -448,9 +473,9 @@ mod tests {
                     .lines()
                     .find_map(|l| {
                         let lower = l.to_ascii_lowercase();
-                        lower.starts_with("if-none-match:").then(|| {
-                            l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string()
-                        })
+                        lower
+                            .starts_with("if-none-match:")
+                            .then(|| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
                     })
                     .unwrap_or_default();
                 let _ = tx.send(inm);
@@ -486,7 +511,11 @@ mod tests {
             }
             FetchOutcome::NotModified { .. } => panic!("expected a 200"),
         }
-        assert_eq!(rx.recv().unwrap(), "", "no If-None-Match without a cached etag");
+        assert_eq!(
+            rx.recv().unwrap(),
+            "",
+            "no If-None-Match without a cached etag"
+        );
     }
 
     #[test]
@@ -524,7 +553,10 @@ mod tests {
         assert!(!status.enabled);
         assert_eq!(status.fetched_at, None);
         assert_eq!(status.next_refresh_at, None);
-        assert!(status.source_counts.builtin > 0, "the built-in table is the floor");
+        assert!(
+            status.source_counts.builtin > 0,
+            "the built-in table is the floor"
+        );
     }
 
     #[tokio::test]
@@ -552,7 +584,6 @@ mod tests {
             "the fetched snapshot's model should be counted, got {:?}",
             status.source_counts
         );
-
     }
 
     #[tokio::test]
@@ -567,6 +598,95 @@ mod tests {
         let status = status(&ctx).await;
         assert!(status.last_error.is_some());
         assert!(status.fetched_at.is_none());
+    }
 
+    #[test]
+    fn atomic_cache_publication_never_exposes_partial_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let body =
+            serde_json::to_vec(&serde_json::json!({"model": "x".repeat(64 * 1024)})).unwrap();
+        write_atomic(&path, b"{}").unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut reads = 0;
+            loop {
+                let bytes = std::fs::read(&reader_path).unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+                reads += 1;
+                if reader_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            reads
+        });
+        for _ in 0..20 {
+            write_atomic(&path, &body).unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        assert!(reader.join().unwrap() > 0);
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_cache_publication_keeps_destination_and_removes_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("sentinel"), "old").unwrap();
+        assert!(write_atomic(&path, b"{}").is_err());
+        assert_eq!(
+            std::fs::read_to_string(path.join("sentinel")).unwrap(),
+            "old"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_refresh_keeps_the_previous_snapshot_and_etag() {
+        let _data_dir = isolated_data_dir();
+        let ctx = test_ctx();
+        let body =
+            br#"{"model":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}"#
+                .to_vec();
+        let (url, rx) = spawn_http(vec![
+            (200, vec![("ETag", "old".into())], body.clone()),
+            (200, vec![("ETag", "bad".into())], b"invalid json".to_vec()),
+        ]);
+        ctx.config.write().await.usage.price_url = Some(url);
+        run_refresh(&ctx).await;
+        run_refresh(&ctx).await;
+        assert_eq!(rx.recv().unwrap(), "");
+        assert_eq!(rx.recv().unwrap(), "old");
+        assert_eq!(
+            std::fs::read(crate::usage_ingest::price_cache_path()).unwrap(),
+            body
+        );
+        let meta = CacheMeta::load();
+        assert_eq!(meta.etag.as_deref(), Some("old"));
+        assert!(meta.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_use_the_last_published_etag() {
+        let _data_dir = isolated_data_dir();
+        let ctx = test_ctx();
+        let (url, rx) = spawn_http(vec![
+            (
+                200,
+                vec![("ETag", "first".into())],
+                br#"{"model":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}"#
+                    .to_vec(),
+            ),
+            (304, vec![], vec![]),
+        ]);
+        ctx.config.write().await.usage.price_url = Some(url);
+        tokio::join!(run_refresh(&ctx), run_refresh(&ctx));
+        assert_eq!(rx.recv().unwrap(), "");
+        assert_eq!(rx.recv().unwrap(), "first");
+        assert_eq!(CacheMeta::load().etag.as_deref(), Some("first"));
     }
 }
