@@ -279,7 +279,6 @@ describe("CodeEditor", () => {
     const { container } = render(() => <Harness />);
     const view = getView(container);
 
-    // Initial mount applies the first file's cursor.
     expect(view.state.selection.main.head).toBe(6);
 
     // Switching to a second file (same CodeEditor instance, as in the center workspace and the
@@ -347,7 +346,6 @@ describe("large files read-only mode (item F6)", () => {
     expect(container.querySelector(".cm-foldGutter")).toBeNull();
     expect(container.querySelector(".cm-git-diff-gutter")).toBeNull();
 
-    // Switch to non-large file
     setProps({ value: "line 1\nline 2", path: "small.txt", large: false });
     expect(view.state.readOnly).toBe(false);
     expect(container.querySelector(".cm-foldGutter")).not.toBeNull();

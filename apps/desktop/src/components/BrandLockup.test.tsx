@@ -14,8 +14,8 @@ describe("brand lockup", () => {
     expect(lockup.textContent).toBe("Repomon");
   });
 
-  // The capitals are a CSS treatment, not the content: assistive technology should read the
-  // product's name, not an initialism.
+  // Keep capitalization in CSS so assistive technology reads the product name rather than an
+  // initialism.
   it("keeps the readable name in the DOM and puts the capitals in CSS", () => {
     const { container } = render(() => <BrandLockup />);
     const wordmark = container.querySelector("[data-brand-lockup] span:last-child")!;
@@ -24,8 +24,7 @@ describe("brand lockup", () => {
     expect(wordmark.className).toContain("uppercase");
   });
 
-  // The mark is cropped to its own ink here rather than drawn on the app icon's padded canvas,
-  // which is what keeps the bars above a pixel at title-bar sizes.
+  // Crop to the mark’s ink so its bars remain visible at title-bar sizes.
   it("crops the mark to the glyph so it stays crisp small", () => {
     const { container } = render(() => <BrandLockup />);
     const svg = container.querySelector("svg")!;
@@ -52,8 +51,7 @@ describe("brand lockup", () => {
     expect(plain.container.querySelector("h1")).toBeNull();
   });
 
-  // A lockup with nowhere to go is text. Rendering it as a button anyway would give it a hover
-  // state and a pointer cursor that promise something the click does not deliver.
+  // A non-navigating lockup must remain text to avoid promising an action.
   it("is inert text when there is nothing to open", () => {
     const { container } = render(() => <BrandLockup />);
     const lockup = container.querySelector("[data-brand-lockup]")!;

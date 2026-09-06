@@ -4,11 +4,11 @@ export interface DiffHunk {
   id: string;
   type: DiffChangeType;
   baseStartLine: number; // 1-indexed in base
-  baseLineCount: number; // line count in base
+  baseLineCount: number;
   currentStartLine: number; // 1-indexed in current
   currentLineCount: number; // line count in current (0 for removed)
-  originalLines: string[]; // lines from base
-  currentLines: string[]; // lines from current
+  originalLines: string[];
+  currentLines: string[];
 }
 
 export interface LineMarker {
@@ -31,16 +31,10 @@ export interface LineDiffTooLarge {
 
 export type LineDiffOutcome = LineDiffResult | LineDiffTooLarge;
 
-/// Hard cap on `lines_a + lines_b`. Past this, the diff is skipped entirely - the Myers search
-/// below is at worst O(D^2) time and space, and a document this size makes even a cheap per-line
-/// pass expensive enough to matter on every keystroke (the 300ms debounce in CodeEditor still
-/// runs this on the main thread).
+/// Bound main-thread diff work even when a large document has a small edit distance.
 const MAX_TOTAL_LINES = 20000;
 
-/// Hard cap on the edit distance `d` explored by the Myers search. Bounds the O(D^2) time and
-/// space of the search itself even for documents under `MAX_TOTAL_LINES` - two versions of a
-/// mid-size file that share almost no lines (e.g. a full reformat) can still drive `d` well past
-/// what's worth computing on the UI thread.
+/// Bound search time and trace memory when two moderate-sized documents share few lines.
 const MAX_EDIT_DISTANCE = 4000;
 
 export interface RevertChange {
@@ -55,10 +49,7 @@ interface EditOp {
   currentIndex?: number;
 }
 
-/**
- * Computes shortest edit script using the Myers diff algorithm on lines. Returns `null` when the
- * search's edit distance exceeds `MAX_EDIT_DISTANCE` - the caller maps that to `too-large`.
- */
+/** Compute a Myers line edit script, returning null beyond the edit-distance budget. */
 function myersDiff(a: string[], b: string[]): EditOp[] | null {
   const n = a.length;
   const m = b.length;
@@ -71,13 +62,11 @@ function myersDiff(a: string[], b: string[]): EditOp[] | null {
     return a.map((_, i) => ({ kind: "delete", baseIndex: i }));
   }
 
-  // Fast-path common prefix
   let prefix = 0;
   while (prefix < n && prefix < m && a[prefix] === b[prefix]) {
     prefix++;
   }
 
-  // Fast-path common suffix
   let suffix = 0;
   while (suffix < n - prefix && suffix < m - prefix && a[n - 1 - suffix] === b[m - 1 - suffix]) {
     suffix++;
@@ -107,13 +96,8 @@ function myersDiff(a: string[], b: string[]): EditOp[] | null {
       const v = new Int32Array(2 * max + 1);
       v[max + 1] = 0;
 
-      // Per-step search state: `trace[d]` holds only the (d + 1) new `x` values the forward pass
-      // computes at step `d` (for k = -d, -d + 2, ..., d), not a full copy of `v`. `v` itself
-      // still carries the cumulative state forward between steps (it must, to compute the next
-      // step's `x` values), but nothing snapshots the whole thing - each snapshot is O(d) instead
-      // of O(N), so total search-state memory is O(D^2) instead of O(D * N). Combined with the
-      // `MAX_EDIT_DISTANCE` cap below, this bounds the worst case rather than just shrinking its
-      // constant.
+      // Store only the new frontier values for each step so trace memory is O(D²), bounded by the
+      // edit-distance cap.
       const trace: Int32Array[] = [];
       // Sentinel for the conceptual "step -1": Myers' bootstrap value v[1] = 0, addressed the same
       // way as a real step (`levelValue(-1, 1)` below) so the backtrack loop needs no d === 0
@@ -167,7 +151,6 @@ function myersDiff(a: string[], b: string[]): EditOp[] | null {
         return null;
       }
 
-      // Backtrack
       const middleOps: EditOp[] = [];
       let x = sliceN;
       let y = sliceM;
@@ -218,12 +201,8 @@ function myersDiff(a: string[], b: string[]): EditOp[] | null {
   return ops;
 }
 
-/**
- * Computes line-level diff hunks and gutter marker positions comparing `baseContent` to `currentContent`.
- * If `baseContent` is null (file not in HEAD or binary), returns empty result. Returns
- * `{ kind: "too-large" }` instead when the document (or the search needed to diff it) exceeds
- * `MAX_TOTAL_LINES` / `MAX_EDIT_DISTANCE` - see those constants above.
- */
+/** Computes line hunks and gutter markers, returning empty results without a usable base and
+ * too-large when document or search limits are exceeded. */
 export function computeLineDiff(
   baseContent: string | null,
   currentContent: string,
@@ -302,7 +281,6 @@ export function computeLineDiff(
     });
   }
 
-  // Build markers map
   const markers = new Map<number, LineMarker>();
   const totalCurrentLines = currentLines.length;
 
@@ -313,7 +291,7 @@ export function computeLineDiff(
         markers.set(lineNum, { type: hunk.type, hunk });
       }
     } else {
-      // type === "removed"
+
       const targetLine =
         hunk.currentStartLine <= totalCurrentLines
           ? Math.max(1, hunk.currentStartLine)
@@ -354,7 +332,7 @@ export function computeRevertChange(
   }
 
   if (hunk.type === "added") {
-    // If entire document was added
+
     if (hunk.currentStartLine === 1 && hunk.currentLineCount >= doc.lines) {
       return {
         from: 0,
@@ -363,7 +341,6 @@ export function computeRevertChange(
       };
     }
 
-    // If added lines are not at EOF
     if (hunk.currentStartLine + hunk.currentLineCount <= doc.lines) {
       const startLine = doc.line(hunk.currentStartLine);
       const endLine = doc.line(hunk.currentStartLine + hunk.currentLineCount - 1);
@@ -374,7 +351,6 @@ export function computeRevertChange(
       };
     }
 
-    // Added lines are at EOF
     if (hunk.currentStartLine > 1) {
       const prevLine = doc.line(hunk.currentStartLine - 1);
       const endLine = doc.line(doc.lines);
@@ -392,7 +368,6 @@ export function computeRevertChange(
     };
   }
 
-  // hunk.type === "removed"
   if (doc.length === 0 || (doc.lines <= 1 && doc.line(1).length === 0)) {
     return {
       from: 0,
@@ -410,7 +385,6 @@ export function computeRevertChange(
     };
   }
 
-  // Deletion at EOF
   const lastLine = doc.line(doc.lines);
   return {
     from: lastLine.to,

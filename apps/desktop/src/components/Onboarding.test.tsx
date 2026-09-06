@@ -33,8 +33,8 @@ const BASE_CONFIG = {
   notify_needs_you: false,
 };
 
-/// One stub daemon for the whole file: the wizard reads `system.doctor`, `config.get` and
-/// `repomind.status` on mount, and writes through `config.set` and `orchestrator.start`.
+/// Stubs the wizard’s initial health, configuration, and home reads plus its configuration and
+/// start writes.
 const daemon = {
   doctor: ALL_FOUND,
   config: { ...BASE_CONFIG } as Record<string, unknown>,
@@ -202,8 +202,8 @@ describe("setup wizard sequence", () => {
 
   it("offers the command line from the last step, and says where to find it later", () => {
     mountWizard({ step: "done" });
-    // The card itself only renders inside the Tauri shell, so what the wizard owns is the offer
-    // and the promise that skipping it here is not a one-time chance.
+    // The wizard must offer CLI installation again after skipping; the card itself renders only in
+    // Tauri.
     expect(screen.getByText("Work from the terminal too")).toBeInTheDocument();
     expect(screen.getByText(/Settings > System/)).toBeInTheDocument();
   });
@@ -467,7 +467,7 @@ describe("setup wizard steps", () => {
 });
 
 describe("setup wizard copy", () => {
-  // House rules: no emoji standing in for icons, and no em-dashes anywhere in product copy.
+
   it("draws its icons and writes its dashes plainly", () => {
     for (const step of ONBOARDING_STEPS) {
       const { container, unmount } = mountWizard({ step: step.id });

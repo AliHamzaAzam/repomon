@@ -19,19 +19,7 @@ export interface BrandLockupProps {
   class?: string;
 }
 
-/// The Repomon lockup: the command-mesh mark plus the wordmark, set as one unit.
-///
-/// Both full-window headers draw this, so the app is identified the same way whether the mission
-/// control shell or the setup wizard owns the window. Keeping it in one component is also what
-/// keeps the two in step when the mark or its metrics change.
-///
-/// Proportions: the mark is cropped to its ink (16px of glyph, not 16px of icon canvas) and the
-/// wordmark is set at the section-label's tracking, so the pair reads as lettering cut from the
-/// same grid as the mark's bars rather than as an icon with a caption. `leading-none` on the
-/// wordmark makes its box the cap height, which is what lets plain vertical centring land the
-/// mark optically level with the letters instead of floating above them.
-///
-/// The DOM text stays "Repomon" and the capitals come from CSS, so assistive technology reads a
+/// Renders the shared mark and wordmark, using CSS capitalization so assistive technology reads the
 /// name rather than an initialism.
 export default function BrandLockup(props: BrandLockupProps) {
   const size = () => props.size ?? 16;

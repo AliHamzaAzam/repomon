@@ -27,10 +27,7 @@ export interface ParsedCommit {
   summary: string;
 }
 
-/// `lane.diff`'s `commits` field is raw `git log --oneline <merge_base>..HEAD` text — one
-/// "oid summary" line per commit, newest first (see LaneDiff in crates/repomon-core/src/git/diff.rs).
-/// Parsed here, at the edge, rather than shaping it server-side, since the daemon also forwards
-/// the same text verbatim to the orchestrator as a human-readable log.
+/// Parses newest-first oid/summary lines from the daemon’s raw commit log.
 export function parseCommits(raw: string): ParsedCommit[] {
   return raw
     .split("\n")
@@ -62,20 +59,14 @@ export interface StatFileRow {
   path: string;
   /// The pre-rename path, present only when the line described a rename/move.
   renamedFrom?: string;
-  /// Count of literal `+`/`-` characters in the stat bar. For small diffs this equals the real
-  /// insertion/deletion counts; `git diff --stat` scales the bar for large diffs to fit its
-  /// column width, so past that point these become proportional, not exact. `--stat` is what the
-  /// daemon sends (see `LaneDiff.uncommitted_stat` in crates/repomon-core/src/git/diff.rs) — an
-  /// exact split would need `--numstat` instead, which isn't part of the RPC surface today.
+  /// Counts stat-bar symbols, which are proportional rather than exact when git scales a large
+  /// diff.
   adds: number;
   dels: number;
   binary: boolean;
 }
 
-/// Splits a rename's `raw` path column into its `{ path, renamedFrom }`, handling both the plain
-/// form (`old/path.ts => new/path.ts`) and the brace form git uses when a common prefix and/or
-/// suffix survive the move (`src/{old => new}/mod.rs`). Returns `raw` unchanged when it isn't a
-/// rename at all.
+/// Expand plain and brace-form rename paths, leaving non-renames unchanged.
 function parseStatPath(raw: string): { path: string; renamedFrom?: string } {
   const brace = raw.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
   if (brace) {
@@ -90,14 +81,8 @@ function parseStatPath(raw: string): { path: string; renamedFrom?: string } {
   return { path: raw };
 }
 
-/// Parses `git diff --stat`'s per-file lines (as sent verbatim in `LaneDiff.uncommitted_stat` and
-/// `committed_stat`) into structured rows. Every file line has the shape `path | rest` (a literal
-/// " | " column separator that git always emits, even though the padding around it varies with the
-/// longest path in the block); the trailing summary line ("3 files changed, ...") never contains
-/// "|", so filtering on that separator is enough to drop it without a second pass. `rest` is either
-/// `Bin <old> -> <new> bytes` for a binary file or `N <bar>` for text, where `<bar>` is `+`/`-`
-/// characters (see `StatFileRow.adds`/`dels` for the scaling caveat); a content-free rename reports
-/// `0` with an empty bar, which naturally parses to zero adds/dels.
+/// Parses text and binary git --stat rows, excluding the summary and preserving zero-change
+/// renames.
 export function parseStatFiles(stat: string): StatFileRow[] {
   return stat
     .split("\n")
@@ -122,10 +107,7 @@ function splitPath(path: string): { dir: string; base: string } {
   return idx === -1 ? { dir: "", base: path } : { dir: path.slice(0, idx + 1), base: path.slice(idx + 1) };
 }
 
-/// Working-tree file rows open the Diff view (see `openDiff`/`DiffView` below) - `onSelect` fires
-/// with the file's (post-rename) path. Commit rows in Branch/History (see `openCommit`) share the
-/// same view via `commit.show` (item 6), each opening that one commit's detail instead of the
-/// lane's working-tree patch.
+/// Open the selected working-tree file inside the lane diff.
 function StatFileRowView(props: {
   file: StatFileRow;
   onSelect: (path: string) => void;
@@ -191,7 +173,7 @@ function StatFileRowView(props: {
   );
 }
 
-/// A muted "not tracked" marker for the untracked-files summary row — see the comment on the
+/// A muted "not tracked" marker for the untracked-files summary row - see the comment on the
 /// "Untracked" group in the Working tree section for why this is a count, not a file list.
 function UntrackedGlyph() {
   return (
@@ -226,10 +208,7 @@ function RowSkeleton(props: { rows: number }) {
 }
 
 interface GitExplorerPanelProps {
-  /// Full fleet store, mirroring FleetSidebar/TerminalWorkspace's prop threading — the panel
-  /// only reads `selectedLane()` from it, but that memo lives on the store, not as a standalone
-  /// prop. Optional so RightPanelHost's default-registry wiring degrades to the empty state
-  /// instead of a type error if a future caller ever mounts this without a live fleet.
+  /// Supplies the selected lane, with absence rendering the empty state.
   fleet?: FleetStore;
   editor?: EditorStore;
   workspace?: WorkspaceStore;
@@ -244,17 +223,11 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
   const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; path: string } | null>(null);
-  // Hoisted above the branchData Show block (rather than declared inside it) so it survives the
-  // panel's 1.2s poll-driven refetches instead of collapsing back open every time git state
-  // changes; session-local only, per C3 - no localStorage persistence needed here.
+  // Keep expansion state outside the data block so polling does not reset it.
   const [changesExpanded, setChangesExpanded] = createSignal(true);
 
-  // C4: the Diff view replaces the Branch/Working tree/History sections while open (see the
-  // `Show when={diffOpen()}` split below) rather than expanding inline - a lane-wide patch can
-  // run to many files and hunks, and a second nested scroll region under History would fight the
-  // panel's single outer scrollbar. `diffOpen` gates whether `load()` below asks for
-  // `include_patch` at all, so idle polls (the common case) never pay for fetching patch text
-  // nobody's looking at.
+  // Fetch full patches only while the diff replaces the overview, avoiding hidden payloads and
+  // competing nested scroll areas.
   const [diffOpen, setDiffOpen] = createSignal(false);
   const [diffFocusPath, setDiffFocusPath] = createSignal<string | null>(null);
 
@@ -291,10 +264,8 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     handleOpenInEditor(filePath, targetLine ?? 1);
   }
 
-  // Item 6: commit-detail view, mutually exclusive with the working-tree Diff view above (opening
-  // one closes the other - see `openDiff`/`openCommit`). Kept as its own signal group rather than
-  // folded into `diffOpen`/`branchData` since its data (one commit's `commit.show` result) is a
-  // different shape and fetch from the lane-wide working-tree patch.
+  // Keep commit detail separate from the working-tree patch because their fetches and result shapes
+  // differ.
   const [commitOid, setCommitOid] = createSignal<string | null>(null);
   const [commitDetail, setCommitDetail] = createSignal<CommitShow | null>(null);
   const [commitLoading, setCommitLoading] = createSignal(false);
@@ -323,10 +294,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     }
   }
 
-  // Working-tree file rows are the only click target that opens the Diff view (see the comment
-  // on `StatFileRowView`). `lane.diff`'s `patch` is lane-wide, not per-file, so opening it for
-  // any one file fetches (or reuses an already-fetched) whole-lane patch and just tells DiffView
-  // which file's card to land on/expand.
+  // Fetch the lane-wide patch once and select the requested file within it.
   function openDiff(path: string) {
     closeCommit(); // mutually exclusive with the commit view (see the field group's comment)
     setDiffFocusPath(path);
@@ -345,11 +313,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     setDiffFocusPath(null);
   }
 
-  // Item 6: Branch/History commit rows open this instead of `openDiff` - same "replaces the
-  // overview sections, same close/back affordance" feel, but backed by `commit.show` for one
-  // commit rather than `lane.diff`'s working-tree patch. `oid` may be abbreviated (Branch rows
-  // parse a short hash out of `git log --oneline` text; History rows carry the full oid from
-  // `commit.recent`) - the daemon resolves either against the lane's repo.
+  // The daemon resolves abbreviated commit IDs against the lane repository.
   function openCommit(oid: string) {
     closeDiff(); // mutually exclusive with the working-tree Diff view
     const mine = ++commitEpoch;
@@ -390,10 +354,8 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
   // loaded" - so this checks presence, not truthiness, to tell the two apart.
   const patchLoaded = createMemo(() => branchData()?.patch !== undefined);
 
-  // Piggybacks on the fleet store's own 1.2s poll instead of running a second timer: any change
-  // to the selected lane's live git state (a new commit landing, files getting dirtied) already
-  // updates `lane.state` through that poll, so tracking a signature derived from it here refetches
-  // this panel's data in lockstep without repomon running two clocks for the same information.
+  // Track the fleet’s git-state signature to share its refresh cadence instead of starting another
+  // poller.
   const signature = createMemo(() => {
     const l = lane();
     if (!l) return null;
@@ -415,10 +377,8 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
     void load(l.id);
   });
 
-  // A patch (or a commit) belongs to one lane; switching lanes (not just a same-lane poll
-  // refresh) closes an open Diff/commit view rather than showing a stale or mismatched patch.
-  // Tracked by id, not object identity, since the fleet store's poll produces a fresh Lane
-  // object every cycle even when the selection hasn't moved.
+  // Close lane-owned detail only on an ID change, since polling replaces otherwise identical lane
+  // objects.
   let lastLaneId: number | null = null;
   createEffect(() => {
     const id = lane()?.id ?? null;
@@ -539,9 +499,6 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
           </div>
         </Show>
 
-        {/* Item 6: commit-detail view, opened by a Branch/History row click - same
-            replaces-the-overview / close-back-to-overview shape as the working-tree Diff view
-            above, mutually exclusive with it (see openDiff/openCommit). */}
         <Show when={commitOid()} keyed>
           {(oid) => (
             <div class="min-h-0 flex-1">
@@ -685,21 +642,8 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                 fallback={loading() ? <RowSkeleton rows={2} /> : <p class="text-xs text-muted">Git status unavailable.</p>}
               >
                 {(diff) => {
-                  // Counts here are sourced from `lane().state.dirty` (gix's live status walk,
-                  // reader.rs `dirty_state`) rather than `diff.untracked`/parsed file rows, so this
-                  // section always agrees with the header's dirty badge — same lane, same field.
-                  //
-                  // Grouping: `uncommitted_stat` is `git diff HEAD --stat`, which diffs the worktree
-                  // straight against HEAD and so already mixes staged and unstaged hunks into one
-                  // per-file line (see LaneDiff.uncommitted_stat in diff.rs) — there's no way to tell,
-                  // from that text, which lines are staged. So file rows fall under a single honest
-                  // "Changes" group, with the staged/unstaged split shown only as the header's
-                  // aggregate counts, not as a per-file split the data can't support.
-                  //
-                  // "Untracked" is a count-only row, not a file list, for the same reason: neither
-                  // `lane.diff` (LaneDiff.untracked, diff.rs) nor the live dirty walk exposes
-                  // untracked *filenames* — both only ever return a usize. There is currently no RPC
-                  // that lists them by name, so an honest UI shows the count and nothing invented.
+                  // Use live dirty counts to match the lane badge; stat text combines staged and
+                  // unstaged changes and exposes no untracked filenames.
                   const dirty = () => lane()?.state.dirty ?? { staged: 0, unstaged: 0, untracked: 0 };
                   const changesCount = () => dirty().staged + dirty().unstaged;
                   const files = () => parseStatFiles(diff.uncommitted_stat);

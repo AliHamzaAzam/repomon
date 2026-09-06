@@ -21,13 +21,9 @@ describe("CodeEditor openAtTarget", () => {
       />
     ));
 
-    // Initially cursor is at 0
     expect(cursor()).toBe(0);
 
-    // Target line 2, column 8 (start of "line" in "second line with search term")
-    // "first line\n" is 11 chars (indices 0..10).
-    // line 2 starts at index 11.
-    // column 8 (1-based) is offset 7 from line start -> index 18.
+    // One-based line 2, column 8 maps to document offset 18.
     setTarget({ line: 2, column: 8, token: 1 });
 
     await waitFor(() => {

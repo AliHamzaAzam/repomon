@@ -2,8 +2,7 @@ import { Show, createSignal } from "solid-js";
 
 import type { AvailableUpdate, UpdateProgress } from "../ipc/updater";
 
-/// Launch-time "an update is available" bar. Shown when the check on startup finds a newer
-/// build; installing downloads, applies, and relaunches.
+/// Offers installation and relaunch when the startup update check finds a newer build.
 export default function UpdateBanner(props: { update: AvailableUpdate; onDismiss: () => void }) {
   const [busy, setBusy] = createSignal(false);
   const [progress, setProgress] = createSignal<UpdateProgress | null>(null);

@@ -167,7 +167,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
 
   return (
     <section class="space-y-5">
-      {/* Header with Title, Status & Refresh */}
+
       <Show when={showTitle()}>
         <div class="flex items-center justify-between border-b border-line pb-3">
           <div>
@@ -179,8 +179,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
           <RecheckButton />
         </div>
       </Show>
-      {/* The wizard draws its own heading, so the control shares a row with a one-line verdict
-          instead of floating alone under the lede. */}
+
       <Show when={!showTitle() && showRefresh()}>
         <div class="flex items-center justify-between gap-3">
           <p class="min-w-0 text-xs text-muted" role="status">{summary()}</p>
@@ -188,14 +187,11 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
         </div>
       </Show>
 
-      {/* The one check that does not go through the daemon, so it still answers when the daemon
-          is the thing that is broken. */}
+      {/* Probe through Tauri so launch failures remain diagnosable without a responding daemon. */}
       <DaemonBootRow />
 
-      {/* The CLI ships inside this app; installing it is a local copy, not a download. */}
       <CommandLineToolsCard />
 
-      {/* Error Banner */}
       <Show when={doctorError()}>
         {(err) => (
           <div class="rounded-xl border border-fault/30 bg-fault/10 p-3.5 text-xs text-fault flex items-start justify-between gap-3">
@@ -214,7 +210,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
         )}
       </Show>
 
-      {/* Loading Skeleton */}
       <Show when={doctorLoading() && !doctorResult()}>
         <div class="space-y-4 animate-pulse">
           <div class="rounded-xl border border-line bg-surface/40 p-4 space-y-3">
@@ -232,7 +227,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
         </div>
       </Show>
 
-      {/* Doctor Data */}
       <Show when={doctorResult()}>
         {(doc) => {
           const tmuxInfo = () => doc().tmux;
@@ -251,7 +245,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
 
           return (
             <div class="space-y-4">
-              {/* Section 1: Core Runtime (tmux/agent host + git) */}
+
               <div class="rounded-xl border border-line bg-surface p-3.5 space-y-3">
                 <div class="flex items-center justify-between">
                   <span class="section-label">Core Runtime Dependencies</span>
@@ -268,7 +262,7 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                 </div>
 
                 <div class="divide-y divide-line/60 rounded-lg bg-background/50">
-                  {/* Agent host (ConPTY) row, Windows only, replaces tmux */}
+
                   <Show when={tmuxInfo().not_applicable}>
                     <div class="p-3 space-y-1.5">
                       <div class="flex items-start justify-between gap-3">
@@ -327,14 +321,12 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                         </div>
                       </div>
 
-                      {/* Bundled Reassurance Note */}
                       <Show when={agentHostInfo()?.available && agentHostInfo()?.source === "bundled"}>
                         <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
                           <span>Using the ConPTY agent host bundled with this app. No separate install needed.</span>
                         </div>
                       </Show>
 
-                      {/* Missing agent host helper */}
                       <Show when={!agentHostInfo()?.available}>
                         <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                           <p class="text-foreground text-[11px]">
@@ -346,7 +338,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                     </div>
                   </Show>
 
-                  {/* tmux row, everywhere except Windows */}
                   <Show when={!tmuxInfo().not_applicable}>
                   <div class="p-3 space-y-1.5">
                     <div class="flex items-start justify-between gap-3">
@@ -402,14 +393,12 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       </div>
                     </div>
 
-                    {/* Bundled Reassurance Note */}
                     <Show when={tmuxInfo().available && tmuxInfo().source === "bundled"}>
                       <div class="flex items-center gap-1.5 text-[10.5px] text-signal bg-signal/8 rounded px-2 py-0.5 border border-signal/20">
                         <span>Using Repomon's built-in standalone tmux. No separate Homebrew or system installation needed.</span>
                       </div>
                     </Show>
 
-                    {/* Missing tmux helper */}
                     <Show when={!tmuxInfo().available}>
                       <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                         <p class="text-foreground text-[11px]">
@@ -436,7 +425,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                   </div>
                   </Show>
 
-                  {/* git Row */}
                   <div class="p-3 space-y-1.5">
                     <div class="flex items-start justify-between gap-3">
                       <div class="flex items-center gap-2.5 min-w-0">
@@ -478,7 +466,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                       </div>
                     </div>
 
-                    {/* Missing git helper */}
                     <Show when={!gitInfo().available}>
                       <div class="rounded-lg border border-attention/20 bg-attention/5 p-2.5 text-xs space-y-2">
                         <p class="text-foreground text-[11px]">
@@ -506,7 +493,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                 </div>
               </div>
 
-              {/* Section 2: Agent CLIs */}
               <div class="rounded-xl border border-line bg-surface p-3.5 space-y-3">
                 <div class="flex items-center justify-between">
                   <div>
@@ -557,7 +543,6 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                             </span>
                           </div>
 
-                          {/* Actionable guidance if missing */}
                           <Show when={!agent.detected}>
                             <div class="border-t border-line/40 pt-1.5 text-[10.5px] text-muted space-y-1">
                               <Show

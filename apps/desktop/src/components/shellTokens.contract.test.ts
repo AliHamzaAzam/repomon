@@ -3,11 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-/// The shell interiors and settings surfaces draw every color from the theme tokens, so a theme
-/// switch recolors all of them at once. Raw Tailwind palette steps (`emerald-500`), utilities the
-/// theme never defines (`text-accent`, `bg-surface-raised`, which render as nothing), and literal
-/// black or white rings all break that, and none of them survive a review. This pins the rule at
-/// the source so a future edit cannot quietly bring one back.
+/// Require theme tokens across shell surfaces so appearance changes recolor every control.
 const OWNED = [
   "FleetSidebar.tsx",
   "RepomindRow.tsx",

@@ -4,8 +4,7 @@ import type { Repo } from "../bindings";
 import { daemonCall } from "../ipc/rpc";
 import Modal from "./Modal";
 
-/// Mirrors `repomon_core::notes::MAX_NOTES_BYTES`. The daemon rejects anything larger, so the
-/// editor counts down to the same number rather than letting you write a save that will bounce.
+/// Matches the daemon’s byte cap so the editor cannot offer a save the daemon will reject.
 const MAX_NOTES_BYTES = 8192;
 
 interface RepoNotesModalProps {

@@ -99,16 +99,13 @@ function persistRepomindOpen(open: boolean) {
   } catch {}
 }
 
-
 function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
   const [connection, setConnection] = createSignal(initialConnection);
   const [repomindOpen, setRepomindOpen] = createSignal(readRepomindOpen());
   const [repomindFull, setRepomindFull] = createSignal(false);
-  // C1: which right-rail tab is currently showing, and a one-shot command to switch to it — see
-  // RightPanelHost's `requestTab`/`onActiveTabChange` props for why this isn't just local state.
-  // Shared by every panel.* shortcut (git for C1, editor for D4), since RightPanelHost's
-  // `requestTab` prop is a single slot, not one per tab id.
+  // Share the right-rail tab request across panel shortcuts because the host accepts a single
+  // request slot.
   const [rightPanelTab, setRightPanelTab] = createSignal("repomind");
   const [panelTabRequest, setPanelTabRequest] = createSignal<{ id: string; token: number } | null>(null);
   let panelTabRequestToken = 0;
@@ -122,9 +119,7 @@ function App(props: AppProps) {
   // Footer discoverability hint for the shortcuts guide, shown for a launch count decided once at
   // mount (see onMount below) rather than recomputed on every render, so it cannot flip mid-session.
   const [showShortcutsHint, setShowShortcutsHint] = createSignal(false);
-  // E5: Debounced sustained-disconnect banner. The footer pill signals blips; this banner only
-  // appears after the daemon has been unreachable for a continuous 5 seconds, so transient
-  // reconnect cycles during daemon restart don't produce noise.
+
   const [sustainedDisconnect, setSustainedDisconnect] = createSignal(false);
   const source = props.connectionSource ?? tauriConnectionSource;
   const fleet = createFleetStore(props.fleetSource);
@@ -266,13 +261,13 @@ function App(props: AppProps) {
     workspace.setEditorWorkspace(false);
     if (!repomindOpen()) {
       // Closed → open already on the requested tab. RightPanelHost consults `requestTab.id` on its
-      // very first render, so bumping this in the same tick as opening is enough — no need to wait
+      // very first render, so bumping this in the same tick as opening is enough - no need to wait
       // for the panel to mount before it takes effect.
       setPanelTabRequest({ id, token: ++panelTabRequestToken });
       setRepomindOpen(true);
       persistRepomindOpen(true);
     } else if (rightPanelTab() === id) {
-      // Already open and already on this tab: mirrors the repomind toggle's own feel — activating
+      // Already open and already on this tab: mirrors the repomind toggle's own feel - activating
       // "the panel I'm looking at" closes it.
       setRepomindOpen(false);
       persistRepomindOpen(false);
@@ -393,10 +388,8 @@ function App(props: AppProps) {
     }
   };
 
-  // The bare "?" alternative to mod+? for opening the shortcuts guide (help.open above already
-  // covers mod+?). Unlike every chord in keymap.ts this carries no modifier at all, so it needs
-  // its own guard against stealing input: it only fires outside a text input, and only when no
-  // other modal already owns the keyboard.
+  // Guard bare-question-mark help separately so it cannot steal text input or bypass an active
+  // modal.
   const onBareHelpKey = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.key !== "?" || event.metaKey || event.ctrlKey || event.altKey) return;
     const target = event.target;
@@ -484,9 +477,8 @@ function App(props: AppProps) {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  // E5: Debounced 5 s sustained-disconnect banner. React immediately on reconnect; only show
-  // the banner if the daemon has been continuously unreachable for at least 5 seconds so that
-  // transient blips during daemon restart don't produce noise.
+  // Delay the disconnect banner for five continuous seconds to suppress restart blips; hide it
+  // immediately on reconnect.
   createEffect(() => {
     const phase = connection().phase;
     if (phase === "connected") {
@@ -711,9 +703,7 @@ function App(props: AppProps) {
         </div>
       </WindowChromeHeader>
 
-      {/* E5: Sustained-disconnect banner — only after ≥5 s of continuous disconnection.
-          Rendered as a fixed overlay (non-blocking) so the main layout never shifts.
-          The footer pill stays visible for shorter blips. */}
+      {/* Delay the fixed disconnect overlay through brief blips so status changes do not shift layout. */}
       <Show when={sustainedDisconnect()}>
         <div
           role="alert"
@@ -835,13 +825,8 @@ function App(props: AppProps) {
                 cssVar="--right-panel-width"
                 label="Resize right panel"
               />
-              {/* min-w-0 is load-bearing: this is a flex-1 item of the row above (ResizableSplit
-                  handle + this pane), and without it the classic flexbox "automatic minimum size"
-                  rule lets its content's min-content width (e.g. an unwrapped long code line deep
-                  in CodeMirror, or a diff's long line) win, pushing this pane wider than the
-                  resizable rail instead of letting the descendant scrollers (`.cm-scroller`, the
-                  editor tab strip) handle their own horizontal overflow. The `aside` ancestor's
-                  `overflow: hidden` was then silently clipping the excess instead of scrolling. */}
+              {/* min-w-0 lets nested editors scroll horizontally instead of widening the flex item beyond the
+ * clipped rail. */}
               <div class="flex min-h-0 min-w-0 flex-1 flex-col border-l border-line">
                 <RightPanelHost
                   onToggleFullscreen={() => setRepomindFull(true)}
@@ -903,8 +888,7 @@ function App(props: AppProps) {
               {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
             </Show>
           </div>
-          {/* Only while the daemon is unreachable: the hint, the real endpoint, and the two
-              controls that turn a stuck pill into something a user can act on or report. */}
+
           <Show when={connection().phase === "retrying"}>
             <ConnectionTrouble
               snapshot={connection()}

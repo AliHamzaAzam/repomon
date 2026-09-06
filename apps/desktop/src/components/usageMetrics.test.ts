@@ -103,8 +103,8 @@ describe("usage chart reducers", () => {
   });
 
   it("does not relabel a blank key outside the model grouping", () => {
-    // An unattributed repo or lane already reads as "unattributed" by the time it reaches here
-    // (the daemon labels it); this fallback is model-specific and must not touch other groupings.
+    // Apply the missing-model fallback only to model groups because the daemon already labels
+    // unattributed repositories and lanes.
     expect(groupRowLabel({ key: "", label: "unattributed" }, "repo")).toBe("unattributed");
   });
 
@@ -174,8 +174,8 @@ describe("usage chart reducers", () => {
   });
 
   it("gives a sparse timeline a continuous axis so three busy hours do not fill the plot", () => {
-    // The daemon writes "…:00Z"; a generated axis writes "…:00.000Z". Same bucket, so the axis
-    // must match on the instant rather than on the text.
+    // Match timeline buckets by instant because equivalent timestamps can differ in
+    // fractional-second formatting.
     const sparse = timeline(
       series("claude-code", [
         ["2026-09-05T10:00:00Z", 10, 1],
@@ -355,7 +355,6 @@ describe("formatRatesFootnote", () => {
     expect(line).toContain("not fetched yet");
   });
 });
-
 
 describe("session table formatting and width budget", () => {
   it("keeps sub-cent, cents and whole-dollar boundary costs compact", () => {

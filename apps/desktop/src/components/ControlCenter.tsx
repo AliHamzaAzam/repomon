@@ -60,7 +60,6 @@ interface PaletteItem {
   run: () => void | Promise<void>;
 }
 
-
 export default function ControlCenter(props: ControlCenterProps) {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
@@ -118,7 +117,6 @@ export default function ControlCenter(props: ControlCenterProps) {
       });
     }
 
-    // --- ACTIONS ---
     items.push({
       id: "action-spawn-agent",
       category: "Actions",
@@ -217,7 +215,6 @@ export default function ControlCenter(props: ControlCenterProps) {
       },
     });
 
-    // --- LANES & SESSIONS ---
     const lanes = props.fleet.lanes();
     for (const lane of lanes) {
       const ind = laneIndicator(lane);
@@ -271,7 +268,6 @@ export default function ControlCenter(props: ControlCenterProps) {
       }
     }
 
-    // --- REPOSITORIES ---
     const repos = props.fleet.repos();
     for (const repo of repos) {
       items.push({
@@ -307,7 +303,7 @@ export default function ControlCenter(props: ControlCenterProps) {
   });
 
   createEffect(() => {
-    // Reset selection when filtered results change
+
     filteredItems();
     setSelectedIndex(0);
   });
@@ -378,7 +374,6 @@ export default function ControlCenter(props: ControlCenterProps) {
     window.removeEventListener("keydown", onKeyDown, true);
   });
 
-  // Group filtered items by category for visual headers
   const groupedSections = createMemo(() => {
     const items = filteredItems();
     const categories: Array<{ category: PaletteItem["category"]; items: Array<{ item: PaletteItem; globalIndex: number }> }> = [];
@@ -414,7 +409,7 @@ export default function ControlCenter(props: ControlCenterProps) {
 
   return (
     <>
-      {/* Toolbar Trigger Button */}
+
       <button
         ref={triggerRef}
         type="button"
@@ -431,7 +426,6 @@ export default function ControlCenter(props: ControlCenterProps) {
         <span class="toolbar-label">Control</span>
       </button>
 
-      {/* Command Palette Modal */}
       <Show when={isOpen()}>
         <Portal>
           <div
@@ -447,7 +441,7 @@ export default function ControlCenter(props: ControlCenterProps) {
               aria-modal="true"
               aria-label="Command Palette"
             >
-              {/* Search Bar Header */}
+
               <div class="flex items-center gap-3 border-b border-line bg-surface px-4 py-3.5">
                 <IconSearch size={16} class="text-muted shrink-0" />
                 <input
@@ -477,7 +471,6 @@ export default function ControlCenter(props: ControlCenterProps) {
                 </kbd>
               </div>
 
-              {/* Results List */}
               <div
                 ref={listRef}
                 class="max-h-[55vh] overflow-y-auto p-2 space-y-3"
@@ -570,7 +563,6 @@ export default function ControlCenter(props: ControlCenterProps) {
                 </Show>
               </div>
 
-              {/* Footer Navigation Bar */}
               <div class="flex items-center justify-between border-t border-line bg-raised/30 px-4 py-2 text-[11px] text-muted">
                 <div class="flex items-center gap-3">
                   <span class="flex items-center gap-1">

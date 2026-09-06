@@ -42,15 +42,12 @@ function sameMonth(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
 }
 
-/** Today's midnight is never a live signal here: nothing in this popover needs to move as the
- * clock ticks past midnight while it happens to be open, and reading it once keeps every future
- * check comparing against the same instant. */
+/** Read today once so every date constraint in this popover uses the same midnight. */
 function today(): Date {
   return startOfDay(new Date());
 }
 
-/** The window can never reach into the future: `to` is clamped at today and `from` at whatever
- * `to` came out to, so a stray future date never becomes a read the daemon has no data for. */
+/** Clamp the range to today while keeping from at or before to. */
 function clampToToday(from: Date, to: Date): [Date, Date] {
   const limit = today();
   const clampedTo = to > limit ? limit : to;
@@ -68,14 +65,8 @@ function monthGrid(month: Date): Date[] {
 
 const WEEKDAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
-/**
- * A window picked by hand: two days off a calendar, or one of the two presets people actually
- * ask for. It is a popover rather than a page because picking a range is a detour from reading
- * the numbers, and the numbers stay on screen behind it.
- *
- * Keyboard is the primary path: the grid holds one tab stop, the arrows walk days and weeks,
- * PageUp and PageDown walk months, and Enter takes the day under the cursor as the next end.
- */
+/** Provides keyboard-navigable calendar selection and presets while keeping the underlying usage
+ * view visible. */
 export default function UsageRangePicker(props: UsageRangePickerProps) {
   const [open, setOpen] = createSignal(false);
   const [month, setMonth] = createSignal(startOfDay(new Date()));
@@ -122,7 +113,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
   onCleanup(() => document.removeEventListener("pointerdown", onPointerDown, true));
 
   function pick(day: Date) {
-    if (day > today()) return; // A future day is shown muted and takes no click.
+    if (day > today()) return;
     const start = from();
     if (!start || to()) {
       setFrom(day);
@@ -288,8 +279,7 @@ export default function UsageRangePicker(props: UsageRangePickerProps) {
                       const selected = () => isEdge(day);
                       const covered = () => inRange(day) && !selected();
                       const focused = () => sameDay(day, cursor());
-                      // A day after today is not a read the daemon can answer, so it is shown muted
-                      // and takes neither hover nor a click rather than quietly picking a future date.
+
                       const future = () => day > today();
                       return (
                         <button

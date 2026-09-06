@@ -8,9 +8,7 @@ interface SkillEditorModalProps {
   onClose: () => void;
 }
 
-/// Loads SKILL.md through skill.read, edits it in a plain textarea, and saves through
-/// skill.write. Content is fetched once per mount since a given modal instance always
-/// edits a single fixed path.
+/// Loads and saves one fixed SKILL.md path through the skill RPCs for the modal’s lifetime.
 export default function SkillEditorModal(props: SkillEditorModalProps) {
   const [content] = createResource(() => daemonCall("skill.read", { path: props.path }));
   const [draft, setDraft] = createSignal<string | null>(null);

@@ -28,13 +28,11 @@ describe("Select custom dropdown", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 
-    // Open dropdown
     fireEvent.click(trigger);
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     const listbox = await screen.findByRole("listbox");
     expect(listbox).toBeInTheDocument();
 
-    // Select option
     const codexOption = screen.getByRole("option", { name: "codex" });
     fireEvent.click(codexOption);
 
@@ -62,11 +60,9 @@ describe("Select custom dropdown", () => {
 
     const trigger = screen.getByRole("combobox", { name: "Default agent" });
 
-    // Open with ArrowDown
     fireEvent.keyDown(trigger, { key: "ArrowDown" });
     expect(await screen.findByRole("listbox")).toBeInTheDocument();
 
-    // Move to next option and press Enter
     fireEvent.keyDown(trigger, { key: "ArrowDown" });
     fireEvent.keyDown(trigger, { key: "Enter" });
 

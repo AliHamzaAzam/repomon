@@ -40,15 +40,8 @@ const MAX_FOCUSABLE_BARS = 60;
 /** Keep the readout inside the measured chart even when a series has a long name. */
 const TOOLTIP_WIDTH = 256;
 
-/**
- * Tokens or cost over time, stacked by group.
- *
- * Bars rather than an area: a bucket is a discrete period of work, and the question the chart
- * answers is "how much, when", which is magnitude, not a continuous trend. Every bucket in the
- * window is drawn, empty ones included, so the axis is a timeline rather than a list of the hours
- * that happened to be busy. Identity never rests on colour alone: every series is in the legend,
- * in the hover readout, and in the breakdown table below with the same colour beside its name.
- */
+/** Renders discrete stacked usage buckets including empty periods, with named legends and readouts
+ * so identity does not depend on color alone. */
 export default function UsageChart(props: UsageChartProps) {
   const [hover, setHover] = createSignal<number | null>(null);
   const [width, setWidth] = createSignal(FALLBACK_WIDTH);
@@ -162,7 +155,7 @@ export default function UsageChart(props: UsageChartProps) {
           aria-label={summaryLabel()}
           onMouseLeave={() => setHover(null)}
         >
-          {/* Weekends behind everything: a quiet band, not a colour with a meaning of its own. */}
+
           <Show when={bucket() === "day"}>
             <For each={bars()}>
               {(bar, index) => (
@@ -203,7 +196,7 @@ export default function UsageChart(props: UsageChartProps) {
             )}
           </For>
 
-          {/* The crosshair sits under the bars, so it never dims the thing being read. */}
+          {/* Keep the crosshair below bars so it does not dim their values. */}
           <Show when={hover() !== null}>
             <line
               x1={slotX(hover() ?? 0) + slot() / 2}
@@ -271,8 +264,7 @@ export default function UsageChart(props: UsageChartProps) {
             )}
           </For>
 
-          {/* One hit band per bucket, wider than the bar it covers, so hovering is forgiving and
-              an empty bucket answers for itself instead of reading as a gap in the chart. */}
+          {/* Use a full-bucket hit area so narrow bars and empty periods remain easy to inspect. */}
           <For each={bars()}>
             {(bar, index) => (
               <rect

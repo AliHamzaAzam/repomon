@@ -190,15 +190,12 @@ describe("Settings auto-save persistence", () => {
       />
     ));
 
-    // Find the change icon button for codex
     await screen.findByText("Built-in Runtime Icons & Overrides");
     const changeCodexButton = screen.getByRole("button", { name: "Change icon for codex" });
     expect(changeCodexButton).toBeInTheDocument();
 
-    // Open icon picker for codex
     fireEvent.click(changeCodexButton);
 
-    // Icon picker modal should open
     await screen.findByText("Icon for");
     const lightningButton = screen.getByRole("button", { name: /Lightning Bolt/i });
     fireEvent.click(lightningButton);
@@ -227,13 +224,11 @@ describe("Settings auto-save persistence", () => {
     expect(screen.getByText("Warm Paper")).toBeInTheDocument();
     expect(screen.getByText("Repomon Light")).toBeInTheDocument();
 
-    // Click Nord Arctic theme
     const nordButton = screen.getByRole("button", { name: /Nord Arctic/i });
     fireEvent.click(nordButton);
     expect(nordButton).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /Warm Paper/i })).toHaveAttribute("aria-pressed", "false");
 
-    // Select an accent color swatch
     const emeraldButton = screen.getByRole("button", { name: /Emerald/i });
     fireEvent.click(emeraldButton);
 
@@ -433,7 +428,6 @@ describe("System Health tab", () => {
       ],
     };
 
-    // Mock navigator.clipboard
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText: writeTextMock },
@@ -451,37 +445,31 @@ describe("System Health tab", () => {
     const missingBadges = screen.getAllByText("Missing");
     expect(missingBadges.length).toBe(2);
 
-    // Check tmux copy button
     const copyTmuxButton = screen.getByRole("button", { name: "Copy tmux install command" });
     expect(copyTmuxButton).toBeInTheDocument();
     fireEvent.click(copyTmuxButton);
     expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining("tmux"));
 
-    // Check git copy button
     const copyGitButton = screen.getByRole("button", { name: "Copy git install command" });
     expect(copyGitButton).toBeInTheDocument();
     fireEvent.click(copyGitButton);
     expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining("git"));
 
-    // Check Claude Code copy button
     const copyClaudeButton = screen.getByRole("button", { name: /Copy install command for Claude Code/i });
     expect(copyClaudeButton).toBeInTheDocument();
     fireEvent.click(copyClaudeButton);
     expect(writeTextMock).toHaveBeenCalledWith("npm install -g @anthropic-ai/claude-code");
 
-    // Check Antigravity copy button
     const copyAgyButton = screen.getByRole("button", { name: /Copy install command for Antigravity/i });
     expect(copyAgyButton).toBeInTheDocument();
     fireEvent.click(copyAgyButton);
     expect(writeTextMock).toHaveBeenCalledWith("curl -fsSL https://antigravity.google/cli/install.sh | bash");
 
-    // Check Cursor copy button
     const copyCursorButton = screen.getByRole("button", { name: /Copy install command for Cursor Agent/i });
     expect(copyCursorButton).toBeInTheDocument();
     fireEvent.click(copyCursorButton);
     expect(writeTextMock).toHaveBeenCalledWith("curl https://cursor.com/install -fsS | bash");
 
-    // Check OpenCode copy button
     const copyOpenCodeButton = screen.getByRole("button", { name: /Copy install command for OpenCode/i });
     expect(copyOpenCodeButton).toBeInTheDocument();
     fireEvent.click(copyOpenCodeButton);
@@ -563,7 +551,6 @@ describe("System Health tab", () => {
       expect(screen.getByText("custom-runner")).toBeInTheDocument();
       expect(screen.getByText("python -m runner")).toBeInTheDocument();
 
-      // Fill in new custom agent form
       const nameInput = screen.getByPlaceholderText("e.g. 'devin', 'gemini-cli', 'deepseek'");
       const cmdInput = screen.getByPlaceholderText("e.g. 'gemini --repomon', 'python run.py'");
       const registerButton = screen.getByRole("button", { name: "Register Agent" });

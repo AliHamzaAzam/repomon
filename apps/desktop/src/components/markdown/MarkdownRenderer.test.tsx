@@ -110,7 +110,6 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
       />
     ));
 
-    // Headings 1 through 6
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("Main Document Title");
     expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("Section Level 2");
     expect(screen.getAllByRole("heading", { level: 3 }).length).toBeGreaterThan(0);
@@ -118,7 +117,6 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
     expect(screen.getByRole("heading", { level: 5 }).textContent).toContain("Section Level 5");
     expect(screen.getByRole("heading", { level: 6 }).textContent).toContain("Section Level 6");
 
-    // Heading slug IDs for scroll sync
     const h1 = screen.getByRole("heading", { level: 1 });
     expect(h1.id).toBe("main-document-title");
     expect(h1.getAttribute("data-heading-line")).toBeTruthy();
@@ -126,21 +124,17 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
     const h2 = screen.getByRole("heading", { level: 2 });
     expect(h2.id).toBe("section-level-2");
 
-    // Inline styles: bold, italic, strikethrough, code
     expect(container.querySelector("strong")?.textContent).toBe("bold text");
     expect(container.querySelector("em")?.textContent).toBe("italic text");
     expect(container.querySelector("del")?.textContent).toBe("strikethrough text");
     expect(container.querySelector("code")?.textContent).toContain("const answer = 42;");
 
-    // Blockquote
     const bq = container.querySelector("blockquote");
     expect(bq).toBeTruthy();
     expect(bq?.textContent).toContain("This is a blockquote");
 
-    // Thematic break
     expect(container.querySelector("hr")).toBeTruthy();
 
-    // Task list items with checkboxes
     const checkboxes = container.querySelectorAll<HTMLInputElement>("input[type='checkbox']");
     expect(checkboxes.length).toBe(2);
     expect(checkboxes[0].checked).toBe(false);
@@ -148,11 +142,9 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
     expect(checkboxes[1].checked).toBe(true);
     expect(checkboxes[1].disabled).toBe(true);
 
-    // Lists: ordered and unordered
     expect(container.querySelector("ul")).toBeTruthy();
     expect(container.querySelector("ol")).toBeTruthy();
 
-    // Table
     const table = container.querySelector("table");
     expect(table).toBeTruthy();
     const ths = table?.querySelectorAll("th");
@@ -162,12 +154,10 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
     expect(ths?.[1].className).toContain("text-center");
     expect(ths?.[2].className).toContain("text-right");
 
-    // Links: external link click calls openUrl
     const extLink = screen.getByText("Repomon Project");
     fireEvent.click(extLink);
     expect(openUrlMock).toHaveBeenCalledWith("https://github.com/example/repomon");
 
-    // Local image resolved through daemonCall("file.read_raw")
     await waitFor(() => {
       expect(daemonCallMock).toHaveBeenCalledWith("file.read_raw", {
         lane_id: 1,

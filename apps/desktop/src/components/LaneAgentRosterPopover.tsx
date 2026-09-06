@@ -202,7 +202,7 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
           role="tooltip"
           aria-label={`Active agents in ${laneTitle()}`}
         >
-          {/* Header: Lane Name & Agent Count */}
+
           <div class="flex items-center justify-between gap-2">
             <div class="min-w-0 flex-1">
               <div class="truncate text-xs font-semibold text-foreground">
@@ -220,13 +220,8 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
 
           <div class="my-2.5 h-px bg-line/60" />
 
-          {/* Roster List */}
-          {/* `relative` is load-bearing, not decorative: pointerReorder's drag math measures
-              rows via offsetLeft/offsetTop against this element, which only works if this is
-              their offsetParent. A static container isn't one — the plain (non-flex) rows would
-              silently resolve against the popover's own `fixed` shell instead, offsetting every
-              drag position by the header/divider's height. `relative` with no inset set costs
-              nothing visually; it only establishes the positioning context. */}
+          {/* Establish the offset parent expected by pointerReorder; otherwise the popover header offsets
+ * every drag position. */}
           <div class="relative space-y-1.5" data-reorder-container>
             <For each={orderedSessions()}>
               {(agent) => {
@@ -255,7 +250,7 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                     }}
                     aria-label={`Switch to ${title()} terminal`}
                   >
-                    {/* Brand / Agent Icon */}
+
                     <div class="relative flex size-7 shrink-0 items-center justify-center rounded-md border border-line/60 bg-surface shadow-xs transition-colors group-hover/roster-row:border-line">
                       <AgentIcon
                         agent={agent.agent}
@@ -268,7 +263,6 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                       />
                     </div>
 
-                    {/* Content */}
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center justify-between gap-1.5">
                         <span class="truncate text-xs font-medium text-foreground group-hover/roster-row:font-semibold transition-colors" title={title()}>
@@ -293,7 +287,6 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                         </Show>
                       </div>
 
-                      {/* Subagent running preview */}
                       <Show when={agent.subagent_running}>
                         <div class="mt-1.5 flex items-center gap-1.5 rounded-md border border-signal/30 bg-signal/10 px-2 py-1 text-[10px] text-signal font-mono">
                           <span class="inline-block size-1.5 rounded-full bg-signal animate-pulse shrink-0 ring-1 ring-signal/40" />
@@ -301,7 +294,6 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
                         </div>
                       </Show>
 
-                      {/* Pending prompt or message preview */}
                       <Show when={agent.pending_prompt}>
                         <div class="mt-1 truncate rounded border border-attention/20 bg-attention/10 px-1.5 py-0.5 text-[10px] italic text-attention">
                           {agent.pending_prompt}
@@ -319,7 +311,6 @@ export function LaneAgentRosterPopover(props: LaneAgentRosterPopoverProps) {
             </For>
           </div>
 
-          {/* Subtle footer */}
           <div class="mt-2 text-[10px] text-muted/60 font-mono text-center">
             <Show when={props.reorderable} fallback="Click an agent to open terminal">
               Drag to arrange · right-click to rename · click to open

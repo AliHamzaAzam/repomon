@@ -3,9 +3,7 @@ import { Show, onCleanup, onMount } from "solid-js";
 import type { Lane } from "../bindings";
 import { IconPin, IconTrash } from "./icons";
 
-/// The lane row's right-click menu. Keeps to the two actions a row itself owns: pinning it to the
-/// top, and removing a worktree whose work has landed. Removal routes through the shared confirm,
-/// so nothing here deletes on a single click.
+/// Offers lane pinning and worktree removal through the shared confirmation flow.
 export default function LaneRowMenu(props: {
   lane: Lane;
   x: number;

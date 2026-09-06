@@ -24,13 +24,7 @@ interface PolicySettingsProps {
   initialSection?: PolicySection;
 }
 
-/**
- * Settings > Policies: the standing rules that decide what Repomon may do without asking.
- *
- * Only rules live here. Playbooks, standing duties and the journal are things Repomind owns and
- * an operator watches, so they live in the Repomind panel beside the rest of its state rather
- * than behind a settings modal that has to be dismissed to see the effect.
- */
+/** Edits standing permission rules while operational Repomind state remains in its panel. */
 export default function PolicySettings(props: PolicySettingsProps) {
   const [activeSubTab, setActiveSubTab] = createSignal<PolicySection>(
     props.initialSection ?? "approvals",
@@ -39,7 +33,6 @@ export default function PolicySettings(props: PolicySettingsProps) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
-  // Global supervision defaults
   const [supervision, setSupervision] = createSignal<SupervisionConfig | null>(null);
   const [supervisionSaveStatus, setSupervisionSaveStatus] = createSignal<"idle" | "saving" | "saved" | "error">("idle");
   let supervisionSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -168,7 +161,6 @@ export default function PolicySettings(props: PolicySettingsProps) {
         )}
       </Show>
 
-      {/* Sub-tab Pill Navigation */}
       <div class="flex gap-1.5 rounded-xl border border-line bg-raised/30 p-1">
         <button
           type="button"
@@ -194,7 +186,6 @@ export default function PolicySettings(props: PolicySettingsProps) {
         </button>
       </div>
 
-      {/* 1. APPROVALS */}
       <Show when={activeSubTab() === "approvals"}>
         <div class="space-y-4">
           <p class="text-xs text-muted">
@@ -227,7 +218,6 @@ export default function PolicySettings(props: PolicySettingsProps) {
         </div>
       </Show>
 
-      {/* 2. SUPERVISION DEFAULTS */}
       <Show when={activeSubTab() === "supervision"}>
         <Show
           when={supervision()}

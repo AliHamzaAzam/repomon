@@ -4,12 +4,8 @@ import { hasTauriBridge } from "../ipc/boot";
 import { cliInstall, cliStatus, cliUninstall, type CliStatus } from "../ipc/cli";
 import { IconCheck, IconCopy, IconTerminal } from "./icons";
 
-/// Settings > System, and the last step of the setup wizard: install the `repomon` command line
-/// out of the bundle the app already carries.
-///
-/// The app ships the CLI and the daemon side by side, so there is nothing to download. What this
-/// card has to be honest about is the part an install cannot do for you: whether a terminal will
-/// actually find the directory it published into, and the exact line to add when it will not.
+/// Configures installation of bundled command-line tools and reports whether a terminal can find
+/// them.
 export interface CommandLineToolsCardProps {
   /// Injected in tests; the app uses the Tauri commands.
   read?: () => Promise<CliStatus>;

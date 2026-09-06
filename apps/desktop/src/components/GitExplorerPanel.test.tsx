@@ -150,7 +150,7 @@ describe("parseCommits", () => {
 });
 
 // Sample lines are real `git diff --stat` output (captured from a scratch repo), not hand-typed
-// guesses — git pads paths to the longest one in the block and uses a literal " | " separator.
+// guesses - git pads paths to the longest one in the block and uses a literal " | " separator.
 describe("parseStatFiles", () => {
   const stat = [
     " src/app.tsx             | 5 +++--",
@@ -260,13 +260,8 @@ describe("GitExplorerPanel", () => {
     expect(screen.getByText("5m ago")).toBeInTheDocument();
   });
 
-  // Regression guard for a right-edge overflow bug also seen in the Editor panel (fixed in
-  // commit c0c3cca via a missing min-w-0 on the shared right-rail ancestor pane in App.tsx,
-  // which structurally applies to every RightPanelHost tab including this one): the trailing
-  // metadata column (relative time / +/- counts) must stay visible instead of being pushed past
-  // the rail's right edge. That requires the row's one *growing* text element to carry
-  // min-w-0 + flex-1, with truncation on the growing text and shrink-0 on fixed siblings.
-  // File rows shrink their directory first so the basename remains readable.
+  // Growing row text must shrink and truncate while fixed metadata stays visible; jsdom checks
+  // these structural constraints.
   it("truncates the growing summary text (not the trailing metadata columns) in every row type", async () => {
     responses.diff = {
       base: "main",
@@ -285,13 +280,11 @@ describe("GitExplorerPanel", () => {
     ];
     render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
 
-    // Branch row.
     const branchSummary = await screen.findByText(/A very very very long commit summary/);
     expect(branchSummary).toHaveClass("min-w-0", "flex-1", "truncate");
     const branchOid = within(branchSummary.closest("li")!).getByText("abc1234");
     expect(branchOid).toHaveClass("shrink-0");
 
-    // History row.
     const historySummary = screen.getByText(/Another very very very long commit summary/);
     expect(historySummary).toHaveClass("min-w-0", "flex-1", "truncate");
     const historyRow = historySummary.closest("li")!;
@@ -374,7 +367,7 @@ describe("GitExplorerPanel Working tree section", () => {
   });
 
   it("renders one honest 'Changes' group (not a staged/unstaged split) plus per-file rows, and a count-only 'Untracked' group", async () => {
-    // uncommitted_stat is `git diff HEAD --stat` — it already mixes staged and unstaged hunks
+    // uncommitted_stat is `git diff HEAD --stat` - it already mixes staged and unstaged hunks
     // into one line per file, so there's no way to attribute a given row to one or the other.
     responses.diff = {
       base: "main",
@@ -389,7 +382,6 @@ describe("GitExplorerPanel Working tree section", () => {
     // dirty-badge total) so every asserted digit below is unambiguous.
     render(() => <GitExplorerPanel fleet={fleetWith(dirtyLane({ staged: 1, unstaged: 2, untracked: 1 }))} />);
 
-    // Header's top dirty badge: total from DirtyState.
     expect(await screen.findByTitle("4 uncommitted files (1 staged, 2 unstaged, 1 untracked)")).toBeInTheDocument();
 
     // "Changes" group: header count is DirtyState's staged+unstaged (3), same source of truth as
@@ -676,10 +668,7 @@ describe("panel.git keybinding (App integration)", () => {
 
     fireEvent.keyDown(window, { key: "1", code: "Digit1", metaKey: true });
 
-    // C1 shipped a visible tab strip inside the right rail; that strip was removed once the
-    // header buttons (+ the numbered panel chords) covered the same switching job, so "on the Git tab" is now
-    // asserted via the header buttons' own aria-pressed state rather than a `role="tab"` query.
-    // Every header button's pressed state is tab-scoped: opening on Git must NOT light Repomind.
+    // Only the active panel’s header button should report pressed.
     await waitFor(() => expect(gitButton).toHaveAttribute("aria-pressed", "true"));
     expect(toggle).toHaveAttribute("aria-pressed", "false");
   });

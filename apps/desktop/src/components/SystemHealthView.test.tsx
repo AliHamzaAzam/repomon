@@ -112,8 +112,7 @@ describe("SystemHealthView", () => {
   });
 
   it("does not count tmux's not_applicable probe against the Windows summary", async () => {
-    // tmux.available is false here (meaningless on Windows), but agent_host and git are fine -
-    // the summary must read "Ready for sessions", not "Attention needed".
+    // Windows readiness depends on the agent host and git even when tmux.available is false.
     daemonResult.current = windowsDoctor({
       tmux: { available: false, version: null, source: null, path: null, not_applicable: true },
     });

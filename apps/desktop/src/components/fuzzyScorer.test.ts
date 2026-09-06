@@ -46,8 +46,8 @@ describe("scorePath", () => {
 
   it("returns null when characters are missing", () => {
     expect(scorePath("src/main.rs", "nomatch")).toBeNull();
-    expect(scorePath("src/main.rs", "smr")).not.toBeNull(); // s-m-r in order
-    expect(scorePath("src/main.rs", "smz")).toBeNull(); // 'z' not in path
+    expect(scorePath("src/main.rs", "smr")).not.toBeNull();
+    expect(scorePath("src/main.rs", "smz")).toBeNull();
   });
 
   it("highlights correct matched indices", () => {

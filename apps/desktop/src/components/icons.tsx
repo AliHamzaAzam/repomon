@@ -1334,7 +1334,7 @@ export interface AgentIconCatalogEntry {
 }
 
 export const AGENT_ICON_CATALOG: AgentIconCatalogEntry[] = [
-  // Official Brand Marks
+
   { id: "brand-claude", label: "Claude Brand Mark", category: "brands", Icon: IconBrandClaude },
   { id: "brand-hermes", label: "Hermes Agent Brand Mark", category: "brands", Icon: IconBrandHermes },
   { id: "brand-antigravity", label: "Antigravity Brand Mark", category: "brands", Icon: IconBrandAntigravity },
@@ -1342,7 +1342,6 @@ export const AGENT_ICON_CATALOG: AgentIconCatalogEntry[] = [
   { id: "brand-opencode", label: "OpenCode Brand Mark", category: "brands", Icon: IconBrandOpenCode },
   { id: "brand-cursor", label: "Cursor Brand Mark", category: "brands", Icon: IconBrandCursor },
 
-  // Abstract Geometric Library
   { id: "sparkle", label: "Sparkle Star", category: "agents", Icon: IconAgentClaudeCode },
   { id: "cursor", label: "Pointer Ray", category: "agents", Icon: IconAgentCursor },
   { id: "binary-orbit", label: "Binary Orbit", category: "agents", Icon: IconAgentAider },
@@ -1382,7 +1381,6 @@ export function resolveAgentIconKey(agent?: string | null, customKey?: string | 
   if (overrides[raw]) return overrides[raw];
   if (agent && overrides[agent]) return overrides[agent];
 
-  // Default brand icons for supported agent kinds:
   if (raw === "claude-code" || raw === "claude") return "brand-claude";
   if (raw === "hermes" || raw === "hermes-agent") return "brand-hermes";
   if (raw === "antigravity" || raw === "agy") return "brand-antigravity";
@@ -1390,7 +1388,6 @@ export function resolveAgentIconKey(agent?: string | null, customKey?: string | 
   if (raw === "opencode") return "brand-opencode";
   if (raw === "cursor") return "brand-cursor";
 
-  // Abstract geometric defaults for other agents:
   if (raw === "aider") return "binary-orbit";
 
   return "bot";
@@ -1411,7 +1408,7 @@ export function AgentIcon(props: AgentIconProps): JSX.Element {
 
   return (
     <Switch fallback={<IconBot {...props} />}>
-      {/* Official Brand Marks */}
+
       <Match when={iconKey() === "brand-claude"}><IconBrandClaude {...props} /></Match>
       <Match when={iconKey() === "brand-hermes"}><IconBrandHermes {...props} /></Match>
       <Match when={iconKey() === "brand-antigravity"}><IconBrandAntigravity {...props} /></Match>
@@ -1419,7 +1416,6 @@ export function AgentIcon(props: AgentIconProps): JSX.Element {
       <Match when={iconKey() === "brand-opencode"}><IconBrandOpenCode {...props} /></Match>
       <Match when={iconKey() === "brand-cursor"}><IconBrandCursor {...props} /></Match>
 
-      {/* Abstract Geometric Library */}
       <Match when={iconKey() === "sparkle"}><IconAgentClaudeCode {...props} /></Match>
       <Match when={iconKey() === "cursor"}><IconAgentCursor {...props} /></Match>
       <Match when={iconKey() === "binary-orbit"}><IconAgentAider {...props} /></Match>
@@ -1888,7 +1884,6 @@ export function IconAlertTriangle(props: IconProps): JSX.Element {
     </svg>
   );
 }
-
 
 export function IconEye(props: IconProps & { off?: boolean }): JSX.Element {
   return (

@@ -55,7 +55,7 @@ export default function MiniCodeBlock(props: MiniCodeBlockProps) {
         });
         setCmReady(true);
       } catch {
-        // Fall back to pre/code
+
         setCmReady(false);
       }
     });
@@ -71,7 +71,7 @@ export default function MiniCodeBlock(props: MiniCodeBlockProps) {
 
   return (
     <div class="group relative my-4 overflow-hidden rounded-md border border-line bg-surface/70">
-      {/* Language badge & copy button header */}
+
       <div class="flex h-7 items-center justify-between border-b border-line/60 bg-raised/30 px-3 font-mono text-[11px] text-muted">
         <span>{props.language || "text"}</span>
         <button
@@ -116,14 +116,12 @@ export default function MiniCodeBlock(props: MiniCodeBlockProps) {
         </button>
       </div>
 
-      {/* CodeMirror container */}
       <div
         ref={containerRef}
         class="min-h-0"
         style={{ display: cmReady() ? "block" : "none" }}
       />
 
-      {/* Fallback pre/code */}
       <Show when={!cmReady()}>
         <pre class="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-foreground">
           <code>{props.code}</code>

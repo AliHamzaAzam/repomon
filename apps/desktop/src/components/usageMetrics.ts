@@ -1,15 +1,9 @@
-/**
- * Pure reducers behind the usage chart. Kept out of the component so the shapes a chart depends on
- * (bucket order, stacking, the palette assignment, axis rounding) are testable without a DOM.
- */
+/** Computes usage-chart data independently of rendering. */
 import type { RatesStatus, UsageBucket, UsageGroupBy, UsageSeries, UsageTimeline } from "../bindings";
 import { formatRelativeTime } from "./relativeTime";
 
-/**
- * How many series the categorical palette holds. Colours are assigned in this fixed order and are
- * never cycled: a seventh series folds into "Other" instead of borrowing the first series' colour,
- * which would make two different things look like the same thing.
- */
+/** Limits distinct chart colors, folding excess series into Other instead of reusing an identity
+ * color. */
 export const MAX_SERIES = 6;
 
 /** The CSS variable carrying series `index`'s colour. */
@@ -17,12 +11,7 @@ export function seriesVar(index: number): string {
   return `var(--chart-${Math.min(index, MAX_SERIES - 1) + 1})`;
 }
 
-/**
- * What a breakdown row reads as. A blank key only ever turns up grouped by model, from a reader
- * that could not attribute a turn to one; every other grouping either always has a key or already
- * reads as "unattributed" once the daemon labels it. This is a defensive fallback should one slip
- * through regardless of which reader emitted it.
- */
+/** Labels a breakdown row, including a defensive fallback for unattributed model keys. */
 export function groupRowLabel(row: { key: string; label: string }, groupBy: UsageGroupBy): string {
   if (groupBy === "model" && row.key.trim() === "") return "unknown model";
   return row.label;
@@ -44,12 +33,8 @@ export interface StackedBar {
   segments: StackSegment[];
 }
 
-/**
- * A series' points by the instant they start, so a bucket can be looked up by time rather than by
- * the exact text of its timestamp. The daemon writes `2026-09-05T10:00:00Z` and a generated axis
- * writes `2026-09-05T10:00:00.000Z`; those are the same bucket, and matching on the string would
- * quietly draw every bar as empty.
- */
+/** Match timestamps by instant because equivalent ISO strings can differ in fractional-second
+ * formatting. */
 function pointsByInstant(series: UsageSeries): Map<number, { tokens: number; cost: number }> {
   const index = new Map<number, { tokens: number; cost: number }>();
   for (const point of series.points) {
@@ -74,10 +59,7 @@ export function toStackedBars(timeline: UsageTimeline, metric: UsageMetric): Sta
   });
 }
 
-/**
- * Keep the largest {@link MAX_SERIES} minus one series and sum the rest into a single "Other" row,
- * so the palette is never exhausted. Series arrive ordered by cost, so the tail is the cheap end.
- */
+/** Folds excess cost-ordered series into Other without reusing palette identities. */
 export function foldTailSeries(timeline: UsageTimeline): UsageTimeline {
   if (timeline.series.length <= MAX_SERIES) return timeline;
   const kept = timeline.series.slice(0, MAX_SERIES - 1);
@@ -124,10 +106,7 @@ export function niceMax(value: number): number {
   return step * magnitude;
 }
 
-/**
- * Token counts as k, M or B with one decimal and no trailing ".0", so "12580.0M" reads "12.6B".
- * Mirrors `repomon_core::usage_ledger::tokens`, which formats the same numbers for the CLI.
- */
+/** Formats token counts with compact suffixes consistently with the core CLI helper. */
 export function formatTokens(n: number): string {
   const suffixes = ["", "k", "M", "B"];
   let value = Math.max(0, n);
@@ -147,12 +126,8 @@ function oneDecimal(value: number): string {
   return text.endsWith(".0") ? text.slice(0, -2) : text;
 }
 
-/**
- * Dollars: whole dollars above a thousand, cents below a hundred, and never more than two decimal
- * places, so a column of costs reads as one consistent format rather than mixing precisions. A
- * sub-cent amount reads as "<$0.01".
- * Mirrors `repomon_core::usage_ledger::money`.
- */
+/** Formats dollars consistently with the core ledger, showing nonzero sub-cent amounts as less than
+ * one cent. */
 export function formatUsd(n: number): string {
   if (n === 0) return "$0";
   const sign = n < 0 ? "-" : "";
@@ -184,10 +159,7 @@ export const BUCKET_MS: Record<UsageBucket, number> = {
   day: 24 * 60 * 60_000,
 };
 
-/**
- * The start of the bucket `ms` falls in. The daemon floors buckets in UTC, and every bucket length
- * divides a UTC day evenly, so flooring the epoch lands on exactly the same instants.
- */
+/** Floors epoch time to the same UTC bucket boundaries as the daemon. */
 export function floorToBucket(ms: number, bucket: UsageBucket): number {
   const step = BUCKET_MS[bucket];
   return Math.floor(ms / step) * step;
@@ -209,10 +181,7 @@ export function bucketAxis(from: string, to: string, bucket: UsageBucket): strin
   return axis;
 }
 
-/**
- * Replace a timeline's axis with every bucket in `[from, to]`, so a window with three busy hours
- * in it still draws as a continuous day rather than three bars stretched across the plot.
- */
+/** Fills the axis with every bucket so idle periods retain their place on the timeline. */
 export function withContinuousAxis(
   timeline: UsageTimeline,
   from: string,
@@ -251,10 +220,8 @@ export function bucketLabel(at: string, bucket: UsageBucket): string {
  */
 export const AGENT_ID_MAX_CHARS = 18;
 
-/**
- * Shorten `text` to `max` characters by eliding the middle, so an identifier's family and its
- * version both survive. Text already within budget is returned unchanged.
- */
+/** Elides the middle beyond the character budget while preserving an identifier’s family and
+ * version. */
 export function truncateMiddle(text: string, max: number): string {
   if (text.length <= max) return text;
   if (max <= 1) return text.slice(0, max);
@@ -267,10 +234,7 @@ export function truncateMiddle(text: string, max: number): string {
 /** Above this many retries a session's retry count is worth flagging; below it, it is routine. */
 const RETRY_NOTICE_THRESHOLD = 5;
 
-/**
- * Whether a session's retry count should draw the eye. One or two retries are unremarkable and
- * stay quiet; only a run that retried repeatedly is worth the attention colour.
- */
+/** Selects an attention tone for repeated retries. */
 export function retryTone(retries: number): "quiet" | "notice" {
   return retries >= RETRY_NOTICE_THRESHOLD ? "notice" : "quiet";
 }
@@ -290,15 +254,8 @@ export interface LaneCell {
   external: boolean;
 }
 
-/**
- * A lane repomon named reads as that name, unchanged. A session outside every lane has nothing but
- * a raw working-directory path to show, and a full absolute path (`/Users/.../some-long-repo-name`)
- * both crowds out every other column and tells the operator nothing a shorter form would not: the
- * last two segments are shown instead, tagged "external" so a bare path never reads as if repomon
- * had named it, with the full path kept in the tooltip. A session with no path at all is not
- * "external" to anything in particular; it is only unknown, so it is not tagged either, rather
- * than stacking two warnings over one blank cell.
- */
+/** Uses the named lane or a shortened external path with its full tooltip, leaving sessions without
+ * paths unattributed. */
 export function laneCell(row: { lane_label: string | null; cwd: string | null }): LaneCell {
   if (row.lane_label) {
     return { label: row.lane_label, title: row.cwd ?? row.lane_label, external: false };
@@ -316,14 +273,7 @@ export interface SessionColumnVisibility {
   retries: boolean;
 }
 
-/**
- * Sub is the first column to go as the table narrows: it qualifies the Tokens figure beside it
- * rather than adding one, and the expanded row still carries it. Tools goes next, being the
- * least-consulted counter and the one most redundant with Turns. Below the narrowest threshold
- * Retries goes too, leaving Task, Agent, Lane and the three cost-relevant columns (Time, Tokens,
- * Cost): what is being asked of the fleet and what it costs, which is what the view exists to
- * answer.
- */
+/** Hide secondary counters first as space narrows; expanded rows retain their details. */
 // Pixel budgets include both 8px gutters. Task gets the remaining width, never less than 180px.
 export const SESSION_WIDTHS = {
   task: 180,
@@ -358,11 +308,8 @@ export function sessionColumnVisibility(tableWidth: number): SessionColumnVisibi
   };
 }
 
-/**
- * What share of a session's tokens its subagents spent, as a rounded percentage, or `null` when
- * it delegated nothing. A session that delegated a sliver still reads as "1%" rather than "0%",
- * because zero is what "no subagents at all" means here.
- */
+/** Returns the rounded subagent token share or null without delegation, showing any positive share
+ * as at least one percent. */
 export function subagentShare(totals: {
   subagent_tokens: number;
   total_tokens: number;
@@ -371,11 +318,7 @@ export function subagentShare(totals: {
   return Math.max(1, Math.round((totals.subagent_tokens / totals.total_tokens) * 100));
 }
 
-/**
- * A session's start and duration on one line, for the sessions table's expanded row: "Sep 5,
- * 10:00 AM · 30m" rather than a locale timestamp followed by a separately-worded "for 30m", which
- * ran long enough to make the Window detail the widest cell in the row.
- */
+/** Formats session start and duration together for compact expanded-row display. */
 export function windowLine(startedAt: string | null, duration: string): string {
   if (!startedAt) return "unknown";
   const start = new Date(startedAt);
@@ -385,13 +328,8 @@ export function windowLine(startedAt: string | null, duration: string): string {
   return duration ? `${day}, ${time} · ${duration}` : `${day}, ${time}`;
 }
 
-/**
- * The Usage view's pricing footnote and the CLI's `repomon usage rates` summary line share this
- * wording (see `format_rates_footnote` in `repomon-core/src/pricing.rs`), kept as two small,
- * independently-testable implementations (Rust and TypeScript can't share one function) rather
- * than round-tripping a formatted string through the RPC, which would bake English into the wire
- * format for no benefit.
- */
+/** Formats rate provenance consistently with the core CLI helper while leaving the RPC
+ * language-neutral. */
 export function formatRatesFootnote(status: RatesStatus | null, now: number = Date.now()): string {
   if (!status) return "Rates: published API rates.";
   if (!status.enabled) {

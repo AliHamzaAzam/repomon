@@ -1,16 +1,5 @@
-/**
- * Pure fuzzy path scorer for the file finder (Cmd-P).
- *
- * Scoring priority:
- * 1. Basename exact match
- * 2. Basename prefix match
- * 3. Basename substring match
- * 4. Path substring match
- * 5. Path segment prefix match (e.g. "crd/fil" matching "crates/repomon-daemon/src/files.rs")
- * 6. Subsequence match with bonuses for boundaries, consecutive characters, and basename hits
- *
- * Stable tie-breaking: higher score first, then shorter path, then alphabetical.
- */
+/** Scores path matches with basename priority, then path and subsequence matches, breaking ties by
+ * shorter path and alphabetical order. */
 
 export interface FuzzyMatch {
   path: string;
@@ -40,7 +29,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
   const bLower = basename.toLowerCase();
   const pLower = path.toLowerCase();
 
-  // 1. Basename exact match
   if (bLower === qLower) {
     const indices: number[] = [];
     for (let i = 0; i < basename.length; i++) {
@@ -54,7 +42,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     };
   }
 
-  // 2. Basename prefix match
   if (bLower.startsWith(qLower)) {
     const indices: number[] = [];
     for (let i = 0; i < trimmed.length; i++) {
@@ -68,7 +55,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     };
   }
 
-  // 3. Basename substring match
   const bSubIdx = bLower.indexOf(qLower);
   if (bSubIdx !== -1) {
     const indices: number[] = [];
@@ -83,7 +69,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     };
   }
 
-  // 4. Path substring match
   const pSubIdx = pLower.indexOf(qLower);
   if (pSubIdx !== -1) {
     const indices: number[] = [];
@@ -132,7 +117,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     }
   }
 
-  // 6. Subsequence match
   const matchedIndices: number[] = [];
   let pIdx = 0;
   let qIdx = 0;
@@ -146,26 +130,22 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     if (qChar === pChar) {
       matchedIndices.push(pIdx);
 
-      // Basename match bonus
       if (pIdx >= basenameStart) {
         score += 80;
       }
 
-      // Word boundary bonus
       if (pIdx === 0 || isBoundaryChar(path[pIdx - 1])) {
         score += 50;
       } else if (path[pIdx] !== path[pIdx].toLowerCase() && path[pIdx - 1] === path[pIdx - 1].toLowerCase()) {
-        // CamelCase boundary
+
         score += 40;
       }
 
-      // Consecutive bonus
       if (consecutiveCount > 0) {
         score += consecutiveCount * 25;
       }
       consecutiveCount++;
 
-      // Exact case bonus
       if (path[pIdx] === trimmed[qIdx]) {
         score += 10;
       }
@@ -181,7 +161,6 @@ export function scorePath(path: string, query: string): FuzzyMatch | null {
     return null;
   }
 
-  // Length and span penalty
   const firstMatch = matchedIndices[0] ?? 0;
   const lastMatch = matchedIndices[matchedIndices.length - 1] ?? 0;
   const span = lastMatch - firstMatch;

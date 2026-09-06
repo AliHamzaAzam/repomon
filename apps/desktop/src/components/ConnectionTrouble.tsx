@@ -3,12 +3,8 @@ import { Show, createSignal } from "solid-js";
 import type { ConnectionSnapshot } from "../ipc/connection";
 import { IconCheck, IconCopy, IconTerminal } from "./icons";
 
-/// The second line of the connection rail, drawn only while the daemon is unreachable.
-///
-/// A retrying pill on its own is a dead end: the daemon is spawned detached and windowless, so
-/// there is no console to read and no dialog to dismiss. This row carries the one line that says
-/// what to do about it, and the two controls that make the failure reportable: the daemon log,
-/// and a diagnostics block with the endpoint, the resolved binary, and the log tail already in it.
+/// Supplies connection failure details and recovery actions when the detached daemon is
+/// unreachable.
 export interface ConnectionTroubleProps {
   snapshot: ConnectionSnapshot;
   /// Opens the daemon log in the system's text viewer.

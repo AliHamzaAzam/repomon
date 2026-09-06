@@ -41,13 +41,7 @@ export interface RightPanelHostProps {
   repomind?: RepomindStore;
   /** Ensures center editor workspace is open when opening a file from GitExplorerPanel. */
   onEnsureEditorOpen?: () => void;
-  /**
-   * One-shot activation command some external shortcut can push to select a tab even after the
-   * host has already mounted - e.g. App.tsx's `panel.git` binding switching away from an
-   * already-open Repomind tab. Bump `token` on every dispatch (the id alone would not refire the
-   * effect on repeated presses of the same shortcut); the id is also consulted on first mount so
-   * "closed → open already on git" works without waiting on a post-mount effect.
-   */
+  /** Activates a tab on mount or on a new token, allowing repeated commands for the same tab ID. */
   requestTab?: { id: string; token: number } | null;
   /** Fires with the active tab id on mount and on every switch (click or `requestTab`), so a
    * caller can tell whether the panel is already showing the tab it's about to toggle. */
@@ -82,7 +76,6 @@ function buildDefaultPanels(
       ),
     },
 
-    // C1: git status/diff for the active lane.
     {
       id: "git",
       label: "Git",
@@ -97,13 +90,11 @@ function buildDefaultPanels(
       ),
     },
 
-    // D4: file tree + multi-tab editor for the active lane's worktree.
     { id: "editor", label: "Editor", icon: IconLayers, component: () => <FileEditorPanel fleet={fleet} editor={editor} onOpenFinder={() => editor?.openFinder()} /> },
 
     // Durable fleet mail across every lane, grouped by conversation thread.
     { id: "mail", label: "Repomail", icon: IconMail, component: () => <MailPanel fleet={fleet} messages={messages} actions={actions} /> },
 
-    // E1: agent supervision policies and live audit log for the active lane.
     {
       id: "supervision",
       label: "Supervision",
@@ -113,12 +104,10 @@ function buildDefaultPanels(
   ];
 }
 
-// Bounds for the ResizableSplit handle App.tsx mounts alongside this host (F1 ships the
-// primitive; F2 is the wiring). Exported so the width contract for the right rail lives in one
-// place rather than being duplicated at the call site.
-export const RIGHT_PANEL_MIN_WIDTH_PX = 256; // 16rem
-export const RIGHT_PANEL_MAX_WIDTH_PX = 640; // 40rem
-export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320; // 20rem — matches the pre-F2 fixed .repomind-panel width.
+// Shares right-rail resize bounds with the handle mounted by App.
+export const RIGHT_PANEL_MIN_WIDTH_PX = 256;
+export const RIGHT_PANEL_MAX_WIDTH_PX = 640;
+export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 320;
 
 export default function RightPanelHost(props: RightPanelHostProps) {
   const panels = () =>
@@ -148,7 +137,7 @@ export default function RightPanelHost(props: RightPanelHostProps) {
     saveRightPanelActiveTab(id);
   }
 
-  // Reports the active tab on mount and every switch — App.tsx's `panel.git` shortcut needs this
+  // Reports the active tab on mount and every switch - App.tsx's `panel.git` shortcut needs this
   // to tell whether the panel is already showing "git" before deciding to switch vs. close.
   createEffect((prev?: string) => {
     const id = activeId();
@@ -156,10 +145,8 @@ export default function RightPanelHost(props: RightPanelHostProps) {
     return id;
   });
 
-  // The imperative half of the `requestTab` command described on the prop: a shortcut pressed
-  // while this host is already mounted (panel open, on some other tab) bumps the token, and this
-  // effect switches tabs in response. The mount-time value is handled by `activeId`'s initializer
-  // above so "closed → open already on git" doesn't wait a tick for this effect to run.
+  // A new request token activates the tab; initialization handles the first request without an
+  // extra tick.
   let lastRequestToken: number | undefined;
   createEffect(() => {
     const req = props.requestTab;

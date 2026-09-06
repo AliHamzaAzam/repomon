@@ -1,7 +1,4 @@
-/// Move `dragged` to sit just `after` (or before) `target` in `ids`, returning the new order
-/// (a no-op returns null so callers can skip the RPC). Pure so the reorder math is unit-testable.
-///
-/// Shared by every drag-to-reorder surface (repo sidebar headers, per-lane agent tabs).
+/// Moves an item around a target and returns null for a no-op so callers can skip persistence.
 export function reorderAround<T extends string | number>(
   ids: T[],
   dragged: T,

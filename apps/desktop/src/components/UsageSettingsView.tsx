@@ -56,12 +56,7 @@ function lastSeenLabel(iso: string | null): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
-/**
- * Settings > Usage: the `[usage]` ledger toggles, where rates come from right now, and a table of
- * every model the ledger has seen (or has an override for) with an inline rate editor. Reads
- * `usage.rates` for the provenance line the Usage view's own footnote uses, and `usage.models` for
- * the table, so the two surfaces never disagree about where a number came from.
- */
+/** Edits usage settings and model overrides using the same rate provenance as the Usage view. */
 export default function UsageSettingsView(props: UsageSettingsViewProps) {
   const [showTodayCost, setShowTodayCost] = createSignal(readSidebarShowTodayCost());
   onCleanup(onSidebarShowTodayCostChanged(setShowTodayCost));

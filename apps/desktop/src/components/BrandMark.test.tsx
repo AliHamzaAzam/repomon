@@ -8,16 +8,14 @@ afterEach(() => {
 });
 
 describe("brand mark", () => {
-  // The point of drawing the mark from tokens is that it re-shades with the theme and the accent.
-  // A hardcoded hex would look right in dark mode and wrong in light, which is easy to miss.
+  // Theme tokens keep the mark readable in both light and dark themes.
   it("draws itself from theme tokens rather than fixed colors", () => {
     const { container } = render(() => <BrandMark />);
     const svg = container.querySelector("svg")!;
 
     expect(svg.innerHTML).toContain("var(--brand-ink)");
     expect(svg.innerHTML).toContain("var(--signal)");
-    // The square is the accent, never the attention state: a mark that turned amber whenever a
-    // lane needed a human would read as a warning.
+    // Keep brand color independent of attention state so the mark cannot imply a warning.
     expect(svg.innerHTML).not.toContain("var(--attention)");
     expect(svg.innerHTML).not.toMatch(/#[0-9a-f]{3,6}/i);
     expect(svg.innerHTML).not.toContain("rgb(");

@@ -218,9 +218,7 @@ describe("manual agent tab ordering and rename", () => {
     ]);
   }
 
-  /// Give the roster rows synthetic vertical geometry so the pointer primitive's midpoint math
-  /// has real coordinates to work with (jsdom rects are all zero): Architect [0,50),
-  /// Claude Code #2 [50,100).
+  /// Supplies row geometry for drag midpoint calculations because jsdom rectangles are zero-sized.
   function stubRowRects() {
     const rects = new Map<HTMLElement, () => DOMRect>();
     const architect = screen.getByRole("button", { name: /switch to architect terminal/i });
@@ -246,9 +244,7 @@ describe("manual agent tab ordering and rename", () => {
     stubRowRects();
 
     const dragged = screen.getByRole("button", { name: /switch to claude code #2 terminal/i });
-    // Grab the second row at y=75 (its rect is [50,100)) and drag above the first row's
-    // midpoint (y=25). Threshold first, then the crossing. The primitive throttles its work to
-    // animation frames, so flush two before asserting.
+    // Cross the threshold and row midpoint, flushing both animation frames before asserting.
     fireEvent.pointerDown(dragged, { button: 0, clientX: 10, clientY: 75, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 10, clientY: 70, pointerId: 1 });
     fireEvent.pointerMove(window, { clientX: 10, clientY: 20, pointerId: 1 });
@@ -256,7 +252,6 @@ describe("manual agent tab ordering and rename", () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
     );
 
-    // The row live-swapped ahead of release (Chrome-style), but nothing persists yet.
     expect(onReorderTabs).not.toHaveBeenCalled();
 
     fireEvent.pointerUp(window, { clientX: 10, clientY: 20, pointerId: 1 });
@@ -355,8 +350,7 @@ describe("manual agent tab ordering and rename", () => {
       "win:lane-1-3",
     ]);
 
-    // Simulate a next fleet refresh carrying a different authoritative order from another
-    // surface. The changed backend key must invalidate this surface's optimistic order.
+    // An authoritative order from another surface must invalidate this surface’s optimistic order.
     setCurrentLane(createLane([
       session({ id: 3, session_id: "s3", tmux_window: "lane-1-3" }),
       session({ id: 1, session_id: "s1", tmux_window: "lane-1", custom_label: "Architect" }),

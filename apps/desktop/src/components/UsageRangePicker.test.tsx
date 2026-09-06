@@ -3,8 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import UsageRangePicker from "./UsageRangePicker";
 
-// Pinned so "today" is a fixed, known day: Sep 5, 2026, mid-month, with room on both sides so a
-// "future day" and a "this month" test both have an unambiguous target.
+// Pin today mid-month so past and future date selections are deterministic.
 const TODAY = new Date(2026, 8, 5, 12, 0, 0);
 
 beforeEach(() => {

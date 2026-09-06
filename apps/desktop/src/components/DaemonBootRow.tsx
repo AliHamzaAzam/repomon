@@ -3,12 +3,8 @@ import { Show, createSignal, onMount } from "solid-js";
 import { daemonBootCheck, hasTauriBridge, openDaemonLog, type DaemonBootCheck } from "../ipc/boot";
 import { IconCheck, IconRefresh, IconTerminal } from "./icons";
 
-/// The System check's "Daemon binary launches" row.
-///
-/// Every other row here asks the daemon a question, which means every other row goes blank at
-/// exactly the moment this one matters: when the daemon cannot start. This row runs
-/// `repomond --version` from the bundled copy through the Tauri command instead, so it answers
-/// even with nothing listening, and it reports the exact error plus the one line that fixes it.
+/// Configures a bundled-daemon launch probe that works even when the daemon cannot serve system
+/// checks.
 export interface DaemonBootRowProps {
   /// Injected in tests; the app uses the Tauri command.
   check?: () => Promise<DaemonBootCheck>;

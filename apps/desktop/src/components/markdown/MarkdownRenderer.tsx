@@ -60,7 +60,6 @@ function LocalImage(props: {
     const laneId = props.laneId;
     const baseFile = props.baseFile;
 
-    // External or data URLs can be used directly
     if (
       src.startsWith("http://") ||
       src.startsWith("https://") ||

@@ -26,9 +26,8 @@ afterEach(() => {
   document.documentElement.style.removeProperty("--right-panel-width");
 });
 
-// A fake two-tab registry exercises routing and switching without depending on RepomindPanel's
-// daemon calls. Each panel counts its own onMount to prove F2's warm-keep decision: switching
-// tabs hides the inactive panel (inert + visually hidden), it does not unmount it.
+// Count panel mounts in a fake registry to verify tab switching preserves inactive panel state
+// without daemon calls.
 function makeCountingPanel(id: string, label: string, mounts: Record<string, number>): RightPanelTabDef {
   return {
     id,
@@ -41,12 +40,8 @@ function makeCountingPanel(id: string, label: string, mounts: Record<string, num
   };
 }
 
-// The visible tab strip (rounded pill row, role="tablist") was removed once the header buttons
-// (+ the numbered panel chords, see App.tsx's `openPanelTab`) covered the same switching job, so it was
-// redundant chrome duplicating a control that already existed one level up. RightPanelHost itself
-// has no more click surface of its own, so these tests drive tab switching the same way the real
-// header buttons do: by bumping the `requestTab` prop. The registry, active-tab state, and
-// warm-keep mounting this proves are otherwise unchanged from the pre-removal behavior.
+// Drive the same requestTab command as header controls while checking active state and retained
+// panel mounts.
 function renderHost(panels: RightPanelTabDef[], onActiveTabChange?: (id: string) => void) {
   const [requestTab, setRequestTab] = createSignal<{ id: string; token: number } | null>(null);
   const utils = render(() => (
@@ -108,7 +103,7 @@ describe("RightPanelHost", () => {
     setRequestTab({ id: "alpha", token: 2 });
     setRequestTab({ id: "beta", token: 3 });
 
-    // Neither panel's component factory runs again — both stayed mounted the whole time.
+    // Neither panel's component factory runs again - both stayed mounted the whole time.
     expect(mounts.alpha).toBe(1);
     expect(mounts.beta).toBe(1);
   });

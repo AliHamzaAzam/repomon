@@ -277,23 +277,19 @@ describe("ControlCenter component UI", () => {
     const trigger = screen.getByRole("button", { name: /Command Palette/i });
     expect(screen.queryByRole("dialog", { name: "Command Palette" })).not.toBeInTheDocument();
 
-    // Click trigger to open
     fireEvent.click(trigger);
     expect(actions.controlOpen()).toBe(true);
 
     const dialog = await screen.findByRole("dialog", { name: "Command Palette" });
     expect(dialog).toBeInTheDocument();
 
-    // Search input rendered
     const searchInput = screen.getByPlaceholderText(/Type a command or search repos, lanes…/i);
     expect(searchInput).toBeInTheDocument();
 
-    // Commands rendered
     expect(screen.getByText("Spawn New Agent Session")).toBeInTheDocument();
     expect(screen.getByText("Add Repository")).toBeInTheDocument();
     expect(screen.getByText("Open Settings")).toBeInTheDocument();
 
-    // Lanes rendered
     expect(screen.getByText("feature-branch")).toBeInTheDocument();
   });
 
@@ -319,9 +315,7 @@ describe("ControlCenter component UI", () => {
   });
 
   it("shows the real keymap.ts chord for Keyboard Shortcuts and opens the overlay, not Settings", async () => {
-    // Regression check for the drift this file used to have: the row hard-coded "⌘/" while the
-    // actual chord (help.open in keymap.ts) was mod+?. The label is now derived from BINDINGS, so
-    // it cannot go stale again.
+
     const { fleet, actions, notifications, messages } = setup();
     render(() => (
       <ControlCenter

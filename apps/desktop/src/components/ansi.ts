@@ -1,15 +1,5 @@
-/// Strip terminal escape sequences from a pane capture so it reads as plain text.
-///
-/// The repomind pane arrives as a raw capture, escapes and all, and is rendered into a `<pre>`
-/// rather than through xterm the way lane panes are. Without this the panel shows the literal
-/// bytes: `\x1b[93m`, `\x1b[1m`, and OSC 8 hyperlink wrappers around every URL, which is what made
-/// a trust prompt unreadable.
-///
-/// Handles the two families that actually appear here:
-///   - CSI  `ESC [ ... final`      colour, bold, cursor moves
-///   - OSC  `ESC ] ... BEL|ST`     hyperlinks (`ESC ] 8 ; id=x ; url ST`), title sets
-/// The OSC payload is dropped but the link *text* between the two OSC 8 markers survives, because
-/// it sits outside the escape and is what the reader actually wants.
+/// Removes CSI and OSC escapes from captured text while preserving hyperlink labels outside OSC
+/// wrappers.
 export function stripAnsi(input: string): string {
   let out = "";
   let i = 0;
@@ -39,11 +29,7 @@ export function stripAnsi(input: string): string {
   return out;
 }
 
-/// Drop blank lines from the top and bottom of a pane capture.
-///
-/// A capture is the whole tmux pane, so a short message sits in a tall field of empty rows and the
-/// panel renders mostly nothing. Only the edges are touched: blank lines *inside* the output are
-/// the agent's own spacing and removing them would reflow its layout.
+/// Trims empty capture edges without changing blank lines inside the output.
 export function trimBlankEdges(text: string): string {
   const lines = text.split("\n");
   let start = 0;

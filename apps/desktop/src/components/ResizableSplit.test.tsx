@@ -29,10 +29,7 @@ function renderSplit(overrides: Partial<ResizableSplitProps> = {}) {
   return { handle, onWidthChange, props };
 }
 
-// jsdom has no PointerEvent constructor, so @testing-library/dom's fireEvent.pointerX helpers
-// silently drop clientX/pointerId (they fall back to the plain Event constructor, which ignores
-// unrecognized init keys). Build MouseEvents instead — the component only reads clientX,
-// pointerId, pointerType, and button, all of which we attach manually below.
+// Attach pointer fields to MouseEvents because jsdom’s Event fallback discards them.
 function pointerEvent(
   type: string,
   init: { clientX: number; pointerId?: number; button?: number; pointerType?: string },
@@ -139,7 +136,7 @@ describe("ResizableSplit", () => {
   it("resets to the default width on double-click", () => {
     const { handle, onWidthChange } = renderSplit({ panelSide: "after" });
 
-    drag(handle, 500, 400); // grows to 420
+    drag(handle, 500, 400);
     expect(onWidthChange).toHaveBeenLastCalledWith(420);
 
     fireEvent.dblClick(handle);
@@ -151,7 +148,7 @@ describe("ResizableSplit", () => {
     vi.useFakeTimers();
     const { handle } = renderSplit({ panelSide: "after" });
 
-    drag(handle, 500, 460); // -> 360
+    drag(handle, 500, 460);
 
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
     await vi.advanceTimersByTimeAsync(200);

@@ -28,7 +28,6 @@ describe("CodeEditor Replace All with zero-width regex", () => {
       />
     ));
 
-    // Request replace all with regex "a*" replaced by "X"
     setReplaceReq({
       query: "a*",
       replacement: "X",

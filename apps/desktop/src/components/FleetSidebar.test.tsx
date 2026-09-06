@@ -138,15 +138,12 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("Hidden (1)")).toBeInTheDocument();
     expect(screen.queryByTitle("Show beta again")).not.toBeInTheDocument();
 
-    // Click to expand hidden section
     fireEvent.click(screen.getByRole("button", { name: /Hidden \(1\)/i }));
     expect(screen.getByTitle("Show beta again")).toBeInTheDocument();
 
-    // Click unhide button
     fireEvent.click(screen.getByTitle("Show beta again"));
     expect(setRepoHidden).toHaveBeenCalledWith(beta, false);
 
-    // Click to re-collapse hidden section
     fireEvent.click(screen.getByRole("button", { name: /Hidden \(1\)/i }));
     expect(screen.queryByTitle("Show beta again")).not.toBeInTheDocument();
   });
@@ -200,7 +197,6 @@ describe("fleet sidebar hiding", () => {
     const pill = screen.getByText("running");
     const branch = screen.getByText("main", { selector: "span.truncate-tail" });
 
-    // The name and the pill share one line...
     expect(pill.parentElement).toBe(name.parentElement);
     // ...and the branch lives on a different line from both of them.
     expect(branch.parentElement).not.toBe(name.parentElement);
@@ -221,7 +217,6 @@ describe("fleet sidebar hiding", () => {
     const { fleet, actions } = stubs([alpha], [idling, empty]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
-    // A lane with an idle agent gets the "idle" pill...
     expect(screen.getByText("idle")).toBeInTheDocument();
     // ...but an empty lane (auto-collapsed, no agents at all) never claims to be idle.
     expect(screen.queryAllByText("idle")).toHaveLength(1);
@@ -232,7 +227,6 @@ describe("fleet sidebar hiding", () => {
     const { fleet, actions } = stubs([alpha], [lane(10, alpha), lane(11, alpha)]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
-    // "REPOMON 9" said nothing about what nine was.
     expect(screen.getByText("2 lanes")).toBeInTheDocument();
     expect(screen.getByTitle("2 lanes in alpha")).toBeInTheDocument();
   });
@@ -296,10 +290,7 @@ describe("fleet sidebar hiding", () => {
   });
 
   it("never truncates a filter chip label, at any width", () => {
-    // jsdom cannot lay out, so the width-driven compact switch is exercised directly on the pure
-    // decision function (below), and this render only guards the other half of the same bug: the
-    // label span must never carry a `truncate` class, since a short label plus that class was
-    // exactly how "Needs attention" turned into "Need... 0".
+    // Verify compact filters structurally because jsdom cannot measure whether labels truncate.
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
@@ -401,17 +392,15 @@ describe("fleet sidebar hiding", () => {
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     expect(screen.getAllByText("main")[0]).toBeInTheDocument();
-    // Default is auto-collapsed for empty lane
+
     const expandBtn = screen.getByLabelText("Expand lane main");
     expect(expandBtn).toBeInTheDocument();
     expect(screen.queryByText("idle")).not.toBeInTheDocument();
 
-    // Click expand
     fireEvent.click(expandBtn);
     const minimizeBtn = screen.getByLabelText("Minimize inactive lane main");
     expect(minimizeBtn).toBeInTheDocument();
 
-    // Click minimize to collapse again
     fireEvent.click(minimizeBtn);
     expect(screen.getByLabelText("Expand lane main")).toBeInTheDocument();
   });
@@ -528,7 +517,7 @@ describe("repo display labels", () => {
 
     expect(screen.getByText("Client Portal")).toBeInTheDocument();
     expect(screen.queryByText("alpha")).not.toBeInTheDocument();
-    // The real identity stays reachable via the tooltip.
+
     expect(screen.getByTitle(/repository: alpha/i)).toBeInTheDocument();
   });
 });
@@ -573,7 +562,7 @@ describe("manual repo reordering", () => {
   it("reorderAround moves a repo before or after its drop target", () => {
     expect(reorderAround([1, 2, 3], 3, 1, false)).toEqual([3, 1, 2]);
     expect(reorderAround([1, 2, 3], 1, 3, true)).toEqual([2, 3, 1]);
-    // Dropping onto itself is a no-op.
+
     expect(reorderAround([1, 2, 3], 2, 2, false)).toBeNull();
     // A target that is not in the list leaves the order untouched.
     expect(reorderAround([1, 2, 3], 1, 99, true)).toBeNull();
@@ -643,7 +632,7 @@ describe("the pinned Repomind row", () => {
     expect(row.textContent).toContain("needs you");
     expect(row.textContent).toContain("3 goals");
     expect(row.textContent).toContain("/Users/pat/repomind");
-    // The home never also appears as a repo group.
+
     expect(screen.queryByLabelText("repomind")).toBeNull();
   });
 
@@ -728,7 +717,6 @@ describe("the pinned Repomind row", () => {
   });
 });
 
-
 describe("manual usage outcomes", () => {
   it("shows a short inline notice when the probe is disabled", async () => {
     const { fleet, actions } = stubs([], []);
@@ -744,7 +732,6 @@ describe("manual usage outcomes", () => {
     expect(screen.getByLabelText("Refresh rate limit data")).not.toBeDisabled();
   });
 });
-
 
 describe("sidebar cost visibility", () => {
   it("defaults on, hides the Today row, and persists across a remount", () => {
@@ -767,7 +754,6 @@ describe("sidebar cost visibility", () => {
     localStorage.removeItem("repomon:sidebar-show-today-cost");
   });
 });
-
 
 describe("long probe feedback", () => {
   it.each([

@@ -53,13 +53,8 @@ export interface OnboardingProps {
   onSkip: () => void;
 }
 
-/// The first-run setup wizard: seven steps that leave a new install with a repository, an agent,
-/// alerts, and somewhere to put what its agents learn.
-///
-/// It is resumable by design. Half of these steps send you somewhere else (install a CLI, clone a
-/// repo, answer a system permission prompt), and an install that has to be re-done from step one
-/// after every detour does not get finished. Every move writes the step to local storage, so
-/// quitting mid-way and relaunching lands back on the same step.
+/// Runs the resumable setup wizard, persisting progress across external installation and permission
+/// steps.
 export default function Onboarding(props: OnboardingProps) {
   const [step, setStep] = createSignal<OnboardingStepId>(
     props.initialStep ?? readOnboardingStep() ?? FIRST_STEP,
@@ -203,8 +198,7 @@ export default function Onboarding(props: OnboardingProps) {
 
       <div class="min-h-0 flex-1 overflow-y-auto">
         <div class="onboarding-page mx-auto w-full max-w-[46rem] px-8 py-9">
-          {/* Keyed on the step so the one authored motion in this screen (a short rise as the
-              next step arrives) replays per step rather than once per mount. */}
+          {/* Key the step to replay its entrance motion on navigation. */}
           <div class="onboarding-step" data-step={step()}>
             <SwitchBlock>
               <Match when={step() === "welcome"}>
@@ -662,7 +656,6 @@ function RepomindStep(props: {
   );
 }
 
-
 function DoneStep(props: {
   repoCount: number;
   agent: string | null;
@@ -693,8 +686,6 @@ function DoneStep(props: {
         </For>
       </dl>
 
-      {/* The CLI is optional, so the wizard offers it here rather than making it a step. Everything
-          it needs is already in the bundle; installing it does not require a download. */}
       <h3 class="section-label">Work from the terminal too</h3>
       <div class="mt-2 rounded-xl border border-line bg-surface/50 p-3">
         <p class="mb-2.5 text-[11px] leading-relaxed text-muted">

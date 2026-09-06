@@ -63,10 +63,6 @@ const BUCKETS: { id: UsageBucket; label: string }[] = [
   { id: "day", label: "Day" },
 ];
 
-/**
- * Sortable numeric headings, in display order. The shared column plan owns their widths;
- * Retries drops out at narrow widths according to `sessionColumnVisibility`.
- */
 const SESSION_COLUMNS: { id: SessionSort; label: string }[] = [
   { id: "retries", label: "Retries" },
   { id: "time", label: "Time" },
@@ -127,7 +123,6 @@ function Segmented<T extends string>(props: {
   );
 }
 
-/** A card: one heading, one body, the same frame every time. */
 function Card(props: { title: string; aside?: import("solid-js").JSX.Element; children: import("solid-js").JSX.Element }) {
   return (
     <section class="min-w-80 flex-1 rounded-xl border border-line bg-surface p-3">
@@ -140,12 +135,7 @@ function Card(props: { title: string; aside?: import("solid-js").JSX.Element; ch
   );
 }
 
-/**
- * The Usage view: what the fleet spent, where it went, and what is worth changing.
- *
- * Numbers are what the same tokens would cost on the provider's API. On a subscription plan that
- * is the value the plan returned, not an invoice, and the view says so rather than implying a bill.
- */
+/** Present token usage as provider API value rather than a subscription invoice. */
 export default function UsageView(props: UsageViewProps) {
   const store = props.store;
   const summary = () => store.summary();
@@ -177,11 +167,8 @@ export default function UsageView(props: UsageViewProps) {
   /** Which lanes the fleet can still focus, so only a live lane becomes a link. */
   const liveLanes = createMemo(() => new Set(props.fleet.lanes().map((lane) => lane.id)));
 
-  /**
-   * The window on screen. The daemon answers with the window it actually read, so that is what
-   * the header prints and what the chart's axis spans; the store's own resolution is only the
-   * stand-in until the first answer lands.
-   */
+  /** Use the daemon's actual query range once available so the heading and chart axis describe the
+   * returned data. */
   const windowRange = createMemo(() => {
     const answered = summary();
     if (!answered) return store.resolved();
@@ -220,10 +207,8 @@ export default function UsageView(props: UsageViewProps) {
     });
   });
 
-  // Sub, Tools and Retries give way first as the sessions table narrows, so Task keeps room to
-  // read.
-  // The section only enters the DOM once there is data, so this watches the element signal rather
-  // than observing once on mount.
+  // Observe when the data-dependent table enters the DOM so narrow columns can yield space to task
+  // names.
   createEffect(() => {
     const el = sessionsEl();
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -284,7 +269,6 @@ export default function UsageView(props: UsageViewProps) {
         </div>
       </div>
 
-      {/* The window in words: which dates are on screen, and the way back out of a narrowed one. */}
       <div class="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-1.5 text-xs text-muted">
         <For each={store.trail()}>
           {(previous, index) => (
@@ -345,8 +329,7 @@ export default function UsageView(props: UsageViewProps) {
             </div>
           }
         >
-          {/* The bill first, at a size nothing else competes with; what it is made of beside it;
-              how much work it took last, because that is context rather than the answer. */}
+
           <div class="flex flex-wrap items-end gap-x-10 gap-y-4 px-4 py-4">
             <div class="flex flex-col gap-0.5">
               <span class="text-4xl font-semibold leading-none tabular-nums text-foreground">
@@ -566,7 +549,6 @@ export default function UsageView(props: UsageViewProps) {
   );
 }
 
-/** One headline number and what it counts. */
 function Figure(props: { value: string; label: string }) {
   return (
     <div class="flex flex-col gap-0.5">

@@ -29,7 +29,7 @@ function harness(order: string[], enabled: (id: string) => boolean = () => true)
         value: () => new DOMRect(order.indexOf(id) * 100, 0, 100, 30),
       });
       // Swap-detection reads the layout box (offsetLeft/offsetWidth), not getBoundingClientRect
-      // — see pointerReorder.ts's maybeSwap doc comment — so it stays correct while a sibling's
+      // - see pointerReorder.ts's maybeSwap doc comment - so it stays correct while a sibling's
       // getBoundingClientRect is mid-FLIP-transition. Keep these in lockstep with the rect above.
       Object.defineProperty(el, "offsetLeft", { value: order.indexOf(id) * 100, configurable: true });
       Object.defineProperty(el, "offsetTop", { value: 0, configurable: true });
@@ -122,7 +122,7 @@ describe("createPointerReorder", () => {
 
   it("ignores non-primary-button pointerdown entirely (right-click must not drag)", async () => {
     const h = harness(["a", "b", "c"]);
-    // A right-click that drifts past the threshold before release must never arm a drag —
+    // A right-click that drifts past the threshold before release must never arm a drag -
     // contextmenu owns that gesture.
     h.pill("a").dispatchEvent(
       new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10, button: 2 }),
@@ -139,11 +139,11 @@ describe("createPointerReorder", () => {
     const h = harness(["a", "b", "c", "d"]);
     // Grab "a" (slot [0,100), midpoint of its own irrelevant) and flick it all the way past
     // b's midpoint (150) AND c's midpoint (250) in a single native pointermove. The committed
-    // order must match the visual position — not land one adjacent swap short.
+    // order must match the visual position - not land one adjacent swap short.
     h.pill("a").dispatchEvent(
       new MouseEvent("pointerdown", { bubbles: true, clientX: 50, clientY: 10 }),
     );
-    h.move(60, 10); // arm
+    h.move(60, 10);
     await flushFrames();
     h.move(260, 10); // single jump past two midpoints
     await flushFrames();
@@ -197,7 +197,6 @@ describe("createPointerReorder", () => {
     await flushFrames();
     expect(api!.isDragging()).toBe(true);
 
-    // Simulates the surface unmounting mid-drag.
     api!.abort();
     expect(api!.isDragging()).toBe(false);
     container.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 90, clientY: 10 }));

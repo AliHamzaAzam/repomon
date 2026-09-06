@@ -10,10 +10,7 @@ afterEach(() => {
   Object.defineProperty(navigator, "platform", { value: ORIGINAL_PLATFORM, configurable: true });
 });
 
-/// The window is frameless with `titleBarStyle: "Overlay"`, so on macOS the system paints the
-/// traffic lights over the top-left of the page and anything drawn at the leading edge lands
-/// underneath them. The main shell always had this inset; the setup wizard drew its own header
-/// without one and put the brand mark under the buttons.
+/// Both shell and wizard headers must clear the overlaid macOS traffic lights.
 describe("window chrome inset", () => {
   it("leaves room for the macOS traffic lights", () => {
     expect(windowChromeInsetClass("mac")).toBe("pl-[78px]");

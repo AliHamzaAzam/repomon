@@ -7,7 +7,6 @@ describe("stripAnsi", () => {
     expect(stripAnsi("\x1b[93mAccessing\x1b[0m \x1b[1mworkspace\x1b[0m")).toBe("Accessing workspace");
   });
 
-  // The exact shape from a Claude Code trust prompt, which is what made the panel unreadable.
   it("keeps the option text of a menu intact", () => {
     const pane = "  \x1b[94m❯\x1b[39m \x1b[37m1.\x1b[39m \x1b[94mYes,\x1b[39m \x1b[94mI\x1b[39m \x1b[94mtrust\x1b[39m";
     expect(stripAnsi(pane)).toBe("  ❯ 1. Yes, I trust");

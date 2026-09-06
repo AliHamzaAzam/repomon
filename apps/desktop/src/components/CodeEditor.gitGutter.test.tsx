@@ -72,7 +72,6 @@ describe("CodeEditor git gutter", () => {
     const modifiedMarker = container.querySelector<HTMLElement>(".cm-git-gutter-modified")!;
     fireEvent.click(modifiedMarker);
 
-    // Popover dialog is visible
     await waitFor(() => {
       const dialog = container.querySelector("[role=dialog]");
       expect(dialog).not.toBeNull();
@@ -86,7 +85,6 @@ describe("CodeEditor git gutter", () => {
 
     fireEvent.click(revert!);
 
-    // Revert restores original line
     await waitFor(() => {
       expect(value()).toBe(base);
     });

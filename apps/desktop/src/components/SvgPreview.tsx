@@ -4,21 +4,15 @@ export interface SvgPreviewProps {
   content: string;
 }
 
-// Strips <script> elements and any on*-style event-handler attribute from raw SVG markup before
-// it ever reaches the DOM. The markup comes straight from the unsaved editor buffer (never from
-// disk - see SvgPreview's caller in EditorWorkspace), so it is untrusted input even though it is
-// the user's own file: a pasted or half-edited SVG can carry an inline script or an onload/
-// onerror handler that must never execute just because the tab happens to be previewed.
+// Strips script elements and event-handler attributes from untrusted editor-buffer SVG before
+// previewing it.
 export function sanitizeSvgMarkup(markup: string): string {
   const withoutScripts = markup.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
   return withoutScripts.replace(/\s(on[a-z]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "");
 }
 
-// Renders the live SVG buffer beside the editor, in the same split panel MarkdownPreview
-// occupies for .md tabs. The sanitized markup is handed to the <img> as a Blob URL rather than
-// injected as inline HTML - the browser's image context does not execute script or event
-// handlers at all, so this is a second, independent layer under the sanitizer above, not a
-// replacement for it.
+// Previews sanitized SVG through an image Blob URL, whose image context independently prevents
+// script execution.
 export default function SvgPreview(props: SvgPreviewProps) {
   let objectUrl: string | undefined;
 

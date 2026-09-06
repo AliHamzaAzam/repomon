@@ -181,7 +181,7 @@ export function parseInline(text: string): InlineNode[] {
   }
 
   while (i < len) {
-    // Inline code: `...`
+
     if (text[i] === "`") {
       let backticks = 1;
       while (i + backticks < len && text[i + backticks] === "`") {
@@ -197,7 +197,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Image: ![alt](url)
     if (text[i] === "!" && i + 1 < len && text[i + 1] === "[") {
       const altClose = text.indexOf("]", i + 2);
       if (altClose !== -1 && altClose + 1 < len && text[altClose + 1] === "(") {
@@ -219,7 +218,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Link: [text](url)
     if (text[i] === "[") {
       const textClose = text.indexOf("]", i + 1);
       if (textClose !== -1 && textClose + 1 < len && text[textClose + 1] === "(") {
@@ -246,7 +244,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Strikethrough: ~~text~~
     if (text.startsWith("~~", i)) {
       const closeIdx = text.indexOf("~~", i + 2);
       if (closeIdx !== -1) {
@@ -257,7 +254,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Bold-Italic: ***text*** or ___text___
     if (text.startsWith("***", i) || text.startsWith("___", i)) {
       const marker = text.slice(i, i + 3);
       const closeIdx = text.indexOf(marker, i + 3);
@@ -269,7 +265,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Bold: **text** or __text__
     if (text.startsWith("**", i) || text.startsWith("__", i)) {
       const marker = text.slice(i, i + 2);
       const closeIdx = text.indexOf(marker, i + 2);
@@ -281,7 +276,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Italic: *text* or _text_
     if (text[i] === "*" || text[i] === "_") {
       const marker = text[i];
       // For underscore, only trigger if not inside a word
@@ -310,7 +304,6 @@ export function parseInline(text: string): InlineNode[] {
       }
     }
 
-    // Regular text character
     appendText(text[i]);
     i++;
   }
@@ -330,13 +323,11 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
   while (i < numLines) {
     const line = lines[i];
 
-    // Blank line
     if (line.trim() === "") {
       i++;
       continue;
     }
 
-    // Fenced Code Block: ``` or ~~~
     const codeBlockMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (codeBlockMatch) {
       const fence = codeBlockMatch[1];
@@ -363,11 +354,10 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       continue;
     }
 
-    // Headings: # through ######
     const headingMatch = /^ {0,3}(#{1,6})\s+(.*)$/.exec(line);
     if (headingMatch) {
       const level = headingMatch[1].length as 1 | 2 | 3 | 4 | 5 | 6;
-      // Strip trailing hashes if present: # Heading # -> Heading
+
       const text = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
       const slug = slugifyHeading(text, slugCounts);
       const node: HeadingNode = {
@@ -384,14 +374,12 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       continue;
     }
 
-    // Thematic Break (HR): ---, ***, ___
     if (/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
       ast.push({ type: "thematicBreak" });
       i++;
       continue;
     }
 
-    // Blockquote: > ...
     if (/^ {0,3}>\s?/.test(line)) {
       const quoteLines: string[] = [];
       while (i < numLines) {
@@ -416,7 +404,6 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       continue;
     }
 
-    // Table: line containing | followed by delimiter row
     if (
       line.includes("|") &&
       i + 1 < numLines &&
@@ -452,7 +439,7 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
         if (!rowLine.includes("|") || rowLine.trim() === "") break;
         const cellStrings = parseCells(rowLine);
         const row = cellStrings.map((c) => parseInline(c));
-        // Pad row with empty cells if fewer than headers
+
         while (row.length < headers.length) {
           row.push([]);
         }
@@ -469,7 +456,6 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       continue;
     }
 
-    // Lists: Unordered or Ordered
     const unorderedMatch = /^(\s*)([-*+])\s+(.*)$/.exec(line);
     const orderedMatch = /^(\s*)(\d+)\.\s+(.*)$/.exec(line);
 
@@ -481,7 +467,7 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       while (i < numLines) {
         const curLine = lines[i];
         if (curLine.trim() === "") {
-          // Check if subsequent line is still list
+
           if (i + 1 < numLines && /^(\s*)([-*+]|\d+\.)\s+/.test(lines[i + 1])) {
             i++;
             continue;
@@ -497,7 +483,6 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
           let itemText = match[1];
           let task: { checked: boolean } | undefined;
 
-          // Check for task checkbox: [ ] or [x] or [X]
           const taskMatch = /^\[([ xX])\]\s+(.*)$/.exec(itemText);
           if (taskMatch) {
             task = { checked: taskMatch[1].toLowerCase() === "x" };
@@ -510,7 +495,7 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
           });
           i++;
         } else if (/^\s{2,}/.test(curLine) && items.length > 0) {
-          // Sub-item / continuation
+
           const subText = curLine.trim();
           const lastItem = items[items.length - 1];
           const subListMatch = /^([-*+]|\d+\.)\s+(.*)$/.exec(subText);
@@ -535,7 +520,7 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
               children: parseInline(subContent),
             });
           } else {
-            // Text continuation
+
             lastItem.children.push({ type: "text", text: " " + subText });
           }
           i++;
@@ -553,7 +538,6 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
       continue;
     }
 
-    // Paragraph: collect lines until blank line or block syntax
     const paraLines: string[] = [];
     while (i < numLines) {
       const curLine = lines[i];

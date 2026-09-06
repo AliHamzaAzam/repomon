@@ -120,11 +120,7 @@ export interface CodeEditorProps {
   wrap?: boolean;
   whitespace?: boolean;
   languageOverride?: string;
-  /// Bumped by the caller (see FileEditorPanel's `file().saveVersion`) whenever this file's
-  /// content is successfully saved through the store, regardless of which UI path triggered the
-  /// save - the Mod-s keymap below and the rail Save button both end up going through
-  /// `editor.saveFile`. CodeEditor watches it to refresh the git-diff base after every save, not
-  /// just the ones it happens to trigger itself.
+  /// Signals every successful save so the diff base refreshes regardless of which UI initiated it.
   saveVersion?: number;
   onChange?: (value: string) => void;
   onSave?: () => void;
@@ -641,14 +637,7 @@ export const appTheme = EditorView.theme(
   { dark: true },
 );
 
-// The app's whole visual identity runs on four accent roles (--signal, --attention, --fault,
-// --muted) layered over --surface/--foreground - see src/index.css. Syntax highlighting reuses
-// exactly those roles instead of inventing a rainbow token palette: keywords/tags read as
-// "structure" (signal), literals read as "data" (attention), comments/punctuation recede (muted),
-// and only genuinely invalid syntax reaches for --fault. Every value below is a var(...) or
-// color-mix(...) reference, so all six themes in index.css repaint the editor automatically.
-// Extended past main's base set with the tags the wider @codemirror/language-data catalog (yaml,
-// toml, shell, go, sql, dockerfile, ...) actually emits, mapped onto the same four roles.
+// Map syntax roles to theme tokens so language support follows theme and accent changes.
 export const highlightStyle = HighlightStyle.define([
   { tag: t.comment, color: "var(--muted)", fontStyle: "italic" },
   { tag: t.lineComment, color: "var(--muted)", fontStyle: "italic" },
@@ -690,10 +679,8 @@ export const highlightStyle = HighlightStyle.define([
 
 const MIN_WORD_COMPLETION_LENGTH = 3;
 
-/// Document-word completion: offers words already present in the open document as completion
-/// candidates, alongside whatever the active language's own completion source contributes.
-/// Wired in as language data (see `wordCompletionData` below) rather than an `autocompletion()`
-/// `override`, so it merges with the language's completions instead of replacing them.
+/// Adds document-word candidates through language data so language-specific completion remains
+/// available.
 export function documentWordCompletionSource(
   context: CompletionContext,
 ): CompletionResult | Promise<CompletionResult | null> | null {
@@ -715,12 +702,7 @@ const wordCompletionData = EditorState.languageData.of(() => [
   { autocomplete: documentWordCompletionSource },
 ]);
 
-/// The local (non-global) CodeMirror bindings this editor adds beyond @codemirror's own defaults.
-/// This is the actual list the `keymap.of` extension below dispatches from - the component builds
-/// `extraKeymaps` by mapping over this exact array, so the two can never drift - and it is also
-/// the table keymap.test.ts imports (via fromCodeMirrorKey) to check against the "editor" scope
-/// entries in keymap.ts's BINDINGS, so the shortcuts guide can never omit or misdescribe one of
-/// these either.
+/// Defines editor-local bindings used by both CodeMirror dispatch and shortcut-registry checks.
 export const EDITOR_LOCAL_KEYMAP: Array<{ key: string; label: string }> = [
   { key: "Mod-s", label: "Save file" },
   { key: "Mod-/", label: "Toggle line comment" },
@@ -736,10 +718,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   let view: EditorView | undefined;
   let lastKnownDoc = props.value;
   let applyingExternalValue = false;
-  // Guards the cursor/scroll restoration effect below so it fires once per file activation
-  // (a `path` change) rather than on every reactive read - the initial file's restoration is
-  // handled inline in onMount, so this starts equal to the first path to skip a redundant re-run
-  // the moment the effect's initial pass executes.
+  // Seed the activation guard from the initial path because onMount already restores that file.
   let lastCursorAppliedPath = props.path;
   // Incremented on every language-resolution request so an async `resolveLanguageSupport` call
   // that resolves after a newer request has started (e.g. the user switched files again before
@@ -855,10 +834,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   const localHandlers: Record<string, KeyBinding["run"]> = {
     "Mod-s": () => {
       if (props.large || props.readOnly) return true;
-      // Does not call refreshDiffBase itself - the store's saveFile bumps `saveVersion` on
-      // completion, and the effect below reacts to that. This way every save path (this keymap
-      // and the rail Save button in FileEditorPanel) refreshes the diff base exactly once,
-      // through the same code path, instead of only the keymap doing it.
+      // The shared saveVersion effect refreshes the diff base for every save path.
       props.onSave?.();
       return true;
     },
@@ -878,10 +854,7 @@ export default function CodeEditor(props: CodeEditorProps) {
   onMount(() => {
     lastKnownDoc = props.value;
 
-    // Shebang sniffing only ever looks at the file's first line, so it is cheap and safe to do
-    // once, synchronously, off the initial content - it must not become a reactive dependency on
-    // `props.value` (see the language-resolution effect below) or it would re-run on every
-    // keystroke.
+    // Read the initial shebang once so ordinary edits do not become language-loading dependencies.
     const initialShebang = sniffShebang(props.value);
     const initialSupport = getSyncLanguageSupport(props.path ?? "", initialShebang, props.languageOverride);
     const unit = detectIndentUnit(props.value, props.path ?? "");
@@ -1001,11 +974,8 @@ export default function CodeEditor(props: CodeEditorProps) {
     });
   });
 
-  // Keeps the live doc in sync with an externally-updated `value` prop that is *not* a file
-  // activation - e.g. a reload after resolving a conflict, or the parent handing our own
-  // `onChange` value straight back down (a no-op here, since it already matches `lastKnownDoc`).
-  // File-activation doc swaps are instead handled inside the path-keyed effect below, together
-  // with cursor restoration, in a single dispatch - see that effect's comment for why.
+  // Synchronize external content changes here; file activation replaces the document and restores
+  // selection in one separate dispatch.
   createEffect(() => {
     const nextVal = props.value;
     if (!view) return;
@@ -1022,22 +992,8 @@ export default function CodeEditor(props: CodeEditorProps) {
     }
   });
 
-  // Re-applies cursor/scroll restoration on every file activation, not just the first mount - the
-  // center workspace and the rail panel keep a single CodeEditor instance alive across tab
-  // switches (see EditorWorkspace.tsx and FileEditorPanel.tsx), so `onMount` only ever fires once
-  // for the very first file opened.
-  //
-  // Tracks `path` alone. `value`/`initialCursor`/`initialScrollTop` are read `untrack`ed, at the
-  // instant `path` changes, so this does not also fire on ordinary edits or on the store
-  // recording cursor activity for reasons other than switching files.
-  //
-  // This effect does its OWN (idempotent) doc replacement first, in the same dispatch as the
-  // selection restore, rather than relying on the value-sync effect above to have already swapped
-  // the doc by the time this runs: `path` and `value` change together on a file switch, but
-  // Solid does not guarantee these two sibling effects run in a fixed relative order across
-  // updates (observed empirically to flip between one file switch and the next), and letting the
-  // value-sync effect's default-mapped selection collapse win afterward silently discards the
-  // cursor position this effect just restored.
+  // Track only path and replace the document together with cursor/scroll restoration; sibling
+  // effects have no guaranteed ordering and could otherwise discard the restored selection.
   createEffect(() => {
     const path = props.path ?? "";
     if (!view) return;
@@ -1136,10 +1092,7 @@ export default function CodeEditor(props: CodeEditorProps) {
     void refreshDiffBase(path, laneId, diffBase, disabled);
   });
 
-  // Refreshes the diff base after every successful save, no matter which UI path triggered it -
-  // see the `saveVersion` prop doc comment and the Mod-s binding above. Seeded (not tracked) to
-  // the initial value so this does not also fire the moment the component mounts, duplicating the
-  // refresh the effect above and onMount already perform.
+  // Seed without tracking to avoid duplicating the mount-time diff-base refresh.
   let lastSaveVersion = props.saveVersion ?? 0;
   createEffect(() => {
     const version = props.saveVersion ?? 0;
@@ -1172,13 +1125,8 @@ export default function CodeEditor(props: CodeEditorProps) {
     });
   });
 
-  // Resolves the language for the active file. Depends on `path` and `languageOverride` only -
-  // *not* `props.value` - so it does not re-run on every keystroke; the shebang is re-sniffed
-  // from the current content only at the instant `path` changes (read `untrack`ed, so later edits
-  // to that same file don't retrigger this effect). Every run gets a fresh request id, and an
-  // async `resolveLanguageSupport` result is dropped if a newer request has started or `path` has
-  // since changed again - otherwise a slow load for a file the user already navigated away from
-  // could win the race and paint the wrong language onto whatever is open now.
+  // Track only path and language override, reading content untracked; reject obsolete async loads
+  // so a slow previous file cannot replace the current language.
   createEffect(() => {
     const path = props.path ?? "";
     const override = props.languageOverride;

@@ -133,7 +133,7 @@ describe("PanePicker", () => {
     const dialog = screen.getByRole("dialog", { name: "Choose multitasking panes" });
     expect(within(dialog).getByText("Repomind")).toBeInTheDocument();
     expect(within(dialog).getByText("Fleet")).toBeInTheDocument();
-    // The controller is selectable like any other pane.
+
     expect(within(dialog).getByRole("button", { name: "Show Repomind primary" })).toBeInTheDocument();
 
     // The controller's group comes first, so it is found without scrolling past the fleet.

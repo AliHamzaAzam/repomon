@@ -16,22 +16,16 @@ function sourceFor(snapshot: ConnectionSnapshot): ConnectionSource {
 
 describe("Repomon desktop shell", () => {
   beforeAll(() => {
-    // App.tsx's shortcut handler resolves "mod" from navigator.platform when no explicit
-    // platform is passed in (the real, unmocked path the app uses at runtime). jsdom reports an
-    // empty platform string, so pin it to macOS here: the fixtures below fire metaKey to mean
-    // "mod", matching how the app actually runs on macOS.
+    // Pin the platform because these fixtures use Meta as the macOS modifier and jsdom reports no
+    // platform.
     Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
   });
 
-  // Without this, each test's <App> stays mounted (and its window keydown listener stays live)
-  // for the rest of the file. That was merely untidy until App.tsx's global shortcut handler
-  // started honoring `event.defaultPrevented`: an earlier, still-mounted instance's listener
-  // runs first, calls preventDefault() on its own matched binding, and the current test's
-  // instance then sees the same event as already handled and skips it.
+  // Unmount listeners after each test so a previous App cannot consume the current test’s keyboard
+  // event.
   afterEach(() => {
     cleanup();
   });
-
 
   it("renders the mission control frame and connection rail", () => {
     render(() => <App connectionSource={sourceFor({
@@ -144,8 +138,7 @@ describe("Repomon desktop shell", () => {
     const extensions = within(container).getByRole("button", { name: "Extensions" });
     expect(extensions).toHaveAttribute("aria-pressed", "false");
 
-    // The old ad-hoc listener toggled Extensions on a bare "6"; that would steal a keystroke
-    // meant for a focused agent terminal. The keymap-driven handler ignores unmodified keys.
+    // Bare keys must remain available to the focused terminal.
     fireEvent.keyDown(window, { key: "6", code: "Digit6" });
     expect(extensions).toHaveAttribute("aria-pressed", "false");
 
@@ -157,9 +150,7 @@ describe("Repomon desktop shell", () => {
   });
 
   it("shows the real keymap.ts chord in header toolbar button titles, not hand-written text", () => {
-    // Regression check mirroring ControlCenter.test.tsx's "Keyboard Shortcuts" chord test: these
-    // titles used to hard-code strings like "Extensions (⌘4)" that could drift from the actual
-    // binding in keymap.ts. They're now derived from BINDINGS via chordFor/formatChord.
+    // Shortcut titles must match the registry.
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
@@ -249,12 +240,8 @@ describe("Repomon desktop shell", () => {
   });
 
   it("ignores a shortcut keydown whose default was already prevented by another handler (item 6)", async () => {
-    // Regression guard: mod+shift+f collided with the terminal's own find-bar chord because
-    // TerminalPane called preventDefault without stopPropagation, so App.tsx's global shortcut
-    // handler still fired the panel toggle underneath it. The fix makes the global handler
-    // return early once event.defaultPrevented is true, so any earlier, more specific handler
-    // wins. Simulate that earlier handler with a capture-phase listener that preventDefaults
-    // before App's own bubble-phase listener runs.
+    // A capture-phase handler consumes the event before App to verify focused controls take
+    // precedence.
     localStorage.setItem("repomon.repomind_open", "false");
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
@@ -335,7 +322,6 @@ describe("Repomon desktop shell", () => {
       expect(within(container).getByText("Set up Repomon")).toBeInTheDocument();
     });
 
-    // Skip setup sets the completed flag and closes the overlay
     const skipBtn = within(container).getByRole("button", { name: "Skip setup" });
     fireEvent.click(skipBtn);
 
@@ -431,13 +417,8 @@ describe("Repomon desktop shell", () => {
   });
 
   it("item 5a: keeps min-w-0 on the right-rail pane so long content scrolls instead of blowing out the rail", async () => {
-    // Regression guard for a flexbox "automatic minimum size" bug: this row-flex pane
-    // (ResizableSplit handle + this div) previously had no min-w-0, so a deeply nested
-    // no-wrap element's min-content width (e.g. an unwrapped long code line in CodeMirror)
-    // won this div's width instead of the resizable rail's actual pixel width, and the
-    // `aside` ancestor's overflow:hidden silently clipped the excess instead of letting the
-    // editor's own `.cm-scroller` handle horizontal scrolling. Without min-w-0 here, the fix
-    // has no effect regardless of what CodeEditor/CM6 itself does.
+    // The rail’s growing child needs min-w-0 so long editor lines scroll internally instead of
+    // widening beyond the rail.
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
@@ -481,11 +462,8 @@ describe("Repomon desktop shell", () => {
   });
 
   it("opens the shortcuts overlay on Cmd+Shift+/ without focusing or typing into the fleet filter", async () => {
-    // Regression for the reported bug: Cmd+? (physically Cmd+Shift+/) was matching the fleet
-    // sidebar's bare "/" navigation instead of help.open, because that handler sits ahead of the
-    // window-level shortcut dispatcher in the DOM and didn't guard against a modifier being held.
-    // Fired on the filter input itself so the event bubbles through that sidebar handler exactly
-    // as it would in the real app, whether or not the filter already had focus.
+    // Dispatch from the sidebar input to verify bare-key navigation does not consume the modified
+    // help chord.
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",
@@ -508,10 +486,8 @@ describe("Repomon desktop shell", () => {
   });
 
   it("opens the shortcuts overlay for Cmd+Shift+/ even when the browser reports event.key as the unshifted \"/\"", async () => {
-    // The literal bug report: on real hardware, holding Cmd can suppress the shift translation
-    // so event.key stays "/" (event.shiftKey and event.code still say the key was physically
-    // Shift+Slash). Before the fix this exact shape matched matchSidebarKey's bare "/" check
-    // ahead of matchChord ever running, so the filter got focused and the overlay never opened.
+    // Cmd can suppress event.key shift translation; physical Slash plus Shift must still open help
+    // rather than focus the filter.
     const { container } = render(() => <App connectionSource={sourceFor({
       phase: "starting",
       endpoint: "Resolving local daemon endpoint",

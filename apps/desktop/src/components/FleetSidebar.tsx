@@ -221,8 +221,7 @@ function LaneRow(props: {
             }}
             aria-current={props.selected ? "true" : undefined}
           >
-            {/* Line 1: health dot, lane name (gives way last), status pill (never truncates -
-                one short word from a fixed vocabulary; see `laneIndicator`). */}
+            {/* Keep status readable while the lane name absorbs truncation. */}
             <div class="flex min-w-0 items-center gap-1.5">
               <span class="relative flex size-3 shrink-0 items-center justify-center">
                 <Show
@@ -279,8 +278,7 @@ function LaneRow(props: {
               </Show>
             </div>
 
-            {/* Line 2: branch (the part that gives way first - truncates from the left so the
-                identifying tail stays visible), agent count, then the fixed change cell. */}
+            {/* Truncate the branch from the left to retain its identifying tail. */}
             <div class="flex min-w-0 items-center gap-1.5">
               <span class="size-3 shrink-0" aria-hidden="true" />
               <span class="truncate-tail min-w-0 flex-1 font-mono text-[10px] text-muted/70" title={branchName()}>
@@ -412,13 +410,8 @@ export function isFilterRowCompact(width: number): boolean {
   return width > 0 && width < FILTER_ROW_COMPACT_THRESHOLD_PX;
 }
 
-/// One of the two fleet filters. They are toggles, so they look like toggles: pressed state is
-/// carried by the whole chip, not by the number alone, and a chip with nothing to show recedes
-/// rather than disappearing (the count itself is the answer to "is anything running?").
-///
-/// The label and count never share truncation: the label is short enough to always fit once the
-/// row is wide enough to show it at all, and below that width the chip drops to an icon plus the
-/// count, with the full label moved to `title`/`aria-label` instead of being cut mid-word.
+/// Keep zero-count filters visible and preserve accessible labels when narrow layouts switch to
+/// icons.
 function FilterChip(props: {
   label: string;
   icon: (iconProps: IconProps) => JSX.Element;
@@ -578,9 +571,8 @@ export default function FleetSidebar(props: FleetSidebarProps) {
   const [manuallyExpandedLanes, setManuallyExpandedLanes] = createSignal<Set<number>>(new Set());
   const [manuallyCollapsedLanes, setManuallyCollapsedLanes] = createSignal<Set<number>>(loadCollapsedLanes());
   const [hiddenCollapsed, setHiddenCollapsed] = createSignal<boolean>(loadHiddenSectionCollapsed());
-  // E9: local spin state for the Rate Limits manual refresh button. Scoped here rather than reusing
-  // `fleet.loading()`, which also flips on every 1.2s poll tick and would make the icon flicker
-  // continuously instead of spinning only for the click the user actually made.
+  // Keep manual-refresh state separate from fleet.loading so background polling cannot spin the
+  // refresh icon.
   const [showTodayCost, setShowTodayCost] = createSignal(readSidebarShowTodayCost());
   onMount(() => onCleanup(onSidebarShowTodayCostChanged((value) => {
     setShowTodayCost(value);
@@ -847,9 +839,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
         </div>
       </div>
 
-      {/* The repomind home is pinned here rather than filed under the repo groups: it is the one
-          lane that is about the fleet instead of about a project, and it stays reachable whatever
-          the filters below are set to. */}
+      {/* Keep the controller reachable regardless of ordinary fleet filters. */}
       <Show when={props.fleet.controllerLanes().length}>
         <div class="border-b border-line px-2 py-1.5">
           <RepomindRow
@@ -993,8 +983,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                   </span>
                 </div>
               </button>
-              {/* Expanded, these are still one line each: a hidden project is a parking space, not
-                  a row that deserves the width of a live lane. */}
+
               <Show when={!hiddenCollapsed()}>
                 <div class="mt-0.5">
                   <For each={props.fleet.hiddenRepos()}>
@@ -1110,14 +1099,14 @@ export default function FleetSidebar(props: FleetSidebarProps) {
       <Show when={cardUsage()}>
         {(usage) => (
           <div class="border-t border-line bg-surface/50 p-2.5">
-            {/* Rate Limits & Usage Quota */}
+
             <div class="rounded-lg border border-line/60 bg-raised/30 p-2">
               <div class="mb-1.5 flex items-center justify-between font-mono text-[10px] text-muted">
                 <span class="font-semibold uppercase tracking-wider text-muted/90 flex items-center gap-1">
                   <IconCpu size={11} class="text-muted/70" />
                   <span>Rate Limits ({usage().label})</span>
                 </span>
-                {/* E9: staleness + manual refresh button */}
+
                 <span class="flex items-center gap-1">
                   <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
                     {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
@@ -1135,8 +1124,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                 </span>
               </div>
               <Show when={usageNotice()}><p role="status" class="mb-1.5 text-[10px] text-muted">{usageNotice()}</p></Show>
-              {/* A partial fleet double in a test may not carry the ledger; the line simply
-                  does not render then. */}
+
               <Show when={showTodayCost() && props.fleet.costToday?.() != null}>
                 <div class="mb-1.5 flex items-center justify-between font-mono text-[10px]">
                   <span class="text-muted/90">Today</span>
@@ -1148,7 +1136,7 @@ export default function FleetSidebar(props: FleetSidebarProps) {
               <div class="space-y-1">
                 <For each={usage().report.windows}>
                   {(window) => {
-                    // E9: show reset time in tooltip when the daemon captured it; omit otherwise.
+
                     const resetStr = formatResetAt(window.reset_at);
                     const tooltipText = resetStr
                       ? `${formatUsageWindow(window.label)}: ${window.pct_used}% used · resets ${resetStr}`

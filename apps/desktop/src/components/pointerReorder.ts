@@ -1,21 +1,7 @@
 import { reorderAround } from "./ordering";
 
-/// Chrome-style single-axis drag-to-reorder, hand-rolled on pointer events.
-///
-/// Native HTML5 DnD can't feel like Chrome's tabs: dragover arrives at low frequency, the ghost
-/// is a static snapshot, and neighbors snap instead of sliding. This primitive replaces that
-/// interaction layer (the array math stays in `reorderAround`):
-///
-/// - `pointerdown` arms a drag; once the cursor moves past a small threshold the element is
-///   captured and follows the cursor every animation frame via a direct CSS transform — no
-///   per-pixel framework renders.
-/// - When the cursor crosses an adjacent sibling's midpoint, the order swaps immediately and the
-///   displaced siblings animate to their new slots via FLIP (invert → play), which is most of
-///   what makes Chrome dragging feel smooth.
-/// - The dragged element's transform is compensated after each swap so its visual position never
-///   jumps when its layout slot changes underneath it.
-/// - `pointerup` commits the final order exactly once; a drag that never crossed the threshold
-///   leaves clicks untouched.
+/// Configures pointer-based reordering with transform compensation, animated sibling movement, and
+/// one commit after the drag threshold is crossed.
 export interface PointerReorderOptions<T extends string | number> {
   /** Axis the items are laid out along. */
   axis: "x" | "y";
@@ -37,13 +23,13 @@ interface ActiveDrag<T> {
   container: HTMLElement;
   startX: number;
   startY: number;
-  /** Last raw cursor position (drives per-frame deltas). */
+
   lastX: number;
   lastY: number;
   active: boolean;
   /** Set when a real drag happened, so the trailing click can be swallowed. */
   suppressClick: boolean;
-  /** Inline transition value to restore after the drag. */
+
   originalTransition: string;
   // Order at activation; release only commits when this actually changed.
   initialOrder: T[];
@@ -61,13 +47,8 @@ export function createPointerReorder<T extends string | number>(
 
   function applyDraggedTransform() {
     if (!drag) return;
-    // `offsetLeft`/`offsetTop` are pure CSS layout-box values (see `maybeSwap`'s comment) — unlike
-    // `getBoundingClientRect`, they're never contaminated by the transform this very function just
-    // applied last frame, so no compensation math is needed and, critically, no write-then-read of
-    // a layout-dependent method is either. An earlier version cleared `transform` and re-read
-    // `getBoundingClientRect` here to get the same transform-invariant answer, but that write
-    // immediately followed by a layout read forces the browser to flush a synchronous layout on
-    // *every* animation frame for the whole drag — real jank, not just wrong-direction motion.
+    // Layout offsets ignore active transforms and avoid clearing styles followed by synchronous
+    // layout reads on every drag frame.
     const { container, el } = drag;
     const containerRect = container.getBoundingClientRect();
     const staticX = el.offsetLeft - container.scrollLeft + container.clientLeft + containerRect.left;
@@ -130,10 +111,7 @@ export function createPointerReorder<T extends string | number>(
   }
 
   function begin(event: PointerEvent, id: T) {
-    // Only the primary button drags: pointerdown fires for every mouse button, and a
-    // right-click that drifts past the threshold would otherwise arm a real drag and race the
-    // context menu's rename flow. Real pointer events always carry `button`; treat `undefined`
-    // (synthetic/test environments) as primary.
+    // Ignore non-primary buttons so dragging cannot race the context menu.
     if (event.button !== 0 && event.button !== undefined) return;
     if (drag || !options.enabled(id)) return;
     const target = event.currentTarget as HTMLElement | null;
@@ -193,10 +171,8 @@ export function createPointerReorder<T extends string | number>(
       }
       drag.el.style.zIndex = "50";
       drag.el.style.cursor = "grabbing";
-      // Reorder writes the dragged transform every animation frame. The tab/roster row classes
-      // use `transition-all` for hover/close polish; leaving that transition enabled here makes
-      // the element chase stale transform targets (e.g. ~1px after two frames of a 240px move).
-      // FLIP transitions belong to siblings and are installed separately in `flipSiblings`.
+      // Disable the dragged element’s transition so it follows the pointer immediately; only
+      // siblings receive FLIP animation.
       drag.el.style.transition = "none";
       drag.el.style.willChange = "transform";
     }
@@ -211,13 +187,8 @@ export function createPointerReorder<T extends string | number>(
     });
   }
 
-  /// Move the dragged item to the slot under the cursor, then FLIP the others out of the way.
-  ///
-  /// The target slot is resolved directly from the cursor position against every sibling's
-  /// midpoint — not by stepping one adjacent swap at a time — so a single fast pointermove that
-  /// flicks across several items lands in the right slot in one tick. (Adjacent-only evaluation
-  /// desynced the committed array from the visual position when a jump crossed more than one
-  /// midpoint between two paint frames.)
+  /// Resolve the target against all sibling midpoints so one fast pointer movement can cross
+  /// several slots.
   function maybeSwap() {
     if (!drag || !drag.active) return;
     const container = drag.container;
@@ -226,7 +197,7 @@ export function createPointerReorder<T extends string | number>(
     if (index < 0 || ids.length < 2) return;
 
     // Cursor converted into the container's own layout-box coordinate space (see below for why
-    // siblings are measured the same way) — a flex item's `offsetLeft`/`offsetTop` is relative to
+    // siblings are measured the same way) - a flex item's `offsetLeft`/`offsetTop` is relative to
     // its flex container's padding-box origin regardless of the container's own `position`.
     const containerRect = container.getBoundingClientRect();
     const cursor =
@@ -241,11 +212,8 @@ export function createPointerReorder<T extends string | number>(
         `[data-reorder-id="${CSS.escape(String(ids[i]))}"]`,
       );
       if (!el) continue;
-      // `offsetLeft`/`offsetWidth` are pure CSS layout-box values — unlike `getBoundingClientRect`,
-      // they ignore any `transform` in flight. A sibling still animating back from the *previous*
-      // swap's FLIP has a live, moving `getBoundingClientRect`; reading that instead flips this
-      // frame's swap decision back and forth as the animation plays, which is what caused the
-      // dragged tab's neighbors to flicker/thrash instead of settling.
+      // Use transform-independent offsets so in-flight sibling animations cannot oscillate the swap
+      // decision.
       const midpoint =
         options.axis === "x"
           ? el.offsetLeft + el.offsetWidth / 2
@@ -281,7 +249,7 @@ export function createPointerReorder<T extends string | number>(
     drag.cleanup();
     settle();
     drag = null;
-    // Commit only when the live order actually diverged from the initial one — a drag that
+    // Commit only when the live order actually diverged from the initial one - a drag that
     // never crossed a midpoint has nothing to persist.
     if (
       wasActive &&
@@ -296,7 +264,7 @@ export function createPointerReorder<T extends string | number>(
 
   function abort() {
     if (!drag) return;
-    // Snap back visually by clearing transforms; the order stays wherever swaps left it —
+    // Snap back visually by clearing transforms; the order stays wherever swaps left it -
     // matching native DnD semantics where a cancel mid-drop keeps the last arrangement only if
     // committed. We choose the simpler contract: cancel commits nothing beyond live swaps.
     drag.cleanup();
@@ -322,7 +290,7 @@ export function createPointerReorder<T extends string | number>(
     },
     /// True while a drag is in flight (exposed for tests and aria states).
     isDragging: () => drag !== null,
-    /// Tear down an in-flight drag without committing — call from `onCleanup` so a surface that
+    /// Tear down an in-flight drag without committing - call from `onCleanup` so a surface that
     /// unmounts mid-drag (lane switch, popover close) never leaves window listeners or a
     /// captured pointer behind, and never commits against gone state.
     abort,

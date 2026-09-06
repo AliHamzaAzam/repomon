@@ -4,20 +4,9 @@ import { EditorView } from "@codemirror/view";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/// Regression coverage for item 4: the language-resolution effect in CodeEditor.tsx must depend
-/// only on `path`/`languageOverride` (never re-running on every keystroke) and must drop an async
-/// `resolveLanguageSupport` result that resolves after a newer request has already started - e.g.
-/// the user switched files again before the first file's dynamic language package finished
-/// loading. This mocks `@codemirror/language-data` with fake, externally-controlled language
-/// descriptions so the test can resolve their loads in a deliberately out-of-order sequence and
-/// assert the stale one never wins - hence its own file, isolated from CodeEditor.test.tsx's real
-/// (unmocked) `@codemirror/language-data` usage.
-///
-/// Three distinct fake languages (not two) are used across the two tests below rather than
-/// re-using extensions between tests: both CodeMirror's own `LanguageDescription` (caches
-/// `support` once loaded) and CodeEditor.tsx's own module-level `languageCache` persist for the
-/// life of this test file, so re-using an already-resolved language name in a later test would
-/// resolve synchronously from cache instead of exercising the async path under test.
+/// Control async language loads independently to verify stale results cannot win. Use distinct
+/// languages across tests because both CodeMirror and the editor cache resolved support for the
+/// module lifetime.
 const langLoaders = vi.hoisted(() => {
   const resolvers: Record<string, () => void> = {};
   return { resolvers };
@@ -88,7 +77,6 @@ describe("CodeEditor language resolution race (item 4)", () => {
     const view = getView(container);
     await flush();
 
-    // Mounting kicked off the (still-pending) FakeAlpha load.
     expect(langLoaders.resolvers.FakeAlpha).toBeDefined();
 
     // Switch files before FakeAlpha resolves - kicks off the (pending) FakeBeta load. This is

@@ -168,11 +168,9 @@ export default function SettingsModal(props: SettingsModalProps) {
   const [remoteRestartRequired, setRemoteRestartRequired] = createSignal(false);
   const [remoteRestartBusy, setRemoteRestartBusy] = createSignal(false);
 
-  // Icon customization state
   const [pickerAgent, setPickerAgent] = createSignal<string | null>(null);
   const [iconFilter, setIconFilter] = createSignal("");
 
-  // Custom Agent registration state
   const [customAgentName, setCustomAgentName] = createSignal("");
   const [customAgentCommand, setCustomAgentCommand] = createSignal("");
   const [customAgentBusy, setCustomAgentBusy] = createSignal(false);
@@ -329,7 +327,6 @@ export default function SettingsModal(props: SettingsModalProps) {
     }
   }
 
-  // Daemon & Recovery state
   const [daemonInfo, setDaemonInfo] = createSignal<{ service_managed: boolean; status: string } | null>(null);
   const [daemonBusy, setDaemonBusy] = createSignal(false);
   const [restoreBusy, setRestoreBusy] = createSignal(false);
@@ -345,7 +342,6 @@ export default function SettingsModal(props: SettingsModalProps) {
     }
   });
 
-  // Count orphaned/external sessions across all lanes
   const orphanCount = () => {
     if (!props.fleet) return 0;
     let count = 0;
@@ -720,7 +716,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                 <section class="space-y-4 border-t border-line/70 pt-5">
                   <p class="section-label">Daemon & Recovery</p>
 
-                  {/* Stop / Start Daemon */}
                   <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
                     <div class="flex items-center justify-between gap-3">
                       <div class="min-w-0">
@@ -750,8 +745,8 @@ export default function SettingsModal(props: SettingsModalProps) {
                             setDaemonBusy(true);
                             try {
                               const { stopDaemon } = await import("../ipc/daemonControl");
-                              // TODO: determine current phase from connection store;
-                              // for now always offer stop since modal is only reachable when connected
+                              // The connected settings modal offers stop; it does not resolve the
+                              // daemon’s transitional state.
                               await stopDaemon();
                               setDaemonInfo((prev) => prev ? { ...prev, status: "stopped" } : prev);
                             } catch (e) {
@@ -786,7 +781,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </div>
                   </div>
 
-                  {/* Reset Daemon */}
                   <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
                     <div class="flex items-center justify-between gap-3">
                       <div class="min-w-0">
@@ -839,7 +833,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </div>
                   </div>
 
-                  {/* Restore Orphaned Agents */}
                   <div class="rounded-xl border border-line/80 bg-surface/50 p-4 space-y-3">
                     <div class="flex items-center justify-between gap-3">
                       <div class="min-w-0">
@@ -904,7 +897,7 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "agents"}>
               <div class="space-y-6">
-                {/* SECTION 1: CUSTOM AGENTS */}
+
                 <section class="space-y-4">
                   <div>
                     <p class="section-label">Custom Agent Registrations</p>
@@ -913,7 +906,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </p>
                   </div>
 
-                  {/* Add Agent Form */}
                   <form
                     class="rounded-xl border border-line bg-surface/50 p-4 space-y-3"
                     onSubmit={addCustomAgent}
@@ -961,7 +953,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                       </label>
                     </div>
 
-                    {/* Inline Validation Feedback */}
                     <Show when={customAgentError()}>
                       {(errMsg) => (
                         <div
@@ -995,7 +986,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </div>
                   </form>
 
-                  {/* Custom Agents List */}
                   <div class="space-y-2.5">
                     <Show
                       when={customAgentsList().length > 0}
@@ -1087,7 +1077,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </div>
                 </section>
 
-                {/* SECTION 2: BUILT-IN RUNTIMES & ICON OVERRIDES */}
                 <section class="space-y-4 border-t border-line/70 pt-5">
                   <div class="flex items-center justify-between">
                     <div>
@@ -1298,7 +1287,7 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "appearance"}>
               <div class="space-y-6">
-                {/* 1. Theme Presets */}
+
                 <section class="space-y-3">
                   <div>
                     <p class="section-label">Color Themes & Presets</p>
@@ -1322,7 +1311,7 @@ export default function SettingsModal(props: SettingsModalProps) {
                             onClick={() => selectTheme(preset.id)}
                             aria-pressed={isSelected()}
                           >
-                            {/* Miniature Color Swatch Preview */}
+
                             <div
                               class="mb-2.5 flex h-10 w-full items-center justify-between rounded-lg border px-3"
                               style={{
@@ -1366,7 +1355,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </div>
                 </section>
 
-                {/* 2. Accent Color Choice */}
                 <section class="space-y-3 border-t border-line/70 pt-5">
                   <div>
                     <p class="section-label">Brand & Accent Color</p>
@@ -1418,7 +1406,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </div>
                 </section>
 
-                {/* 3. Terminal Pane Customization & Background Tint */}
                 <section class="space-y-4 border-t border-line/70 pt-5">
                   <div>
                     <p class="section-label">Terminal Pane Appearance</p>
@@ -1427,8 +1414,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                     </p>
                   </div>
 
-                  {/* Live preview: renders exactly what a pane will look like (same tint formula
-                      the terminal renderer applies), so changes read instantly without opening a lane. */}
                   <div
                     class="rounded-xl border border-line p-3 font-mono text-xs leading-relaxed"
                     style={{
@@ -1529,7 +1514,6 @@ export default function SettingsModal(props: SettingsModalProps) {
                   </div>
                 </section>
 
-                {/* 4. Layout & Visual Preferences */}
                 <section class="space-y-3 border-t border-line/70 pt-5">
                   <p class="section-label">Sidebar & Layout</p>
                   <Select
@@ -1709,7 +1693,6 @@ export default function SettingsModal(props: SettingsModalProps) {
         )}
       </Show>
 
-      {/* Interactive Icon Picker Modal */}
       <Show when={pickerAgent()}>
         {(targetAgent) => {
           const currentKey = () =>

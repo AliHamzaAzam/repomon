@@ -79,7 +79,6 @@ describe("lineDiff", () => {
     expect(res.markers.size).toBe(1);
     expect(res.markers.get(2)?.type).toBe("added");
 
-    // Revert restores base
     expect(applyRevert(current, hunk)).toBe(base);
   });
 
@@ -200,7 +199,7 @@ describe("lineDiff", () => {
       "line 3",
       "modified 4", // modified
       "line 5",
-      // line 6 removed
+
       "line 7",
     ].join("\n");
 
@@ -211,7 +210,6 @@ describe("lineDiff", () => {
     expect(res.hunks[1].type).toBe("modified");
     expect(res.hunks[2].type).toBe("removed");
 
-    // Reverting all hunks in reverse order restores base
     let text = current;
     for (let i = res.hunks.length - 1; i >= 0; i--) {
       // Recompute diff against base to get adjusted hunk positions

@@ -158,8 +158,7 @@ export default function PanePicker(props: PanePickerProps) {
             <For each={groups()}>
               {(group) => (
                 <>
-                  {/* Only labelled when there is more than one group: with no controller running,
-                      an unlabelled flat list is exactly what the picker was before. */}
+
                   <Show when={groups().length > 1}>
                     <p class="section-label px-2.5 pb-1 pt-1.5">{group.label}</p>
                   </Show>

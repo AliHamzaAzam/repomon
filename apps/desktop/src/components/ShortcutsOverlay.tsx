@@ -10,10 +10,7 @@ export interface ShortcutsOverlayProps {
   actions: ActionsStore;
 }
 
-/// The mod+? / bare "?" cheat sheet: a Portal so it always sits above whatever panel is open,
-/// dismissed with Escape or a click outside. Mirrors ControlCenter's own palette conventions -
-/// a window keydown listener registered once at mount, gated by isOpen() inside the handler -
-/// rather than attaching and detaching a listener every time the overlay opens and closes.
+/// Renders the shortcut overlay in a portal with Escape and outside-click dismissal.
 export default function ShortcutsOverlay(props: ShortcutsOverlayProps) {
   const isOpen = () => props.actions.shortcutsGuideOpen();
   const [activeScope, setActiveScope] = createSignal<KeymapScope>("global");

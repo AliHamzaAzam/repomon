@@ -107,17 +107,14 @@ fn hello() {
     const { ast } = parseMarkdown(doc);
     expect(ast.length).toBe(6);
 
-    // Code block
     expect(ast[0].type).toBe("codeBlock");
     if (ast[0].type === "codeBlock") {
       expect(ast[0].language).toBe("rust");
       expect(ast[0].code).toContain("fn hello()");
     }
 
-    // Blockquote
     expect(ast[1].type).toBe("blockquote");
 
-    // Task list
     expect(ast[2].type).toBe("list");
     if (ast[2].type === "list") {
       expect(ast[2].ordered).toBe(false);
@@ -126,20 +123,17 @@ fn hello() {
       expect(ast[2].items[2].task).toBeUndefined();
     }
 
-    // Ordered list
     expect(ast[3].type).toBe("list");
     if (ast[3].type === "list") {
       expect(ast[3].ordered).toBe(true);
     }
 
-    // Table
     expect(ast[4].type).toBe("table");
     if (ast[4].type === "table") {
       expect(ast[4].alignments).toEqual(["left", "right"]);
       expect(ast[4].rows.length).toBe(1);
     }
 
-    // Thematic break
     expect(ast[5].type).toBe("thematicBreak");
   });
 });

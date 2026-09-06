@@ -106,9 +106,7 @@ export default function KeyboardHelp(props: KeyboardHelpProps) {
             <Show when={rows().length > 0}>
               <section class="space-y-1.5">
                 <p class="section-label text-signal">{section}</p>
-                {/* One bordered list per section with hairline dividers, instead of a bordered
-                    box per row: fifteen boxes in a column read as fifteen cards, and the eye
-                    has to re-find the chord column in each one. */}
+
                 <div class="divide-y divide-line/70 overflow-hidden rounded-lg border border-line">
                   <For each={rows()}>{(binding) => <ShortcutRow binding={binding} activeScope={props.activeScope} />}</For>
                 </div>

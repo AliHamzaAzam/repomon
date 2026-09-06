@@ -37,7 +37,6 @@ describe("Agent icon resolution and catalog", () => {
     expect(resolveAgentIconKey("opencode")).toBe("brand-opencode");
     expect(resolveAgentIconKey("cursor")).toBe("brand-cursor");
 
-    // Aider keeps its abstract default
     expect(resolveAgentIconKey("aider")).toBe("binary-orbit");
   });
 
@@ -61,7 +60,7 @@ describe("Agent icon resolution and catalog", () => {
     expect(resolveAgentIconKey("data-analyzer")).toBe("radar");
     expect(resolveAgentIconKey("codex")).toBe("compass");
     expect(resolveAgentIconKey("claude-code")).toBe("sparkle");
-    // Non-overridden brand remains default
+
     expect(resolveAgentIconKey("antigravity")).toBe("brand-antigravity");
   });
 

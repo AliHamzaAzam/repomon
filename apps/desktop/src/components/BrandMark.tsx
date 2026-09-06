@@ -12,14 +12,7 @@ interface BrandMarkProps {
 /// The selected paths' stroke bounds, including the 11-unit half-stroke around the outer edges.
 const TIGHT_VIEW_BOX = "37 37 182 182";
 
-/// The selected Repomon mark from `docs/brand/repo-logo-final.svg`. Path coordinates, including
-/// the manually adjusted endpoints, stroke width, and central square are preserved exactly.
-///
-/// It is drawn from theme tokens rather than the source file's fixed palette, so it follows the
-/// selected theme and accent. The source's graphite paths map to `--brand-ink` (graphite in light,
-/// a lifted graphite in dark, as the app icon's own dark appearance does) and its orange command
-/// square maps to `--signal`, which is the brand orange by default and the chosen accent otherwise.
-/// The transparent background sits directly on the title bar.
+/// Renders the selected mark with its original geometry and theme-token colors.
 export default function BrandMark(props: BrandMarkProps) {
   const size = () => props.size ?? 26;
   return (

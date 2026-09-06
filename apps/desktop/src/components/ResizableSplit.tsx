@@ -2,18 +2,8 @@ import { createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 
 import { notifyLayoutChanged } from "../stores/uiSettings";
 
-/**
- * Shape decision (F1): `.mission-grid` (index.css) lays out the fleet nav, terminal bay, and
- * Repomind panel as three sibling grid columns on ONE element, not as nested boxes. A
- * children-wrapping two-pane component can't slot into that without restructuring the grid
- * owner. So this primitive ships in "controlled" mode: it renders nothing but the draggable
- * divider itself, tracks width as local state, and reports every change two ways — a plain
- * `onWidthChange` callback (for a parent to store in its own signal / feed into a class like
- * `is-repomind-open`) and a CSS custom property written onto `document.documentElement` (default
- * `--split-width`, overridable via `cssVar`/`target`) so `.mission-grid`'s `grid-template-columns`
- * can reference `var(--split-width, 20rem)` directly with zero prop plumbing. F2 wires this into
- * App.tsx; this task ships the primitive + tests only.
- */
+/** Identifies the panel side controlled by a divider that reports width without wrapping the parent
+ * grid’s columns. */
 
 export type ResizableSplitPanelSide = "before" | "after";
 
@@ -26,24 +16,16 @@ export interface ResizableSplitProps {
   minWidth: number;
   /** Inclusive clamp, px. */
   maxWidth: number;
-  /**
-   * Which side of the handle the resizable panel sits on. "after" (default) means the panel is
-   * to the right of the handle — dragging the handle left grows it. That's the known F2 use case
-   * (the Repomind right panel). Use "before" for a left-anchored panel like the fleet sidebar,
-   * where dragging the handle right grows it.
-   */
+  /** Selects which side grows when dragging, defaulting to the panel after the handle. */
   panelSide?: ResizableSplitPanelSide;
   /** Keyboard step size in px. Defaults to 16. */
   step?: number;
   /** CSS custom property name written on every width change. Defaults to "--split-width". */
   cssVar?: string;
-  /**
-   * Element the CSS custom property is written to, in addition to the handle's own inline style.
-   * Defaults to `document.documentElement` so any ancestor's CSS (e.g. `.mission-grid`) can read
-   * it via `var(...)` without needing a ref passed down. Pass a function for lazy resolution.
-   */
+  /** Selects the CSS-variable target, defaulting to the document root so ancestor layout rules can
+   * read the width. */
   target?: HTMLElement | (() => HTMLElement | null);
-  /** Required — a screen-reader label naming what this handle resizes (e.g. "Resize Repomind panel"). */
+  /** Required - a screen-reader label naming what this handle resizes (e.g. "Resize Repomind panel"). */
   label: string;
   /** Called synchronously on every resolved width change: initial restore, drag, keys, reset. */
   onWidthChange?: (widthPx: number) => void;
@@ -68,7 +50,7 @@ function readStoredWidth(storageKey: string, min: number, max: number, fallback:
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return clamp(fallback, min, max);
   // Stale persisted values (from a previous min/max range, or corrupted storage) must not break
-  // layout — always clamp against the current bounds.
+  // layout - always clamp against the current bounds.
   return clamp(parsed, min, max);
 }
 
@@ -105,10 +87,8 @@ export function ResizableSplit(props: ResizableSplitProps): JSX.Element {
     }, PERSIST_DEBOUNCE_MS);
   }
 
-  // Every resolved width — including the initial restore, since this effect runs once at setup —
-  // pushes the CSS custom property live and pings the terminal refit bus. notifyLayoutChanged is
-  // never debounced: TerminalPane's own resize handler already coalesces via a 60ms internal
-  // timer, so firing it on every drag frame is cheap and keeps terminals refitting live.
+  // Notify every width change, including restoration; terminal resizing already coalesces these
+  // events.
   createEffect(() => {
     const w = width();
     const varName = cssVar();
