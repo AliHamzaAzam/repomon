@@ -1,4 +1,4 @@
-import { cleanup, render } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 
 import WindowChromeHeader, { windowChromeInsetClass } from "./WindowChrome";
@@ -57,5 +57,69 @@ describe("window chrome header", () => {
   it("appends caller classes after the shared chrome", () => {
     const { container } = render(() => <WindowChromeHeader class="z-50">title</WindowChromeHeader>);
     expect(container.querySelector("header")!.className).toContain("z-50");
+  });
+});
+
+/// On Windows the builds turn native decorations off (one bar, not a native title bar stacked on
+/// the app's own), so the header has to draw the caption controls itself. They exist only there:
+/// macOS has its traffic lights and Linux keeps its native decorations.
+describe("window caption controls", () => {
+  function fakeControls(maximized = false) {
+    const calls: string[] = [];
+    let onResize: (() => void) | undefined;
+    const api = {
+      minimize: async () => { calls.push("minimize"); },
+      toggleMaximize: async () => { calls.push("toggleMaximize"); maximized = !maximized; onResize?.(); },
+      close: async () => { calls.push("close"); },
+      isMaximized: async () => maximized,
+      onResized: async (handler: () => void) => { onResize = handler; return () => { onResize = undefined; }; },
+    };
+    return { api, calls };
+  }
+
+  it("draws minimize, maximize and close only on Windows", () => {
+    const { api } = fakeControls();
+    const windows = render(() => <WindowChromeHeader platform="windows" windowControls={api}>title</WindowChromeHeader>);
+    expect(windows.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
+    expect(windows.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+    expect(windows.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    cleanup();
+
+    for (const platform of ["mac", "linux"]) {
+      const other = render(() => <WindowChromeHeader platform={platform} windowControls={api}>title</WindowChromeHeader>);
+      expect(other.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("keeps the drag region on the header and off every button", () => {
+    const { api } = fakeControls();
+    const { container } = render(() => (
+      <WindowChromeHeader platform="windows" windowControls={api}>
+        <button type="button">Skip setup</button>
+      </WindowChromeHeader>
+    ));
+    expect(container.querySelector("header")!.hasAttribute("data-tauri-drag-region")).toBe(true);
+    for (const button of container.querySelectorAll("button")) {
+      expect(button.hasAttribute("data-tauri-drag-region")).toBe(false);
+    }
+  });
+
+  it("wires each control to the window", async () => {
+    const { api, calls } = fakeControls();
+    const { getByRole } = render(() => <WindowChromeHeader platform="windows" windowControls={api}>title</WindowChromeHeader>);
+    fireEvent.click(getByRole("button", { name: "Minimize" }));
+    fireEvent.click(getByRole("button", { name: "Maximize" }));
+    fireEvent.click(getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(calls).toEqual(["minimize", "toggleMaximize", "close"]));
+  });
+
+  it("offers Restore once the window is maximized, and Maximize again after", async () => {
+    const { api } = fakeControls(true);
+    const { getByRole, findByRole } = render(() => <WindowChromeHeader platform="windows" windowControls={api}>title</WindowChromeHeader>);
+    const restore = await findByRole("button", { name: "Restore" });
+    fireEvent.click(restore);
+    await findByRole("button", { name: "Maximize" });
+    expect(getByRole("button", { name: "Maximize" })).toBeInTheDocument();
   });
 });

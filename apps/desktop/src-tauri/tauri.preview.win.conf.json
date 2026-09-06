@@ -1,4 +1,17 @@
 {
+  "app": {
+    "windows": [
+      {
+        "title": "Repomon",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1040,
+        "minHeight": 680,
+        "decorations": false,
+        "dragDropEnabled": false
+      }
+    ]
+  },
   "bundle": {
     "createUpdaterArtifacts": true,
     "externalBin": [
