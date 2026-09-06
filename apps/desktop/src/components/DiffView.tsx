@@ -351,11 +351,11 @@ function DiffFileCard(props: {
             <IconChevronDown size={10} class="shrink-0 text-muted/50" />
           </Show>
           <DiffTypeGlyph type={props.file.changeType} />
-          <span class="min-w-0 flex-1 truncate font-mono text-xs">
-            <span class="text-muted/70">{parts().dir}</span>
-            <span class="text-foreground">{parts().base}</span>
+          <span class="flex min-w-0 flex-1 font-mono text-xs" title={props.file.renamedFrom ? `${props.file.path} (from ${props.file.renamedFrom})` : props.file.path}>
+            <span class="min-w-0 truncate text-muted/70">{parts().dir}</span>
+            <span class="max-w-full shrink-0 truncate text-foreground">{parts().base}</span>
             <Show when={props.file.renamedFrom} keyed>
-              {(from) => <span class="text-muted/50"> ← {from}</span>}
+              {(from) => <span class="min-w-0 truncate text-muted/50"> ← {from}</span>}
             </Show>
           </span>
           <Show

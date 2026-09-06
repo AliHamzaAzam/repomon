@@ -151,11 +151,11 @@ function StatFileRowView(props: {
           props.onContextMenu?.(e, props.file.path);
         }}
       >
-        <span class="min-w-0 flex-1 truncate font-mono text-xs">
-          <span class="text-muted/70">{parts().dir}</span>
-          <span class="text-foreground">{parts().base}</span>
+        <span class="flex min-w-0 flex-1 font-mono text-xs" title={props.file.renamedFrom ? `${props.file.path} (from ${props.file.renamedFrom})` : props.file.path}>
+          <span class="min-w-0 truncate text-muted/70">{parts().dir}</span>
+          <span class="max-w-full shrink-0 truncate text-foreground">{parts().base}</span>
           <Show when={props.file.renamedFrom} keyed>
-            {(from) => <span class="text-muted/50"> ← {from}</span>}
+            {(from) => <span class="min-w-0 truncate text-muted/50"> ← {from}</span>}
           </Show>
         </span>
         <Show
@@ -445,7 +445,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                 <span class="h-3 w-px shrink-0 bg-line/60" aria-hidden="true" />
                 <span class="flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted">
                   <IconGitBranch size={10} class="shrink-0 text-muted/60" />
-                  <span class="min-w-0 truncate">{l.worktree.branch ?? "detached"}</span>
+                  <span class="min-w-0 truncate" title={l.worktree.branch ?? "detached"}>{l.worktree.branch ?? "detached"}</span>
                 </span>
                 <Show when={l.state.ahead || l.state.behind}>
                   <span
@@ -567,7 +567,7 @@ export default function GitExplorerPanel(props: GitExplorerPanelProps) {
                         patch={detail.patch}
                         truncated={detail.patch_truncated}
                         header={
-                          <div class="flex shrink-0 flex-col gap-1.5 border-b border-line px-3 py-2.5">
+                          <div class="flex max-h-[40%] shrink-0 flex-col gap-1.5 overflow-y-auto border-b border-line px-3 py-2.5 [overflow-wrap:anywhere]">
                             <div class="flex items-center justify-between gap-2">
                               <span class="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted">
                                 <IconGitCommit size={11} class="shrink-0 text-muted/50" />

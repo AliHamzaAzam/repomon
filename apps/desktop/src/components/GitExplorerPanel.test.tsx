@@ -265,8 +265,8 @@ describe("GitExplorerPanel", () => {
   // which structurally applies to every RightPanelHost tab including this one): the trailing
   // metadata column (relative time / +/- counts) must stay visible instead of being pushed past
   // the rail's right edge. That requires the row's one *growing* text element to carry
-  // min-w-0 + flex-1 + truncate, and every fixed-width sibling to carry shrink-0, so the summary
-  // truncates locally instead of the whole row overflowing.
+  // min-w-0 + flex-1, with truncation on the growing text and shrink-0 on fixed siblings.
+  // File rows shrink their directory first so the basename remains readable.
   it("truncates the growing summary text (not the trailing metadata columns) in every row type", async () => {
     responses.diff = {
       base: "main",
@@ -283,7 +283,7 @@ describe("GitExplorerPanel", () => {
         author_name: "Ada Lovelace",
       }),
     ];
-    const { container } = render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
+    render(() => <GitExplorerPanel fleet={fleetWith(lane())} />);
 
     // Branch row.
     const branchSummary = await screen.findByText(/A very very very long commit summary/);
@@ -300,9 +300,10 @@ describe("GitExplorerPanel", () => {
 
     // Working-tree file row (StatFileRowView) - open it via the Working tree section, which is
     // expanded by default.
-    const fileSummary = container.querySelector(".min-w-0.flex-1.truncate.font-mono");
-    expect(fileSummary).not.toBeNull();
-    expect(fileSummary?.textContent).toContain("indeed.ts");
+    const fileSummary = screen.getByTitle("src/a/very/deeply/nested/path/that/is/quite/long/indeed.ts");
+    expect(fileSummary).toHaveClass("min-w-0", "flex-1");
+    expect(within(fileSummary).getByText("indeed.ts")).toHaveClass("shrink-0", "truncate");
+    expect(within(fileSummary).getByText("src/a/very/deeply/nested/path/that/is/quite/long/")).toHaveClass("min-w-0", "truncate");
   });
 
   it("shows an empty state for History when the lane has no recorded commits", async () => {
