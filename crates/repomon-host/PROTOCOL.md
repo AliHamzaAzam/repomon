@@ -1,3 +1,25 @@
+# Read the frozen Windows host protocol
+
+Implement the wire format below exactly. This page is the frozen control contract between `repomond`, the Windows host and attach clients.
+
+**You are here:** host protocol reference. The original specification starts after the navigation table and remains verbatim.
+
+## Find your next task
+
+| Task | Go to |
+|---|---|
+| 1. Roles and lifecycle | [Open section](#1-roles-and-lifecycle) |
+| 2. Pipe naming | [Open section](#2-pipe-naming) |
+| 3. Security: per-user DACL (REQUIRED) | [Open section](#3-security-per-user-dacl-required) |
+| 4. Framing | [Open section](#4-framing) |
+| 5. Conversation model | [Open section](#5-conversation-model) |
+| 6. Owner-token handshake | [Open section](#6-owner-token-handshake) |
+| 7. Requests | [Open section](#7-requests) |
+| 8. Registry files | [Open section](#8-registry-files) |
+| 9. Mapping to `SessionBackend` (informative) | [Open section](#9-mapping-to-sessionbackend-informative) |
+
+<!-- Frozen specification begins. Original text is unchanged. -->
+
 # repomon-agent-host control protocol (v1) - FROZEN
 
 This document is the inter-track contract for repomon's native Windows session model.
