@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BINDINGS,
+  chordFor,
   detectActiveScope,
   findConflicts,
   formatChord,
@@ -352,5 +353,13 @@ describe("isMac / isWindows", () => {
     for (const platform of ["mac", "windows", "other"]) {
       expect(isMac(platform) && isWindows(platform)).toBe(false);
     }
+  });
+});
+
+describe("binding display lookup", () => {
+  it("uses the first registered alias and formats it for the platform", () => {
+    expect(chordFor("panel.control", "mac")).toBe("⌘4");
+    expect(chordFor("panel.control", "windows")).toBe("Ctrl+4");
+    expect(chordFor("unknown", "windows")).toBeUndefined();
   });
 });

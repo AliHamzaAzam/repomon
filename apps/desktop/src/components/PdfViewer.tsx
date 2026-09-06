@@ -1,3 +1,4 @@
+import { formatBytes } from "../formatBytes";
 import {
   For,
   Show,
@@ -99,12 +100,6 @@ const VIRTUALIZE_MARGIN = "100% 0px 100% 0px";
 // calculations so a fit-width/fit-page page doesn't butt up against the pane edges.
 const PAGE_GUTTER = 32;
 
-function formatBytes(bytes?: number): string {
-  if (bytes === undefined || bytes === null) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 function basename(path: string): string {
   return path.split("/").pop() || path;

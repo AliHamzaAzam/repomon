@@ -1,3 +1,4 @@
+import { formatBytes } from "../formatBytes";
 import { Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -45,12 +46,6 @@ const TOO_LARGE_BYTES = 50 * 1024 * 1024;
 const STAGE_GUTTER = 32;
 const RESIZE_DEBOUNCE_MS = 100;
 
-function formatBytes(bytes?: number): string {
-  if (bytes === undefined || bytes === null) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 function basename(path: string): string {
   return path.split("/").pop() || path;

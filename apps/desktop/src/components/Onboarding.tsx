@@ -2,7 +2,7 @@ import { For, Match, Show, Switch as SwitchBlock, createSignal, onCleanup, onMou
 
 import type { AgentDoctorInfo, SystemDoctorResult } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
-import { BINDINGS, formatChord, isWindows } from "../keymap";
+import { chordFor, isWindows } from "../keymap";
 import type { ActionsStore } from "../stores/actions";
 import {
   FIRST_STEP,
@@ -662,13 +662,6 @@ function RepomindStep(props: {
   );
 }
 
-/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display. Mirrors
-/// ControlCenter.tsx's and App.tsx's helper of the same name and purpose, so the Done step's
-/// "keyboard shortcuts" hint can never drift out of sync with the real binding.
-function chordFor(id: string): string | undefined {
-  const binding = BINDINGS.find((entry) => entry.id === id);
-  return binding ? formatChord(binding.chord) : undefined;
-}
 
 function DoneStep(props: {
   repoCount: number;

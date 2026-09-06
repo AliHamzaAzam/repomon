@@ -3,7 +3,7 @@ import { Portal } from "solid-js/web";
 
 import type { ActionsStore } from "../stores/actions";
 import { laneIndicator, type FleetStore } from "../stores/fleet";
-import { BINDINGS, formatChord, numberedPanelBindings } from "../keymap";
+import { chordFor, formatChord, numberedPanelBindings } from "../keymap";
 import type { MessageStore } from "../stores/messages";
 import type { NotificationStore } from "../stores/notifications";
 import {
@@ -60,14 +60,6 @@ interface PaletteItem {
   run: () => void | Promise<void>;
 }
 
-/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display, so a palette
-/// row's shortcut hint can never drift out of sync with what the chord actually does (this is
-/// exactly the bug that let this file show "⌘/" for Keyboard Shortcuts when the real chord had
-/// long since become mod+?). Returns undefined for an id with no chord, or none registered.
-function chordFor(id: string): string | undefined {
-  const binding = BINDINGS.find((entry) => entry.id === id);
-  return binding ? formatChord(binding.chord) : undefined;
-}
 
 export default function ControlCenter(props: ControlCenterProps) {
   const [query, setQuery] = createSignal("");

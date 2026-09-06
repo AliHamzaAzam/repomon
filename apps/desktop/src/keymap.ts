@@ -367,6 +367,12 @@ export function keyCapParts(chord: string, platform?: string): string[] {
   return parts;
 }
 
+/// Display the first registered chord for a binding id.
+export function chordFor(id: string, platform?: string): string | undefined {
+  const binding = BINDINGS.find((entry) => entry.id === id);
+  return binding ? formatChord(binding.chord, platform) : undefined;
+}
+
 /// Render a chord for display: "mod+shift+m" becomes "⌘⇧M" on macOS, "Ctrl+Shift+M" elsewhere.
 export function formatChord(chord: string, platform?: string): string {
   const parts = keyCapParts(chord, platform);

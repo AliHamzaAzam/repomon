@@ -29,7 +29,7 @@ import {
   type ConnectionSource,
 } from "./ipc/connection";
 import { daemonCall } from "./ipc/rpc";
-import { BINDINGS, formatChord, isMac, matchChord, matchSidebarKey } from "./keymap";
+import { chordFor, formatChord, isMac, matchChord, matchSidebarKey } from "./keymap";
 import BrandLockup from "./components/BrandLockup";
 import { setAgentIconOverrides } from "./components/icons";
 import { applyAccent, applyTheme, nextTheme, readTheme, type Theme } from "./theme";
@@ -99,14 +99,6 @@ function persistRepomindOpen(open: boolean) {
   } catch {}
 }
 
-/// Look up a chord by binding id in keymap.ts's BINDINGS and format it for display, so a header
-/// toolbar button's title can never drift out of sync with what the chord actually does. Mirrors
-/// ControlCenter.tsx's helper of the same name and purpose. Returns undefined for an id with no
-/// chord, or none registered.
-function chordFor(id: string): string | undefined {
-  const binding = BINDINGS.find((entry) => entry.id === id);
-  return binding ? formatChord(binding.chord) : undefined;
-}
 
 function App(props: AppProps) {
   const [theme, setTheme] = createSignal(readTheme());
