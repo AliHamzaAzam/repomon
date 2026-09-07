@@ -102,7 +102,7 @@ The `repomon` TUI is the original interface and stays a first-class client: the 
 same daemon, usable over SSH or alongside the app.
 
 <p align="center">
-  <img alt="Repomon terminal UI" src="docs/preview.png" width="860">
+  <img alt="Repomon terminal UI" src="docs/demo.gif" width="860">
 </p>
 
 ## Documentation

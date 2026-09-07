@@ -17,22 +17,22 @@ backend on Windows (see [Session backends](#session-backends-tmux-on-unix-host-p
 runs over a Unix socket on macOS/Linux and a named pipe on Windows; the JSON-RPC wire protocol is identical on both.
 
 ```
-      ┌───────────────────────── repomon-core ────────────────────────┐
-      │ model · store(SQLite) · git(gix + worktree shellout) · watch  │
-      │ registry · lane · agent(runtime + backend monitors)           │
-      │ analytics · session · indexer · service(launchd/systemd) · protocol │
-      └──────────────▲──────────────────────────────▲─────────────────┘
-                     │                              │
-                     │ (lib)                        │ (lib)
-        ┌─────────────────────────┐    ┌─────────────────────────┐
-        │ repomon-daemon          │    │ repomon-tui             │
-        │ repomond:               │    │ repomon:                │
-        │   UnixListener + RPC    │ ◄─ │   DaemonClient (socket) │
-        │   pubsub broadcast      │    │   app loop + views      │
-        │   watchers / streamer   │    │   keybinds (arrows)     │
-        │   indexer               │    │   cd-on-exit            │
-        └─────────────────────────┘    └─────────────────────────┘
-                                 socket · framed JSON-RPC
+┌──────────────────────────────── repomon-core (lib) ────────────────────────────────┐
+│ model · store (SQLite) · git (gix + worktree shellout) · watch · registry · lane    │
+│ agent (runtime + backend monitors) · usage ledger · pricing · service · protocol    │
+└───────────────────────────────────────▲────────────────────────────────────────────┘
+                                        │
+┌───────────────────────────────────────┴────────────────────────────────────────────┐
+│ repomon-daemon: repomond                                                           │
+│ socket / named-pipe listener · framed JSON-RPC · pubsub · watchers · ingest        │
+│ session backend: tmux (macOS, Linux) or repomon-host ConPTY processes (Windows)    │
+└──────────▲─────────────────────────▲──────────────────────────▲────────────────────┘
+           │                         │                          │
+┌──────────┴──────────┐   ┌──────────┴──────────┐   ┌───────────┴─────────────┐
+│ apps/desktop        │   │ repomon-tui         │   │ repomon-mcp             │
+│ Tauri app, bundles  │   │ repomon: TUI + CLI  │   │ repomond mcp: the fleet │
+│ the daemon (+ tmux) │   │ same fleet, over SSH│   │ as MCP tools for agents │
+└─────────────────────┘   └─────────────────────┘   └─────────────────────────┘
 ```
 
 ## Crates
