@@ -16,34 +16,33 @@ fleet at once.
 | Usage and support | [Usage](#usage), [known gaps](#known-gaps) |
 
 The [GUI demo recorder](../scripts/record-gui-demo.sh) creates an isolated synthetic fleet for a 90-second tour of
-multitasking, Git, editing, Usage, Repomail, Supervision and Repomind. `--dry-run` verifies the sandbox; `--dry-run
---tour` rehearses without recording. Capture requires the operator’s macOS terminal with Screen Recording and
-Accessibility permissions. `--still` captures the same opening hero at 1440x900. See the [recorder
+multitasking, Git, editing, Usage, Repomail, Supervision and Repomind, or a 60-second problem-first
+workflow with `--tour workflow`. `--dry-run` verifies the sandbox; `--dry-run
+--tour` rehearses without recording. Capture requires Screen Recording permission for the invoking macOS terminal. The optional AX
+driver also needs Accessibility and System Events Automation permission. `--still` captures the same opening hero at 1440x900. See the [recorder
 guide](../scripts/gui-demo/README.md) for commands and isolation details.
 
 ## Install
 
-1. Download the release file for your operating system from the links below. 2. Install it and open Repomon. 3. Use
-onboarding to add a repository and choose an installed agent CLI.
+Download the desktop app from the moving [desktop-preview release](https://github.com/AliHamzaAzam/repomon/releases/tag/desktop-preview).
 
-Published builds are on the [latest release](https://github.com/AliHamzaAzam/repomon/releases/latest); macOS, Windows
-and Linux previews use the moving [desktop-preview
-release](https://github.com/AliHamzaAzam/repomon/releases/tag/desktop-preview).
-
-| Platform | File |
+| Platform | Download and install |
 |---|---|
-| macOS (Apple silicon and Intel) | `Repomon_<version>_universal.dmg` |
-| Windows | `Repomon_<version>_x64-setup.exe` |
-| Linux | `Repomon_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
+| macOS (Apple silicon and Intel) | `Repomon_<version>_universal.dmg`: open it and drag Repomon to Applications. |
+| Windows | `Repomon_<version>_x64-setup.exe`: run the installer. No WSL or separate Visual C++ runtime is required. |
+| Linux | An AppImage, deb or rpm: make the AppImage executable, or install the package with your distribution's package manager. |
 
-The app updates itself: it checks the same release on launch and from **Settings > General > Check for updates**, so you
-only download by hand once.
+The app bundles the daemon (`repomond`), the CLI/TUI (`repomon`), portable tmux on macOS and Linux, and the ConPTY agent host on Windows. No existing Repomon installation or separate tmux install is required for the desktop app.
 
-The daemon ships inside the bundle, so the desktop app needs no separate `repomond`. On macOS and Linux it also ships
-its own portable `tmux` and falls back to it automatically when none is installed, so nothing extra needs installing
-there either; Windows never needed tmux, since it uses the built-in ConPTY host instead. If you launch the app from the
-Dock or Finder rather than a terminal, it resolves your login shell's `PATH` at startup, so tools installed in
-`~/.local/bin` or `/opt/homebrew/bin` are found.
+Install Git and at least one agent CLI, such as Claude Code or Codex, and sign in to that agent. The setup wizard checks these prerequisites. To use the bundled CLI from a terminal, choose **Settings > System > Command-line tools > Install**.
+
+The `desktop-preview` tag is the moving desktop release used by preview-channel installs for updates. "Preview" names that rolling testing channel, not a requirement to assemble the app yourself. The standalone CLI uses the [latest versioned release](https://github.com/AliHamzaAzam/repomon/releases/latest). The desktop app checks for updates on launch and in **Settings > General > Check for updates**.
+
+Updates are cryptographically signed. The current desktop downloads do not yet have an OS-level code signature, so macOS Gatekeeper or Windows SmartScreen may prompt on first install. Those are separate signing systems. On macOS, use the system's Open Anyway approval for the downloaded app; on Windows, use **More info > Run anyway** if SmartScreen prompts.
+
+Open Repomon after the OS approval. The bundled daemon starts automatically. The first-run wizard checks Git, the agent runtime and installed agent CLIs, then helps you add a repository, choose an agent and configure notifications and optional Repomind. Add a lane and start your agent; its terminal appears in the workspace.
+
+When opened from the Dock or Finder, Repomon resolves your login shell's PATH at startup so tools in `~/.local/bin` or `/opt/homebrew/bin` can be found.
 
 A **first-run setup wizard** takes a new install through seven steps: a welcome screen that says what Repomon does and
 what a lane and a worktree are, a system check (the same tmux/git/agent-CLI probes as Settings > System, below, with
