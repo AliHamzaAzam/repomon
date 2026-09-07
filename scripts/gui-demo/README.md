@@ -15,7 +15,7 @@ and `docs/preview.png`. Keep the outputs uncommitted until reviewed.
 
 The default `--tour-driver webview` loads the recorder's small Objective-C helper into the
 copied executable. It drives ordinary DOM buttons and keyboard handlers inside that app's
-WKWebView. It only accepts the phases `opening` and `tour` from a file in the disposable root.
+WKWebView. It accepts only the fixed showcase and workflow phases from a file in the disposable root.
 It exposes no network or inspector port, changes no product code, and needs no System Events
 Automation permission. Xcode command-line tools compile the recorder helper, not an app bundle.
 Screen Recording permission is required for GIF and PNG capture.
@@ -98,3 +98,45 @@ and their timing manifest are retained under `out/frames/` with `--keep-sandbox`
 PNG capture uses ScreenCaptureKit's screenshot API with child windows and the cursor excluded.
 
 See `docs/gui-demo-report.md` for the latest measured results and retained evidence paths.
+
+## Problem-first workflow
+
+Choose `--tour workflow` for a 60-second recording that demonstrates one task across repos.
+The default full showcase and `--still` opening frame are unchanged. A bare `--tour` still
+rehearses the full showcase. Workflow uses the WebKit driver, so the rehearsal needs no AX access.
+
+```sh
+scripts/record-gui-demo.sh --dry-run --tour workflow --keep-sandbox --bin-dir target/release
+scripts/record-gui-demo.sh --tour workflow --keep-sandbox --bin-dir target/release
+```
+
+| Output time | Action and caption |
+|---|---|
+| 0-10 s | Claude and Codex lanes in meadow-web and orbit-api. Which agent needs you? |
+| 10-25 s | The fake permission actor changes from running to NEEDS YOU. Cmd+G jumps to it; Enter answers its dialog through the terminal keyboard handler. |
+| 25-40 s | Cmd+K searches for the other repo's lane and opens it without changing a terminal tab. |
+| 40-58 s | Quit the copied app and relaunch it against the same daemon. The fleet reattaches to the same sessions and terminal content. |
+| 58-60 s | Run the real `repomon` TUI in a sandbox terminal against `demo.sock`, showing the same fleet. |
+
+Capture stops before quitting the old window and resumes on the new PID's window. The startup
+wait is cut between scenes; no replacement application frames are generated. The caption says
+that the app was relaunched. Preparing the TUI is also cut before its final two-second dwell.
+Recorded actions run at normal speed. A beat that overruns its allotted time fails with retained
+evidence instead of speeding up the interaction.
+
+Captions use the site's Space Grotesk font, included under the SIL Open Font License in
+`fonts/OFL.txt`. The font comes from Google's `google/fonts` repository,
+`ofl/spacegrotesk/SpaceGrotesk[wght].ttf`. A recorder-only Swift helper draws 32 px text into
+PNG overlays. The 96 px caption band sits below the 1200x750 app image, leaving terminal content
+uncovered. The result is `docs/workflow-demo.gif`, 1200x846, with a checked 60-second duration
+and an enforced size below 8,000,000 bytes. Lossless scene files stay in the sandbox.
+
+`out/workflow-check.json` records action timings, old/new desktop PIDs, matching session IDs,
+tmux window identities and unchanged backend pane PIDs. The daemon PID check repeats after relaunch. The
+keyboard answer must create the fake actor's receipt, then the daemon must report it running.
+`out/workflow-tui.txt` verifies both repository names in the real TUI's terminal output.
+A line printed once before the restart must still exist in the hero terminal scrollback.
+The private socket observer preserves both launches in `data/logs/desktop-rpc.jsonl`.
+
+The permission actor only records an Enter and resumes synthetic output. It never executes
+the displayed command. All other agents remain fake, and no provider request is made.

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Terminal-only actors. Input and CLI flags are ignored; no real tool is invoked."""
+"""Terminal-only actors. Only the workflow permission actor accepts Enter; no real tool is invoked."""
 import datetime as dt
 import json
 import os
 from pathlib import Path
 import sys
+import select
+import tty
 import time
 
 from rpc import call
@@ -16,8 +18,13 @@ if "--version" in sys.argv or "--help" in sys.argv:
     sys.exit(0)
 state = os.environ.get("REPOMON_DEMO_STATE", "running")
 started = time.monotonic()
+initial_state = state
+actor = os.environ['REPOMON_DEMO_ACTOR']
+if sys.stdin.isatty():
+    tty.setcbreak(sys.stdin.fileno())
 count = 0
 sent = False
+workflow_history = False
 sys.stdout.write("\033[?1049h")
 while True:
     # The token stays in memory and is sent only to the sandbox socket. Never log it.
@@ -28,6 +35,15 @@ while True:
         receipt = call(root, "message.send", message)
         (outbox.with_suffix(".sent")).write_text(receipt["id"])
         sent = True
+    workflow_file = root / "out/workflow-state.json"
+    if workflow_file.exists():
+        state = json.loads(workflow_file.read_text()).get(actor, initial_state)
+        if actor == "permission" and state == "permission" and select.select([sys.stdin], [], [], 0)[0]:
+            received = os.read(sys.stdin.fileno(), 128)
+            if received and received.strip(b"\r\n") == b"":
+                (root / "out/workflow-answer.txt").write_text("Accepted by terminal Enter; no command executed\n")
+        if actor == "permission" and (root / "out/workflow-answer.txt").exists():
+            state = "running"
     count += 1
     title = {"claude": "Claude Code", "codex": "OpenAI Codex", "agy": "Antigravity",
              "opencode": "OpenCode", "cursor-agent": "Cursor Agent", "aider": "aider"}[kind]
@@ -60,6 +76,19 @@ while True:
         task, file, tests = tasks.get(kind, ("Reviewing changes", "README.md", "12 checks passed"))
         screen += (f"{task}\n\n  Read {file}\n  + Add regression coverage\n"
                    f"  {tests}\n\nWorking... pass {count:04d} \nesc to cancel\n")
+    if workflow_file.exists() and state != "permission":
+        screen += "\nSession retained: workflow-demo-local\n"
+        if actor == "permission" and (root / "out/workflow-answer.txt").exists():
+            screen += "Permission answered. Continuing the demo task.\n"
+    if workflow_file.exists() and actor == "hero":
+        # Leave the full showcase's alternate screen once, then accumulate real tmux
+        # scrollback. The unique earlier line must survive the desktop restart.
+        if not workflow_history:
+            screen = "\033[?1049l\033[2J\033[H" + screen.replace("\033[2J\033[H", "")
+            screen += "Earlier result: navigation regression tests passed before app restart.\n"
+            workflow_history = True
+        else:
+            screen = f"Working... review pass {count:04d} (esc to interrupt)\n"
     sys.stdout.write(screen)
     sys.stdout.flush()
     time.sleep(0.7)

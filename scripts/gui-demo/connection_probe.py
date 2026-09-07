@@ -24,7 +24,7 @@ class DesktopProbe:
         self.records = []
         self.log_path = self.root / 'data/logs/desktop-rpc.jsonl'
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_file = self.log_path.open('w')
+        self.log_file = self.log_path.open('a')
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(self.endpoint))
         self.listener.listen()

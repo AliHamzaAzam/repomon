@@ -46,9 +46,15 @@ static void record(NSDictionary *event) {
             if (!webview) { [timer invalidate]; return; }
             NSString *phase = [NSString stringWithContentsOfFile:commandPath encoding:NSUTF8StringEncoding error:nil];
             if (!phase || [phase isEqualToString:lastCommand]) return;
-            if (![phase isEqualToString:@"opening"] && ![phase isEqualToString:@"tour"]) return;
+            NSSet *allowed = [NSSet setWithArray:@[@"opening", @"tour", @"workflow-start", @"workflow-answer", @"workflow-switch", @"workflow-resume", @"workflow-terminal", @"workflow-tui", @"workflow-quit"]];
+            if (![allowed containsObject:phase]) return;
             lastCommand = phase;
-            if ([phase isEqualToString:@"opening"]) {
+            if ([phase isEqualToString:@"workflow-quit"]) {
+                record(@{@"event": @"tour-complete", @"phase": phase});
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+                return;
+            }
+            if ([phase isEqualToString:@"opening"] || [phase isEqualToString:@"workflow-resume"]) {
                 NSWindow *window = webview.window;
                 NSRect visible = window.screen.visibleFrame;
                 [window setFrame:NSMakeRect(visible.origin.x, NSMaxY(visible) - 900, 1440, 900) display:YES];

@@ -19,6 +19,7 @@ def launch_command(root, helpers, executable, tour=False):
     if tour:
         with script.open('a') as output:
             output.write('\n' + (helpers / 'webview_tour.js').read_text())
+            output.write('\n' + (helpers / 'workflow_tour.js').read_text())
     # Set DYLD variables after sandbox-exec: macOS strips them at protected system executables.
     return ["/usr/bin/env", f"DYLD_INSERT_LIBRARIES={library}",
             f"REPOMON_WEBVIEW_SCRIPT={script}", f"REPOMON_WEBVIEW_LOG={root}/out/webview.jsonl",
@@ -28,9 +29,10 @@ def launch_command(root, helpers, executable, tour=False):
 
 def run_tour(root, phase):
     command = root / 'out/tour-command'
+    path = root / 'out/webview.jsonl'
+    seen = len(path.read_text().splitlines()) if path.exists() else 0
     command.write_text(phase)
     started = time.monotonic()
-    seen = 0
     with (root / 'out/tour.log').open('a') as log:
         while time.monotonic() - started < 300:
             path = root / 'out/webview.jsonl'

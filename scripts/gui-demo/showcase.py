@@ -19,6 +19,7 @@ from rpc import call
 from connection_probe import DesktopProbe
 import webview_probe
 import socket_audit
+import workflow
 
 HELPERS = Path(__file__).resolve().parent
 REPO = HELPERS.parent.parent
@@ -298,7 +299,8 @@ def run_tour(root, tour, phase, children):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="verify, launch, wait, clean up; never capture")
-    parser.add_argument("--tour", action="store_true", help="also rehearse the tour during --dry-run")
+    parser.add_argument("--tour", nargs="?", const="full", choices=("full", "workflow"),
+                        help="tour to capture or rehearse; bare --tour preserves the full rehearsal")
     parser.add_argument("--tour-driver", choices=("webview", "ax"), default="webview",
                         help="recorder-only WebKit controls (default), or System Events AX rehearsal")
     parser.add_argument("--still", action="store_true", help="capture the GIF opening hero frame")
@@ -313,6 +315,8 @@ def main():
         parser.error("window recording and the tour require macOS")
     if args.still and args.dry_run:
         parser.error("--still and --dry-run are mutually exclusive")
+    if args.tour == "workflow" and args.tour_driver != "webview":
+        parser.error("--tour workflow uses the recorder WebKit driver")
     for name in ("repomond", "repomon-desktop", "repomon"):
         if not (args.bin_dir / name).is_file():
             parser.error(f"Missing {name}; pass --bin-dir with existing matching binaries. No builds are run.")
@@ -412,6 +416,24 @@ else:
         tour = None if webview_tour else ["osascript", HELPERS / "tour.applescript", str(app.pid)]
         run_tour(root, tour, "opening", children)
         socket_audit.verify(root, app.pid, os.getpid())
+        if args.tour == "workflow" and not args.still:
+            def relaunch():
+                nonlocal app, desktop_probe
+                webview_probe.run_tour(root, "workflow-quit")
+                app.wait(timeout=15)
+                desktop_probe.close()
+                (root / "out/tour-command").unlink(missing_ok=True)
+                desktop_probe = DesktopProbe(root, daemon.pid)
+                app = sp.Popen([str(a) for a in app_guard + command], env=app_env, cwd=root,
+                               stdout=app_log, stderr=sp.STDOUT)
+                children.append(app)
+                desktop_probe.expect_app(app.pid)
+                verify_desktop(root, app, desktop_probe, baseline_pids)
+                return app
+            workflow.run(root, HELPERS, REPO, assignments, app, relaunch, args.dry_run, children)
+            socket_audit.verify(root, app.pid, os.getpid())
+            completed = True
+            return
         if args.dry_run:
             run_tour(root, tour, "tour", children)
             socket_audit.verify(root, app.pid, os.getpid())
