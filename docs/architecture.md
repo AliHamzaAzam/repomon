@@ -18,8 +18,8 @@ runs over a Unix socket on macOS/Linux and a named pipe on Windows; the JSON-RPC
 
 ```
 ┌──────────────────────────────── repomon-core (lib) ────────────────────────────────┐
-│ model · store (SQLite) · git (gix + worktree shellout) · watch · registry · lane    │
-│ agent (runtime + backend monitors) · usage ledger · pricing · service · protocol    │
+│ model · store (SQLite) · git (gix + worktree shellout) · watch · registry · lane   │
+│ agent (runtime + backend monitors) · usage ledger · pricing · service · protocol   │
 └───────────────────────────────────────▲────────────────────────────────────────────┘
                                         │
 ┌───────────────────────────────────────┴────────────────────────────────────────────┐
