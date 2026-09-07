@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use repomon_core::agent::claude;
 use repomon_core::pricing::PriceTable;
 use repomon_core::usage_ledger::{
-    FleetIndex, INGEST_VERSION, UsageEvent, UsageSessionMeta,
+    FleetIndex, INGEST_VERSION, UsageCursor, UsageEvent, UsageSessionMeta,
     scan::{
         ScannedEvent, SourceScan, scan_antigravity_transcript, scan_claude_transcript,
         scan_codex_rollout, scan_opencode_db,
@@ -254,6 +254,53 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
     out
 }
 
+/// Lexical identity at the ingest cursor boundary. Keep Unix paths byte-for-byte unchanged;
+/// Windows drive/UNC paths compare the same on every host without filesystem canonicalization.
+fn cursor_key(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let drive = |s: &str| {
+        let b = s.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
+    };
+    if !cfg!(windows) && !drive(&path) && !path.starts_with(r"\\") && !path.starts_with("//?/") {
+        return path.into_owned();
+    }
+    let slashes = path.replace('\\', "/");
+    let mut key = if let Some(unc) = slashes.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else if let Some(disk) = slashes.strip_prefix("//?/").filter(|disk| drive(disk)) {
+        disk.to_string()
+    } else {
+        slashes
+    };
+    if drive(&key) {
+        key.replace_range(..1, &key[..1].to_ascii_uppercase());
+    }
+    key
+}
+
+/// Match legacy cursor spellings without rewriting their database identity. Keeping the stored
+/// key also keeps event replacement, failure updates and cursor writes on the same source.
+fn cursor_index(cursors: Vec<UsageCursor>) -> HashMap<String, UsageCursor> {
+    let mut index: HashMap<String, UsageCursor> = HashMap::new();
+    for cursor in cursors {
+        let key = cursor_key(Path::new(&cursor.source_path));
+        // If old versions already created aliases, a current alias must not hide deferred work.
+        if index
+            .get(&key)
+            .is_none_or(|old| cursor.ingest_version < old.ingest_version)
+        {
+            index.insert(key, cursor);
+        }
+    }
+    index
+}
+
+struct PendingSource {
+    source: Source,
+    cursor: Option<UsageCursor>,
+}
+
 /// A file that disappeared permanently is different from a transient metadata/read error.
 async fn source_missing(path: &Path) -> repomon_core::Result<bool> {
     let path = path.to_path_buf();
@@ -283,8 +330,8 @@ async fn retire_cursor(
 async fn stale_batch(
     ctx: &Ctx,
     all: &[(SystemTime, Source)],
-) -> repomon_core::Result<(Vec<Source>, usize)> {
-    let by_path: HashMap<_, _> = all.iter().map(|(_, s)| (s.path.clone(), s)).collect();
+) -> repomon_core::Result<(Vec<PendingSource>, usize)> {
+    let by_path: HashMap<_, _> = all.iter().map(|(_, s)| (cursor_key(&s.path), s)).collect();
     let mut sources = Vec::new();
     let mut retired = 0;
     for cursor in ctx
@@ -292,14 +339,19 @@ async fn stale_batch(
         .stale_usage_cursors(INGEST_VERSION, REINGEST_BATCH)
         .await?
     {
-        let path = PathBuf::from(&cursor.source_path);
+        let key = cursor_key(Path::new(&cursor.source_path));
+        if let Some(source) = by_path.get(&key) {
+            // Read the discovered native path, but replace events under the legacy stored key.
+            sources.push(PendingSource {
+                source: (*source).clone(),
+                cursor: Some(cursor),
+            });
+            continue;
+        }
+        let path = PathBuf::from(key);
         if source_missing(&path).await? {
             retire_cursor(ctx, cursor).await?;
             retired += 1;
-            continue;
-        }
-        if let Some(source) = by_path.get(&path) {
-            sources.push((*source).clone());
             continue;
         }
         // Stored event metadata can recover a reader outside current discovery roots.
@@ -324,7 +376,10 @@ async fn stale_batch(
             })
         });
         if let Some(source) = source {
-            sources.push(source);
+            sources.push(PendingSource {
+                source,
+                cursor: Some(cursor),
+            });
         } else {
             // No supported reader can recount this source. Keep its events and prior error,
             // but do not leave the entire ledger permanently in a recount state.
@@ -518,12 +573,19 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
 
     // Recount directly from the cursor table before spending the ordinary walk's budget.
     let (stale_extra, retired) = stale_batch(ctx, &all).await?;
-    let mut seen: std::collections::HashSet<PathBuf> =
-        stale_extra.iter().map(|s| s.path.clone()).collect();
+    let cursors = cursor_index(ctx.store.usage_cursors().await?);
+    let mut seen: std::collections::HashSet<String> = stale_extra
+        .iter()
+        .map(|pending| cursor_key(&pending.source.path))
+        .collect();
     let mut sources = stale_extra;
     for source in walked {
-        if seen.insert(source.path.clone()) {
-            sources.push(source);
+        let key = cursor_key(&source.path);
+        if seen.insert(key.clone()) {
+            sources.push(PendingSource {
+                source,
+                cursor: cursors.get(&key).cloned(),
+            });
         }
     }
 
@@ -533,9 +595,11 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
     };
     let mut reingested = 0usize;
     let mut recount_attempts = retired;
-    for source in sources {
-        let path = source.path.to_string_lossy().to_string();
-        let cursor = ctx.store.usage_cursor(path.clone()).await?;
+    for PendingSource { source, cursor } in sources {
+        let path = cursor
+            .as_ref()
+            .map(|cursor| cursor.source_path.clone())
+            .unwrap_or_else(|| source.path.to_string_lossy().into_owned());
         let print = tokio::task::spawn_blocking({
             let p = source.path.clone();
             move || fingerprint(&p)
@@ -601,7 +665,10 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
         let events: Vec<UsageEvent> = scan
             .events
             .into_iter()
-            .map(|e| to_event(e, &index, &windows))
+            .map(|mut e| {
+                e.source_path = path.clone();
+                to_event(e, &index, &windows)
+            })
             .collect();
         let sessions: Vec<UsageSessionMeta> = scan
             .sessions
@@ -1092,6 +1159,10 @@ mod tests {
             !events.iter().any(|e| e.source_offset == 4096),
             "the superseded row must be gone, not merely added to"
         );
+        assert!(
+            events.iter().any(|event| event.source_path == path),
+            "rescanned events must use the retained cursor key"
+        );
         assert_eq!(
             ctx.store
                 .usage_cursor(path)
@@ -1100,6 +1171,99 @@ mod tests {
                 .expect("the cursor")
                 .ingest_version,
             repomon_core::usage_ledger::INGEST_VERSION
+        );
+        assert_eq!(
+            ingest_once(&ctx).await.unwrap().events,
+            0,
+            "the next walk must resume the same cursor, not create an alias"
+        );
+    }
+
+    #[test]
+    fn cursor_keys_match_windows_separators_and_verbatim_prefixes_on_every_host() {
+        for path in [
+            r"C:\Users\runner\claude\projects\session.jsonl",
+            r"C:\Users\runner/claude/projects\session.jsonl",
+            "C:/Users/runner/claude/projects/session.jsonl",
+            r"\\?\C:\Users\runner\claude\projects\session.jsonl",
+            r"\\?\c:\Users\runner/claude/projects\session.jsonl",
+            "//?/C:/Users/runner/claude/projects/session.jsonl",
+        ] {
+            let key = cursor_key(Path::new(path));
+            assert_eq!(
+                key, "C:/Users/runner/claude/projects/session.jsonl",
+                "{path}"
+            );
+            assert_eq!(cursor_key(Path::new(&key)), key);
+        }
+        for path in [
+            r"\\server\share\claude/projects\session.jsonl",
+            r"\\?\UNC\server\share\claude\projects\session.jsonl",
+            "//?/UNC/server/share/claude/projects/session.jsonl",
+            "//server/share/claude/projects/session.jsonl",
+        ] {
+            assert_eq!(
+                cursor_key(Path::new(path)),
+                "//server/share/claude/projects/session.jsonl",
+                "{path}"
+            );
+        }
+        assert_eq!(
+            cursor_key(Path::new("/tmp/claude/projects/session.jsonl")),
+            "/tmp/claude/projects/session.jsonl"
+        );
+        assert_eq!(
+            cursor_key(Path::new("/private/tmp/./session.jsonl")),
+            "/private/tmp/./session.jsonl"
+        );
+        #[cfg(unix)]
+        for path in [r"/tmp/a\b.jsonl", r"relative\name.jsonl"] {
+            assert_eq!(
+                cursor_key(Path::new(path)),
+                path,
+                "Unix backslashes are filename characters"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_matching_preserves_legacy_keys_and_does_not_hide_stale_aliases() {
+        let store = Store::open_in_memory().unwrap();
+        let legacy = r"\\?\C:\Users\runner/claude/projects\session.jsonl";
+        let discovered = Path::new(r"C:\Users\runner\claude\projects\session.jsonl");
+        store
+            .set_usage_cursor(legacy.into(), 4096, 123, None, 0)
+            .await
+            .unwrap();
+        let index = cursor_index(store.usage_cursors().await.unwrap());
+        let cursor = index
+            .get(&cursor_key(discovered))
+            .expect("legacy cursor matches native discovery");
+        assert_eq!(
+            cursor.source_path, legacy,
+            "writes must keep replacing the legacy event key"
+        );
+        assert_eq!(cursor.offset, 4096);
+        assert_eq!(cursor.ingest_version, 0);
+
+        store
+            .set_usage_cursor(cursor_key(discovered), 9000, 456, None, INGEST_VERSION)
+            .await
+            .unwrap();
+        let index = cursor_index(store.usage_cursors().await.unwrap());
+        assert_eq!(
+            index[&cursor_key(discovered)].source_path,
+            legacy,
+            "a current alias must not hide a stale source outside the recount batch"
+        );
+        assert_eq!(
+            store
+                .usage_cursor(legacy.into())
+                .await
+                .unwrap()
+                .unwrap()
+                .offset,
+            4096
         );
     }
 
