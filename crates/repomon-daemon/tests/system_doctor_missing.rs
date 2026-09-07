@@ -74,9 +74,24 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
     assert_eq!(res["tmux"]["source"], json!(null));
     assert_eq!(res["tmux"]["path"], json!(null));
 
-    assert_eq!(res["git"]["available"], json!(false));
-    assert_eq!(res["git"]["version"], json!(null));
-    assert_eq!(res["git"]["path"], json!(null));
+    // PATH is masked, but on Windows the doctor also looks in the standard Git for Windows
+    // directories, and the CI runner ships git there. Expect what that fallback would find.
+    let git_from_standard_dir = cfg!(windows)
+        && repomon_core::git::WINDOWS_STANDARD_GIT_DIRS
+            .iter()
+            .any(|dir| std::path::Path::new(dir).join("git.exe").is_file());
+    if git_from_standard_dir {
+        assert_eq!(res["git"]["available"], json!(true));
+        assert!(
+            res["git"]["path"].as_str().unwrap().ends_with("git.exe"),
+            "{}",
+            res["git"]
+        );
+    } else {
+        assert_eq!(res["git"]["available"], json!(false));
+        assert_eq!(res["git"]["version"], json!(null));
+        assert_eq!(res["git"]["path"], json!(null));
+    }
 
     // Platform-dependent shape: off Windows tmux is applicable (and here, missing) with no
     // agent_host; on Windows tmux is not_applicable and agent_host carries the ConPTY host probe.
