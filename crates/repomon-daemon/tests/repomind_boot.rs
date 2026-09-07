@@ -65,9 +65,10 @@ async fn repomind_boot_regenerates_the_document_and_status_reports_it() {
     assert!(booted.error.is_none(), "{:?}", booted.error);
     let result = booted.result.unwrap();
 
+    // The daemon reports the native path; compare as paths so Windows separators do not matter.
     assert_eq!(
-        result["path"],
-        json!(home.join(".repomind/boot.md").to_string_lossy())
+        std::path::PathBuf::from(result["path"].as_str().unwrap()),
+        home.join(".repomind").join("boot.md")
     );
     assert_eq!(result["trimmed"], json!([]));
     assert!(result["bytes"].as_u64().unwrap() > 0);

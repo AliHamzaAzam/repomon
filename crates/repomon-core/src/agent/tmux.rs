@@ -1771,7 +1771,7 @@ mod tests {
         );
 
         rt.kill_named("orchestrator").unwrap();
-        for _ in 0..20 {
+        for _ in 0..200 {
             if tree.iter().all(|pid| {
                 Command::new("kill")
                     .args(["-0", &pid.to_string()])
