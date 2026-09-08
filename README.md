@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img alt="Repomon desktop app" src="docs/gui-demo.gif" width="860">
+  <img alt="Repomon workflow: an agent needs you, you answer it, switch repos, relaunch and reattach" src="docs/workflow-demo.gif" width="860">
 </p>
 
 ## Install
@@ -119,6 +119,14 @@ The agents themselves talk to their providers as they always do; nothing about R
 ## How it compares
 
 ccmanager and the built-in `claude agents` view also span repositories. Repomon combines session durability across app and daemon restarts, mixed agent kinds, and one local fleet shared by desktop and terminal. If you work in a single repository, a single-repo tool may be simpler.
+
+## Full tour
+
+Every view in ninety seconds: fleet, multitasking, git, editor, usage, repomail, supervision, Repomind.
+
+<p align="center">
+  <img alt="Repomon desktop app, full tour" src="docs/gui-demo.gif" width="860">
+</p>
 
 ## Terminal UI
 

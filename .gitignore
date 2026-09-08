@@ -31,3 +31,5 @@ docs/design-audit-*.md
 /design/
 /STATUS.md
 /docs/windows-validation.md
+__pycache__/
+*.pyc
