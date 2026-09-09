@@ -23,7 +23,7 @@ The missing byte counts are multiples of 1,022 in these samples. Failures are no
 
 3. **Uncertain mail submission could be replayed.** Previously `mail::try_deliver` persisted delivery only after `inject::send_verified_line` confirmed the closing marker had left the composer. A cursor/verification miss left the message queued, and a subsequent sweep could type the full frame again. The marker was also shared by every message. There was no durable claim covering the side effect. This code path explains repeated injection after uncertain verification; the production database was not inspected to attribute each reported copy individually.
 
-4. **Inbox recovery is present in this checkout, but not confirmed in the deployed daemon.** `message.inbox` passes `unread_only` through to `Store::list_messages`; the default is false in both RPC and MCP. The query filters by `read_at` only when true and does not exclude delivered messages. New tests cover full-body recovery after push, newest-first bounded pagination, and recovery after an uncertain attempt. MCP tool wording now explicitly documents false as the recovery option. The controller's production result of an empty inbox remains a deployment/identity discrepancy to verify after integration; no claim is made that production was changed.
+4. **Inbox recovery is present in this checkout, but not confirmed in the deployed daemon.** `message.inbox` passes `unread_only` through to `Store::list_messages`; the default is false in both RPC and MCP. The query filters by `read_at` only when true and does not exclude delivered messages. New tests cover full-body recovery after push, newest-first bounded pagination, and recovery after an uncertain attempt. MCP tool wording now explicitly documents false as the recovery option. The controller supplied the production baseline `RP-BASELINE-8841`: sending to `lane-48355624/2` resolved the correct lane, slot, window `lane-48355624-2`, and session `292ac5d1-9984-40fc-88a7-e4e7b9b054b0`; the message was queued/unread, but inbox polling returned an empty page both by default and with `unread_only:false`. Routing was correct in that probe; retrieval was broken. This is controller-reported evidence, not a production query by this worker. Isolated store/delivery tests do not prove that the deployed MCP recipient can retrieve its mail. That end-to-end retrieval remains an acceptance check after integration.
 
 ## Implementation
 
@@ -63,4 +63,21 @@ The initial worktree lacked desktop dependencies; `bun install --frozen-lockfile
 
 ## Limits and rollout
 
-No merge, push, bundle build, installation, or production restart was performed. Slash-only effort settings apply when the launched session becomes idle; if it is still busy within the startup budget, the caller receives a warning and the first task uses its launch effort. A collapsed/hidden task that cannot be confirmed can produce a conservative warning. Durable at-most-once push attempts intentionally prefer inbox recovery to automatic replay after an ambiguous write or a crash between claim and injection. Post-integration checks should confirm the controller's deployed inbox identity/routing and absence of duplicate mail.
+No merge, push, bundle build, installation, or production restart was performed. Slash-only effort settings apply when the launched session becomes idle; if it is still busy within the startup budget, the caller receives a warning and the first task uses its launch effort. A collapsed/hidden task that cannot be confirmed can produce a conservative warning. Durable at-most-once push attempts intentionally prefer inbox recovery to automatic replay after an ambiguous write or a crash between claim and injection. Post-integration checks should confirm full-body inbox retrieval for the correctly routed controller and absence of duplicate mail.
+
+
+## Controller follow-up and human acceptance checks
+
+The controller reported that the original completion mail was itself truncated to its final clause. Its head and gate summary were resent in separate short messages. This resend is a workaround for the unchanged production transport, not a new payload-size contract.
+
+After the operator authorizes integration, send a fresh uniquely tagged message to `lane-48355624/2`, record its returned message id, and call `message_inbox` from that recipient with `unread_only:false` and a bounded limit. Require that exact id and the complete body to be present, then repeat after push delivery and after marking it read. Compare this against `RP-BASELINE-8841`, where a correctly addressed queued message was already missing. If the test fails, investigate the deployed MCP recipient identity and database endpoint as well as the inbox handler; do not label the recovery path verified based on a store unit test alone.
+
+**Real Antigravity input delivery remains unverified.** The isolated probe observed its paste-mode advertisement but did not reach a ready composer. The controller additionally reports no active Antigravity fleet pane and no capacity to spawn one now. No green result is inferred from either the fixtures or advertisement alone.
+
+When an authenticated, quota-available Antigravity client can be tested, run from this worktree:
+
+```sh
+TMPDIR=/private/tmp python3 qa/measure-other-composers.py
+```
+
+This creates isolated Codex/Antigravity panes, routes repomon to nonexistent temporary sockets, and never submits the synthetic task. For the `agy` row require `ready:true` and `literal_wrapper_visible:false`; `ready:false` is inconclusive. If the client folds the pasted text, missing visible head/tail markers are also inconclusive. Before claiming full-body delivery, export or copy the entire unsubmitted composer and compare it byte-for-byte with the synthetic input, including its first and last markers. Repeat at exactly 2,101 bytes and above 8 KB, record the results, and clear the test composer. Keep this test in its temporary directory; do not infer the target worktree from an existing Antigravity pane's shell cwd. The controller reports that those panes can remain in the repository's main checkout and can pause for quota resets.
