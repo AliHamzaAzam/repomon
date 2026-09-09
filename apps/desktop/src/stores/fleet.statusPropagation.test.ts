@@ -186,12 +186,14 @@ describe("status propagation to the sidebar", () => {
 
 describe("status propagation latency", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
   /// The derived lane status must reflect a daemon change within one polling heartbeat.
   it("shows a daemon status change within one heartbeat with no event at all", async () => {
     vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const feed = mutableSource();
     const { fleet, teardown } = createRoot((dispose) => {
       const store = createFleetStore(feed.source);
@@ -202,7 +204,7 @@ describe("status propagation latency", () => {
     expect(laneIndicator(fleet.lanes()[0]).label).toBe("idle");
 
     feed.setSessions([agent({ status: "running", status_reason: "spinner on screen: Thinking" })]);
-    // Nothing is pushed: only the 1200ms heartbeat can carry this.
+    // Nothing is pushed: only the foreground heartbeat can carry this.
     await vi.advanceTimersByTimeAsync(1250);
     expect(laneIndicator(fleet.lanes()[0]).label).toBe("running");
     expect(fleet.counts().running).toBe(1);
@@ -224,6 +226,13 @@ describe("status propagation latency", () => {
       return { fleet: store, teardown: () => { store.stop(); dispose(); } };
     });
     await vi.advanceTimersByTimeAsync(0);
+
+    const initialLoads = feed.loads();
+    for (let i = 0; i < 100; i += 1) {
+      feed.emit("event.agent.bytes", { window: "lane-7-1", data: "output" });
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    expect(feed.loads()).toBe(initialLoads);
 
     feed.setSessions([agent({ status: "running" })]);
     feed.emit("event.agent.status", {

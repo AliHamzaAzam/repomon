@@ -429,10 +429,37 @@ fn scan_window(
 }
 
 fn read_dir(path: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(path)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
+    use std::sync::{Mutex, OnceLock};
+    type Listings = HashMap<PathBuf, (SystemTime, Vec<PathBuf>)>;
+    static CACHE: OnceLock<Mutex<Listings>> = OnceLock::new();
+    let Ok(stamp) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return Vec::new();
+    };
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some((cached, paths)) = cache.get(path) {
+        if *cached == stamp {
+            return paths.clone();
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
     out.sort();
+    // Each nested directory is checked independently, so new transcripts remain discoverable.
+    if std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        == Some(stamp)
+    {
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), (stamp, out.clone()));
+    }
     out
 }
 
@@ -852,6 +879,21 @@ pub async fn ingest_watch(ctx: Arc<Ctx>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cached_directory_listing_tracks_nested_creates_and_removes() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(super::read_dir(root.path()), vec![nested.clone()]);
+        assert!(super::read_dir(&nested).is_empty());
+        let transcript = nested.join("session.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        assert_eq!(super::read_dir(root.path()), vec![nested.clone()]);
+        assert_eq!(super::read_dir(&nested), vec![transcript.clone()]);
+        std::fs::remove_file(transcript).unwrap();
+        assert!(super::read_dir(&nested).is_empty());
+    }
+
     use super::*;
     use repomon_core::{Config, Store};
     use std::fs;

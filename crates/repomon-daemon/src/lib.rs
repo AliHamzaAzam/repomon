@@ -223,6 +223,9 @@ pub struct Ctx {
     /// shared backend stream; the entry refcounts its watching connections (see [`bytes_stream`]).
     /// `Arc<Mutex<…>>` lets the forwarder clean up when the backend detects target closure.
     pub bytes_watches: bytes_stream::Watches,
+    /// Wake parked capture loops when their subscriptions change.
+    pub capture_wake: Notify,
+    pub orchestrator_capture_wake: Notify,
     /// Agent windows currently paused on a usage limit, with their reset time - written by the
     /// auto-continue watcher and read by `overlay_agents` to surface the `RateLimited` status.
     /// Keyed by slot window (`lane-7-2`), not lane: each slot pauses independently.
@@ -429,6 +432,8 @@ impl Ctx {
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),
             bytes_watches: Arc::new(Mutex::new(HashMap::new())),
+            capture_wake: Notify::new(),
+            orchestrator_capture_wake: Notify::new(),
             rate_limits: Mutex::new(HashMap::new()),
             quota_deadlines: Mutex::new(HashMap::new()),
             usage: Mutex::new(HashMap::new()),
@@ -556,6 +561,8 @@ impl Ctx {
         // them.
         crate::bytes_stream::unwatch_all(&self.backend, &self.bytes_watches, id).await;
         self.reconcile_lane_watchers().await;
+        self.capture_wake.notify_one();
+        self.orchestrator_capture_wake.notify_one();
     }
 
     /// Combines live clients’ stream targets and identifies windows focused by clients with fresh
@@ -569,10 +576,13 @@ impl Ctx {
         for sess in &sessions {
             let lanes = sess.viewport.lock().await.clone();
             let focus = sess.viewport_focus.lock().await.clone();
+            let byte_windows = sess.watched_bytes.lock().unwrap().clone();
+            // Byte subscribers already receive output without polling. Other connections
+            // may still require captures of the same window.
             // One target per visible lane (its resolved window), deduped across sessions by window.
             for lane in &lanes {
                 let w = stream_window_for(*lane, &focus);
-                if !targets.iter().any(|(_, tw)| tw == &w) {
+                if !byte_windows.contains(&w) && !targets.iter().any(|(_, tw)| tw == &w) {
                     targets.push((*lane, w));
                 }
             }
@@ -580,7 +590,7 @@ impl Ctx {
             // already filtered these to valid `term-…` windows, so a session can't inject others.
             for w in sess.viewport_windows.lock().await.iter() {
                 if let Some(lane) = TmuxRuntime::parse_term_window(w) {
-                    if !targets.iter().any(|(_, tw)| tw == w) {
+                    if !byte_windows.contains(w) && !targets.iter().any(|(_, tw)| tw == w) {
                         targets.push((lane, w.clone()));
                     }
                 }
@@ -590,7 +600,9 @@ impl Ctx {
             let fresh = at.is_some_and(|t| now.duration_since(t) < rpc::VIEWPORT_OWNED_TTL);
             if fresh {
                 if let Some((_, w)) = &focus {
-                    focused.insert(w.clone());
+                    if !byte_windows.contains(w) {
+                        focused.insert(w.clone());
+                    }
                 }
             }
         }
@@ -676,7 +688,11 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TYPING_FLOOR);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {},
+            _ = ctx.capture_wake.notified() => {},
+        }
+        tick.reset_after(TYPING_FLOOR);
         let now = Instant::now();
         // Prune lanes typed into longer ago than TYPING_WINDOW. This runs BEFORE the empty-viewport
         // early-return below so `input_seen` is bounded even when no TUI viewport is set - otherwise
@@ -691,6 +707,7 @@ pub async fn stream_output(ctx: Arc<Ctx>) {
         let ViewportSnapshot { targets, focused } = ctx.viewport_snapshot().await;
         if targets.is_empty() {
             state.clear();
+            tick.reset_after(BG_CAP);
             continue;
         }
         state.retain(|w, _| targets.iter().any(|(_, tw)| tw == w));
@@ -844,7 +861,11 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TYPING_FLOOR);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {},
+            _ = ctx.orchestrator_capture_wake.notified() => {},
+        }
+        tick.reset_after(TYPING_FLOOR);
         let watched = ctx.has_orchestrator_watcher().await;
         let window = ctx
             .orchestrator
@@ -853,6 +874,7 @@ pub async fn stream_orchestrator(ctx: Arc<Ctx>) {
             .as_ref()
             .map(|session| session.window.clone());
         let Some(window) = window.filter(|_| watched) else {
+            tick.reset_after(Duration::from_secs(3));
             last = None;
             last_cursor = None;
             backoff = WATCH_FLOOR;
@@ -995,6 +1017,28 @@ mod stream_tests {
             HashSet::from(["lane-7-2".to_string()]),
             "the sole fresh focus is the only focused window"
         );
+    }
+
+    #[tokio::test]
+    async fn byte_watch_skips_duplicate_capture_but_preserves_other_clients() {
+        let ctx = test_ctx().await;
+        let desktop = ctx.open_session(ConnKind::Local).await;
+        *desktop.viewport.lock().await = vec![7];
+        *desktop.viewport_focus.lock().await = Some((7, "lane-7".into()));
+        *desktop.viewport_focus_at.lock().await = Some(Instant::now());
+        desktop
+            .watched_bytes
+            .lock()
+            .unwrap()
+            .insert("lane-7".into());
+        assert!(ctx.viewport_snapshot().await.targets.is_empty());
+        let tui = ctx.open_session(ConnKind::Local).await;
+        *tui.viewport.lock().await = vec![7];
+        assert_eq!(
+            ctx.viewport_snapshot().await.targets,
+            vec![(7, "lane-7".into())]
+        );
+        assert!(ctx.viewport_snapshot().await.focused.is_empty());
     }
 
     #[tokio::test]

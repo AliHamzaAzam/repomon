@@ -1,3 +1,4 @@
+import { startVisibilityPolling } from "./visibilityPolling";
 import { createSignal } from "solid-js";
 
 import type { RepomindStatus } from "../bindings";
@@ -74,7 +75,7 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
   let active = false;
   let inFlight = false;
   let token = 0;
-  let interval: ReturnType<typeof setInterval> | undefined;
+  let stopPolling: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   // Windows the controller lane owns, kept up to date by the caller so the event filter does not
   // need its own copy of the fleet.
@@ -110,6 +111,10 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
   }
 
   function onEvent(event: DaemonEvent) {
+    if (event.method === "event.repo.changed" || event.method.startsWith("event.repomind.")) {
+      void refresh();
+      return;
+    }
     if (event.method !== "event.agent.status") return;
     const window = (event.params as AgentStatusEvent).window;
     if (typeof window === "string" && controllerWindows.has(window)) void refresh();
@@ -148,7 +153,7 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
     if (active) return;
     active = true;
     void refresh();
-    interval = setInterval(() => void refresh(), REPOMIND_POLL_MS);
+    stopPolling = startVisibilityPolling(() => void refresh(), REPOMIND_POLL_MS);
     void source
       .subscribe(onEvent)
       .then((stop) => {
@@ -160,8 +165,8 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
 
   function stop() {
     active = false;
-    if (interval) clearInterval(interval);
-    interval = undefined;
+    stopPolling?.();
+    stopPolling = undefined;
     unsubscribe?.();
     unsubscribe = undefined;
   }

@@ -295,17 +295,48 @@ pub fn home_counts(home: &Path) -> repomon_core::model::RepomindCounts {
 
 /// Markdown files directly in `dir`, excluding its `README.md`. A missing directory is zero.
 fn markdown_files(dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    type Counts = HashMap<PathBuf, (SystemTime, usize)>;
+    static CACHE: OnceLock<Mutex<Counts>> = OnceLock::new();
+    let Ok(stamp) = std::fs::metadata(dir).and_then(|meta| meta.modified()) else {
         return 0;
     };
-    entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.ends_with(".md") && !name.eq_ignore_ascii_case("README.md")
-        })
-        .count()
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some((cached, count)) = cache.get(dir) {
+        if *cached == stamp {
+            return *count;
+        }
+    }
+    let Some(count) = count_markdown_files(dir) else {
+        return 0;
+    };
+    // Do not cache a count raced by a create, remove, or rename.
+    if std::fs::metadata(dir).and_then(|meta| meta.modified()).ok() == Some(stamp) {
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(dir.to_path_buf(), (stamp, count));
+    }
+    count
+}
+
+fn count_markdown_files(dir: &Path) -> Option<usize> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.ends_with(".md") && !name.eq_ignore_ascii_case("README.md")
+            })
+            .count(),
+    )
 }
 
 /// Bootstraps and reconciles the home, registers memory, archives journals, and queues an export,
@@ -727,6 +758,22 @@ mod tests {
                 drafts: 1,
             }
         );
+    }
+
+    #[test]
+    fn home_counts_follow_directory_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_layout(dir.path()).unwrap();
+        let active = dir.path().join("plans/active");
+        assert_eq!(home_counts(dir.path()).active_plans, 0);
+        std::fs::write(active.join("new.md"), "plan").unwrap();
+        assert_eq!(home_counts(dir.path()).active_plans, 1);
+        std::fs::rename(active.join("new.md"), active.join("new.txt")).unwrap();
+        assert_eq!(home_counts(dir.path()).active_plans, 0);
+        std::fs::write(active.join("next.md"), "plan").unwrap();
+        assert_eq!(home_counts(dir.path()).active_plans, 1);
+        std::fs::remove_file(active.join("next.md")).unwrap();
+        assert_eq!(home_counts(dir.path()).active_plans, 0);
     }
 
     #[test]
