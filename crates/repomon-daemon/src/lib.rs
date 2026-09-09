@@ -367,9 +367,12 @@ impl Ctx {
         config_path: PathBuf,
         notes_dir: PathBuf,
     ) -> Arc<Self> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(test)))]
         let backend: Arc<dyn SessionBackend> =
             Arc::new(TmuxRuntime::new(config.tmux_session.clone()));
+        #[cfg(all(unix, test))]
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(TmuxRuntime::isolated(config.tmux_session.clone()));
         #[cfg(windows)]
         let backend: Arc<dyn SessionBackend> = {
             // Owner identity mirrors `reap::owner_token`: the db path - stable across

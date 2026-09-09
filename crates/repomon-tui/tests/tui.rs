@@ -1,10 +1,14 @@
 //! End-to-end TUI test: embedded daemon -> client -> App -> rendered Fleet frame.
 
+#[path = "../../repomon-daemon/tests/common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::path::Path;
 use std::process::Command;
 
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use repomon_tui::app::App;
 use repomon_tui::render_to_string;
 use serde_json::json;
@@ -71,7 +75,7 @@ async fn waiting_badges_distinguish_attention() {
     use repomon_tui::keybinds::View;
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-tui-badges-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -241,7 +245,7 @@ async fn peek_popup_shows_the_dialog_and_queue() {
     use repomon_core::model::AgentStatus;
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-tui-peek-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -332,7 +336,7 @@ async fn grid_tiles_plain_shell_terminals() {
     use repomon_tui::keybinds::View;
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-tui-grid-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -405,7 +409,7 @@ async fn focus_renders_the_embedded_emulator() {
     use repomon_tui::keybinds::View;
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-tui-emu-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {
@@ -468,7 +472,7 @@ async fn focus_renders_the_embedded_emulator() {
 #[tokio::test]
 async fn renders_fleet_with_a_registered_repo() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-tui-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
 

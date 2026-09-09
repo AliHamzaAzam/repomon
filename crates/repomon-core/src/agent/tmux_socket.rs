@@ -8,6 +8,10 @@ use crate::error::{Error, Result};
 #[derive(Debug, Default)]
 pub(super) struct SocketState {
     path: Option<PathBuf>,
+    managed_override: Option<PathBuf>,
+    legacy_override: Option<Vec<PathBuf>>,
+    #[cfg(any(test, feature = "test-support"))]
+    _test_root: Option<tempfile::TempDir>,
     server: Option<(u32, String)>,
     inode: Option<(u64, u64)>,
     touched: Option<Instant>,
@@ -201,6 +205,7 @@ fn discover(_path: &Path) -> Result<Vec<u32>> {
 
 trait SocketOps {
     fn query(&self, path: &Path) -> Option<u32>;
+    fn has_session(&self, path: &Path, session: &str) -> bool;
     fn discover(&self, path: &Path) -> Result<Vec<u32>>;
     fn fingerprint(&self, pid: u32) -> Option<String>;
     fn running(&self, pid: u32) -> bool;
@@ -215,6 +220,15 @@ struct SystemOps<'a>(&'a Path);
 impl SocketOps for SystemOps<'_> {
     fn query(&self, path: &Path) -> Option<u32> {
         query(self.0, path)
+    }
+    fn has_session(&self, path: &Path, session: &str) -> bool {
+        Command::new(self.0)
+            .arg("-N")
+            .arg("-S")
+            .arg(path)
+            .args(["has-session", "-t", &format!("={session}")])
+            .output()
+            .is_ok_and(|out| out.status.success())
     }
     fn discover(&self, path: &Path) -> Result<Vec<u32>> {
         discover(path)
@@ -293,8 +307,55 @@ fn missing_server(out: &Output) -> bool {
 }
 
 impl SocketState {
+    fn managed(&self, session: &str) -> PathBuf {
+        self.managed_override
+            .clone()
+            .unwrap_or_else(|| managed_socket(session))
+    }
+
+    pub(super) fn legacy(&self, session: &str) -> Vec<PathBuf> {
+        if let Some(paths) = &self.legacy_override {
+            return paths.clone();
+        }
+        #[cfg(unix)]
+        {
+            vec![legacy_socket(session)]
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = session;
+            Vec::new()
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn isolated() -> Self {
+        #[cfg(unix)]
+        let root = tempfile::Builder::new()
+            .prefix("repomon-test-")
+            .tempdir_in("/tmp")
+            .expect("temporary tmux directory");
+        #[cfg(not(unix))]
+        let root = tempfile::tempdir().expect("temporary tmux directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private temporary tmux directory");
+        }
+        Self {
+            managed_override: Some(root.path().join("managed.sock")),
+            legacy_override: Some(vec![root.path().join("legacy.sock")]),
+            _test_root: Some(root),
+            path: None,
+            server: None,
+            inode: None,
+            touched: None,
+        }
+    }
+
     pub(super) fn path(&self, session: &str) -> PathBuf {
-        self.path.clone().unwrap_or_else(|| managed_socket(session))
+        self.path.clone().unwrap_or_else(|| self.managed(session))
     }
 
     pub(super) fn ensure(
@@ -312,12 +373,10 @@ impl SocketState {
         session: &str,
         creating: bool,
     ) -> Result<PathBuf> {
-        let managed = managed_socket(session);
+        let managed = self.managed(session);
         if self.path.is_none() {
-            #[cfg(unix)]
-            let candidates = vec![managed.clone(), legacy_socket(session)];
-            #[cfg(not(unix))]
-            let candidates = vec![managed.clone()];
+            let mut candidates = vec![managed.clone()];
+            candidates.extend(self.legacy(session));
             let mut servers = Vec::new();
             for path in candidates {
                 let mut pids = ops.discover(&path)?;
@@ -339,10 +398,31 @@ impl SocketState {
                 }
             }
             if servers.len() > 1 {
-                return Err(Error::Agent(
-                    "multiple tmux servers own this session name; refusing fleet replacement"
-                        .into(),
-                ));
+                let reachable: Vec<_> = servers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (path, (pid, _)))| {
+                        ops.query(path) == Some(*pid) && ops.has_session(path, session)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                if reachable.len() != 1 {
+                    let candidates: Vec<_> = servers
+                        .iter()
+                        .map(|(path, (pid, _))| format!("{pid}@{}", path.display()))
+                        .collect();
+                    let message = format!(
+                        "multiple tmux servers own session {session}; no unique reachable session owner; refusing recovery and fleet replacement; candidates: {}",
+                        candidates.join(", ")
+                    );
+                    tracing::error!("{message}");
+                    return Err(Error::Agent(message));
+                }
+                let selected = servers.remove(reachable[0]);
+                let preserved: Vec<_> = servers.iter().map(|(_, (pid, _))| *pid).collect();
+                tracing::warn!(session, pid = selected.1.0, path = %selected.0.display(), ?preserved,
+                    "adopting unique reachable tmux session owner; leaving other surviving servers untouched; replacement server creation remains guarded");
+                servers = vec![selected];
             }
             if let Some((path, server)) = servers.pop() {
                 if ops.query(&path) != Some(server.0) {
@@ -459,6 +539,41 @@ impl SocketState {
     }
 }
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+impl Drop for SocketState {
+    fn drop(&mut self) {
+        let Some(root) = self._test_root.as_ref() else {
+            return;
+        };
+        for path in [
+            root.path().join("managed.sock"),
+            root.path().join("legacy.sock"),
+        ] {
+            let Ok(pids) = discover(&path) else {
+                continue;
+            };
+            for pid in pids {
+                let Some(start) = super::tmux::process_fingerprint(pid) else {
+                    continue;
+                };
+                if discover(&path).is_ok_and(|owners| owners.contains(&pid))
+                    && super::tmux::process_fingerprint(pid).as_ref() == Some(&start)
+                {
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                    for _ in 0..100 {
+                        if super::tmux::process_fingerprint(pid).as_ref() != Some(&start) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -486,6 +601,9 @@ mod tests {
     impl SocketOps for Scripted {
         fn query(&self, path: &Path) -> Option<u32> {
             self.reachable.borrow().get(path).copied()
+        }
+        fn has_session(&self, path: &Path, _session: &str) -> bool {
+            self.query(path).is_some()
         }
         fn discover(&self, path: &Path) -> Result<Vec<u32>> {
             Ok(self
@@ -601,6 +719,109 @@ mod tests {
     }
 
     #[test]
+    fn unique_reachable_session_is_adopted_but_two_reachable_owners_are_ambiguous() {
+        let ops = Scripted::default();
+        let path = managed_socket("i1-scripted");
+        let legacy = legacy_socket("i1-scripted");
+        ops.add(path.clone(), 42, true);
+        ops.add(legacy.clone(), 77, false);
+        let mut state = SocketState::default();
+        assert_eq!(state.ensure_with(&ops, "i1-scripted", true).unwrap(), path);
+        assert_eq!(state.server.as_ref().map(|s| s.0), Some(42));
+        assert!(ops.signals.borrow().is_empty());
+        ops.reachable.borrow_mut().insert(legacy, 77);
+        assert!(
+            SocketState::default()
+                .ensure_with(&ops, "i1-scripted", true)
+                .is_err()
+        );
+        ops.reachable.borrow_mut().clear();
+        assert!(
+            SocketState::default()
+                .ensure_with(&ops, "i1-scripted", true)
+                .is_err()
+        );
+        assert!(ops.signals.borrow().is_empty());
+    }
+
+    fn start_test_server(path: &Path, session: &str, window: &str) -> (u32, String) {
+        let program = super::super::tmux::tmux_program();
+        let out = Command::new(&program)
+            .arg("-S")
+            .arg(path)
+            .args(["new-session", "-d", "-s", session, "-n", window, "sleep 60"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pid = query(&program, path).unwrap();
+        (pid, super::super::tmux::process_fingerprint(pid).unwrap())
+    }
+
+    #[test]
+    fn duplicate_legacy_servers_adopt_reachable_owner_and_cleanup_both_verified_pids() {
+        use crate::agent::TmuxRuntime;
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let runtime = TmuxRuntime::isolated("repomon");
+        let path = runtime.test_legacy_socket_path();
+        let root = path.parent().unwrap().to_path_buf();
+        let old = start_test_server(&path, "repomon", "preserved");
+        std::fs::remove_file(&path).unwrap();
+        let active = start_test_server(&path, "repomon", "active");
+        assert_ne!(old.0, active.0);
+        assert_eq!(runtime.list_windows().unwrap(), ["active"]);
+        assert_eq!(
+            super::super::tmux::process_fingerprint(old.0),
+            Some(old.1.clone())
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(runtime.list_windows().unwrap(), ["active"]);
+        assert_eq!(
+            query(&super::super::tmux::tmux_program(), &path),
+            Some(active.0)
+        );
+        assert_eq!(
+            super::super::tmux::process_fingerprint(old.0),
+            Some(old.1.clone())
+        );
+        drop(runtime);
+        assert!(!root.exists());
+        assert_ne!(super::super::tmux::process_fingerprint(old.0), Some(old.1));
+        assert_ne!(
+            super::super::tmux::process_fingerprint(active.0),
+            Some(active.1)
+        );
+    }
+
+    #[test]
+    fn panic_cleanup_terminates_owned_pid_even_when_socket_is_unlinked() {
+        use crate::agent::TmuxRuntime;
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let runtime = TmuxRuntime::isolated("panic-cleanup");
+        let path = runtime.socket_path();
+        let root = path.parent().unwrap().to_path_buf();
+        let server = start_test_server(&path, "panic-cleanup", "test");
+        std::fs::remove_file(&path).unwrap();
+        let caught = std::panic::catch_unwind(move || {
+            let _runtime = runtime;
+            panic!("exercise fixture unwinding");
+        });
+        assert!(caught.is_err());
+        assert!(!root.exists());
+        assert_ne!(
+            super::super::tmux::process_fingerprint(server.0),
+            Some(server.1)
+        );
+    }
+
+    #[test]
     fn dead_legacy_server_migrates_and_reused_pid_is_not_signalled() {
         let ops = Scripted::default();
         let path = legacy_socket("i1-scripted");
@@ -626,22 +847,14 @@ mod tests {
             return;
         }
         let session = format!("i1-legacy-{}", std::process::id());
-        let path = legacy_socket(&session);
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Command::new(super::super::tmux::tmux_program())
-                    .arg("-S")
-                    .arg(&self.0)
-                    .arg("kill-server")
-                    .output();
-            }
-        }
+        let runtime = TmuxRuntime::isolated(&session);
+        let path = runtime.test_legacy_socket_path();
+        let managed = runtime.socket_path();
         let program = super::super::tmux::tmux_program();
         let output = Command::new(&program)
+            .arg("-S")
+            .arg(&path)
             .args([
-                "-L",
-                &session,
                 "new-session",
                 "-d",
                 "-s",
@@ -657,14 +870,12 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let _cleanup = Cleanup(path.clone());
         let pid = query(&program, &path).expect("isolated legacy pid");
         std::fs::remove_file(&path).unwrap();
-        let runtime = TmuxRuntime::new(&session);
         assert_eq!(runtime.list_windows().unwrap(), ["lane-1"]);
         assert_eq!(runtime.socket_path(), path);
         assert_eq!(query(&program, &path), Some(pid));
-        assert!(!managed_socket(&session).exists());
+        assert!(!managed.exists());
         // The adopted runtime remembers the same PID for subsequent socket loss.
         std::fs::remove_file(&path).unwrap();
         assert_eq!(runtime.list_windows().unwrap(), ["lane-1"]);

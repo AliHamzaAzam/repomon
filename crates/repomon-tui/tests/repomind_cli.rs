@@ -1,12 +1,16 @@
 //! Exercises repomind CLI status, boot, and export against isolated home and data directories.
 
+#[path = "../../repomon-daemon/tests/common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::path::Path;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use repomon_tui::cli::{Command, RepomindCmd};
 
 async fn connect_retry(sock: &Path) -> IpcStream {
@@ -38,11 +42,14 @@ async fn call(
 async fn repomind_cli_status_boot_export_round_trip_through_an_isolated_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("repomind");
-    let mut config = Config::default();
+    let mut config = Config {
+        tmux_session: format!("repomind-cli-{}", std::process::id()),
+        ..Default::default()
+    };
     config.repomind.home = home.to_string_lossy().into_owned();
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config.clone(), None);
+    let ctx = TestCtx::create(store, config.clone(), None);
     // Ensure the home up front (same as the daemon does on its own start / `orchestrator.start`)
     // so `repomind.boot`/`repomind.export` below have somewhere to write.
     repomon_daemon::repomind::ensure_home(&ctx).await.unwrap();
@@ -52,7 +59,7 @@ async fn repomind_cli_status_boot_export_round_trip_through_an_isolated_daemon()
         std::process::id()
     ));
     let _ = std::fs::remove_file(&sock);
-    let _server = {
+    let server = {
         let ctx = ctx.clone();
         let sock = sock.clone();
         tokio::spawn(async move { serve(ctx, &sock).await })
@@ -97,4 +104,6 @@ async fn repomind_cli_status_boot_export_round_trip_through_an_isolated_daemon()
     )
     .await
     .expect("repomind export");
+    ctx.shutdown.notify_waiters();
+    server.await.unwrap().unwrap();
 }

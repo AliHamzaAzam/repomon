@@ -36,8 +36,20 @@ removes only the socket this listener owns. Socket timestamps are refreshed dail
 Managed tmux servers use `-S <runtime-dir>/tmux/<session-name>` (normally `tmux/repomon`). Startup discovers
 legacy servers by their socket and open descriptors, including sockets already unlinked by a cleaner.
 A living legacy server is adopted in place; SIGUSR1 recreates a missing socket before any window creation.
-The runtime path takes effect when that legacy server exits. Recovery failures and multiple surviving
-servers block replacement instead of presenting a falsely empty fleet.
+The runtime path takes effect when that legacy server exits. If several processes retain the same socket
+name, startup adopts the unique reachable server that actually owns the requested session. It logs
+`adopting unique reachable tmux session owner; leaving other surviving servers untouched; replacement server creation remains guarded`
+with the selected PID/path and preserved PIDs. It never signals the other survivors. Subsequent socket
+recovery targets only the adopted PID after checking its process start time.
+
+If there is no unique reachable owner, startup logs an error containing
+`no unique reachable session owner; refusing recovery and fleet replacement` and the candidate PIDs/paths.
+It does not create an empty replacement fleet. The operator should inspect the listed endpoints using
+`tmux -N -S <path> list-sessions` and identify the intended fleet and any surviving panes before resolving
+ambiguity. Do not send SIGUSR1 blindly to an old server sharing the active server's socket name: it could
+replace that endpoint. An intentionally preserved, unreachable old server needs no action when one reachable
+server owns the session. If both fleets are reachable, preserve their panes and deliberately retire or
+separate the unwanted session before retrying; automatic fleet merging is outside this recovery path.
 
 `agent.adopt` uses the supplied session id, or the lane's last stored id for its backend. Claude uses
 `--resume <id>` and Codex uses `resume <id>`. Without a stored id they use `--continue` and `resume --last`,

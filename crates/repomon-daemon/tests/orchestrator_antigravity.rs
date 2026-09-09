@@ -1,13 +1,16 @@
 //! Tests Antigravity orchestration through RPC, including empty transcript responses and window
 //! shutdown.
 
-use std::process::Command;
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::json;
 
 /// Connect to the daemon's IPC endpoint, retrying while it binds.
@@ -57,7 +60,7 @@ async fn antigravity_backend_starts_degrades_transcript_and_stops() {
         .to_string_lossy()
         .into_owned();
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock =
         std::env::temp_dir().join(format!("repomon-orch-agy-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
@@ -114,9 +117,4 @@ async fn antigravity_backend_starts_degrades_transcript_and_stops() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }

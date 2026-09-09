@@ -1,11 +1,15 @@
 //! Deterministic coverage for system.doctor when external binaries (tmux, git, agent CLIs) are missing from PATH.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::json;
 
 async fn connect_retry(sock: &std::path::Path) -> IpcStream {
@@ -52,7 +56,7 @@ async fn system_doctor_reports_unavailable_when_binaries_missing() {
         .agents
         .insert("custom-cli".into(), "nonexistent-cmd-abc".into());
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock = std::env::temp_dir().join(format!(
         "repomon-doctor-missing-{}.sock",
         std::process::id()
@@ -153,7 +157,7 @@ async fn system_doctor_honors_repomon_tmux_env_override() {
     unsafe { std::env::set_var("REPOMON_TMUX", &fake_tmux) };
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-doctor-env-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {

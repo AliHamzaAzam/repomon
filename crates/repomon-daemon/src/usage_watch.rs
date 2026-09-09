@@ -817,7 +817,7 @@ mod tests {
     #[test]
     #[ignore = "spawns a real `claude` and runs /usage; run manually with --ignored"]
     fn probe_once_reads_real_claude() {
-        let tmux = TmuxRuntime::new("repomon-usagetest-claude");
+        let tmux = TmuxRuntime::isolated("repomon-usagetest-claude");
         let report = probe_once(
             &tmux,
             "usage-probe-test",
@@ -825,13 +825,6 @@ mod tests {
             &claude_spec("claude".to_string()),
             &Cancel::new(PROBE_TIMEOUT),
         );
-        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .arg("-S")
-            .arg(repomon_core::agent::tmux_socket::managed_socket(
-                "repomon-usagetest-claude",
-            ))
-            .arg("kill-server")
-            .output();
         let r = report.expect("probe should scrape and parse /usage");
         eprintln!("claude windows: {:?}", r.windows);
         assert!(!r.windows.is_empty());
@@ -842,7 +835,7 @@ mod tests {
     #[test]
     #[ignore = "spawns a real `codex` and runs /status; run manually with --ignored"]
     fn probe_once_reads_real_codex() {
-        let tmux = TmuxRuntime::new("repomon-usagetest-codex");
+        let tmux = TmuxRuntime::isolated("repomon-usagetest-codex");
         let report = probe_once(
             &tmux,
             "usage-probe-codex-test",
@@ -850,13 +843,6 @@ mod tests {
             &codex_spec(),
             &Cancel::new(PROBE_TIMEOUT),
         );
-        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .arg("-S")
-            .arg(repomon_core::agent::tmux_socket::managed_socket(
-                "repomon-usagetest-codex",
-            ))
-            .arg("kill-server")
-            .output();
         let r = report.expect("probe should scrape and parse /status");
         eprintln!("codex windows: {:?}", r.windows);
         assert!(!r.windows.is_empty());

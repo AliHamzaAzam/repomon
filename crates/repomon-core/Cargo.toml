@@ -10,9 +10,11 @@ description = "Core library for repomon: data model, git layer, store, watchers,
 
 [features]
 default = []
+test-support = ["dep:tempfile"]
 ts = ["dep:ts-rs"]
 
 [dependencies]
+tempfile = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

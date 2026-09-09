@@ -39,5 +39,6 @@ regex = { workspace = true }
 ureq = { workspace = true }
 
 [dev-dependencies]
+repomon-core = { workspace = true, features = ["test-support"] }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }

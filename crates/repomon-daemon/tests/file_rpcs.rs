@@ -1,6 +1,10 @@
 //! Exercises worktree file RPCs through local IPC against an isolated git worktree without starting
 //! agent sessions.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -8,7 +12,7 @@ use std::time::Duration;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 async fn connect_retry(sock: &Path) -> IpcStream {
@@ -68,7 +72,7 @@ impl Harness {
 
 async fn setup(prefix: &str) -> Harness {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-{prefix}-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {

@@ -1,5 +1,9 @@
 //! End-to-end for the remote WebSocket bridge: token gate, RPC round-trip, event push.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -37,7 +41,7 @@ async fn serve_with_timeout(ctx: Arc<Ctx>, handshake_timeout: Duration) -> Strin
 
 async fn start_bridge(token: &str) -> (Arc<Ctx>, String) {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
 
     ctx.remote_tokens
         .write()
@@ -296,7 +300,7 @@ async fn handshake_bad_version_gets_426_with_supported_version() {
 #[tokio::test]
 async fn handshake_deadline_drops_a_dribbling_client_and_frees_the_slot() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     ctx.remote_tokens
         .write()
         .unwrap()
@@ -338,7 +342,7 @@ async fn handshake_deadline_drops_a_dribbling_client_and_frees_the_slot() {
 #[tokio::test]
 async fn bridge_authenticates_a_named_device_and_stamps_last_seen() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     // Pair a device, seed its token into the auth cache with the device name.
     let dev = ctx.store.remote_device_pair("phone").await.unwrap();
     ctx.remote_tokens
@@ -456,7 +460,7 @@ async fn bridge_stops_events_to_a_silently_revoked_device() {
 #[tokio::test]
 async fn remote_pair_list_revoke_round_trip_over_dispatch() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     // A session is required by the dispatch signature; these local-only RPCs don't touch it.
     let sess = ctx.open_session(ConnKind::Local).await;
 
@@ -519,7 +523,7 @@ async fn concurrent_pair_and_revoke_leave_the_cache_consistent() {
     use std::collections::HashSet;
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sess = ctx.open_session(ConnKind::Local).await;
 
     rpc::dispatch(&ctx, &sess, "remote.pair", Some(json!({ "name": "a" })))
@@ -592,7 +596,7 @@ fn git(dir: &Path, args: &[&str]) {
 #[tokio::test]
 async fn remote_lane_create_ignores_caller_path() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
 
     // A real repo with one commit on main (lane.create branches a worktree off it).
     let repo_dir = tempfile::tempdir().unwrap();
@@ -690,7 +694,7 @@ async fn session_for_device(ctx: &Ctx, device: &str) -> Arc<ConnSession> {
 #[tokio::test]
 async fn bytes_events_are_delivered_per_connection() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let phone = ctx.store.remote_device_pair("phone").await.unwrap();
     let ipad = ctx.store.remote_device_pair("ipad").await.unwrap();
     {
@@ -763,7 +767,7 @@ async fn bytes_events_are_delivered_per_connection() {
 #[tokio::test]
 async fn output_events_are_delivered_per_connection() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let phone = ctx.store.remote_device_pair("phone").await.unwrap();
     let ipad = ctx.store.remote_device_pair("ipad").await.unwrap();
     let laptop = ctx.store.remote_device_pair("laptop").await.unwrap();
@@ -851,7 +855,7 @@ async fn output_events_are_delivered_per_connection() {
 #[tokio::test]
 async fn close_session_releases_only_this_connections_watches() {
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let a = ctx.open_session(ConnKind::Local).await;
     let b = ctx
         .open_session(ConnKind::Remote {
@@ -915,7 +919,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let mut events = ctx.events.subscribe();
 
     let cwd = std::env::temp_dir();
@@ -1042,12 +1046,6 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     assert_eq!(external_event["params"]["rows"], json!(32));
     assert!(external_event["params"]["generation"].is_u64());
     assert!(external_event["params"]["sequence"].is_u64());
-
-    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }
 
 /// Verify lane-wide watch release preserves other lanes and purges dead registry names so name
@@ -1064,7 +1062,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
 
     // Real windows to pipe: two on lane 1 (default-named and a second slot), one on lane 2.
     let cwd = std::env::temp_dir();
@@ -1184,12 +1182,6 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     .await
     .unwrap();
     assert!(!ctx.bytes_watches.lock().await.contains_key("lane-2"));
-
-    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }
 
 /// Terminate a watched stream when its target dies even if sibling windows keep the session-scoped
@@ -1206,7 +1198,7 @@ async fn watched_window_death_closes_stream_while_sibling_survives() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let cwd = std::env::temp_dir();
     for window in ["lane-1", "lane-2"] {
         ctx.backend
@@ -1254,7 +1246,7 @@ async fn watched_window_death_closes_stream_while_sibling_survives() {
     let clients = std::process::Command::new(repomon_core::agent::tmux_program())
         .args([
             "-S",
-            &repomon_core::agent::tmux_socket::managed_socket(&session).to_string_lossy(),
+            &ctx.backend.attach_command("").args[1],
             "list-clients",
             "-F",
             "#{client_control_mode}",
@@ -1277,10 +1269,4 @@ async fn watched_window_death_closes_stream_while_sibling_survives() {
     .await
     .expect("release closed watch");
     assert!(!sess.watched_bytes.lock().unwrap().contains("lane-1"));
-
-    let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }

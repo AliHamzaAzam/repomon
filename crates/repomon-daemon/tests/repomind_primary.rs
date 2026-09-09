@@ -1,15 +1,18 @@
 //! Tests that a live controller repairs a stale primary-window record, using temporary home and
 //! backend namespaces.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::agent::backend::SpawnSpec;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 async fn connect_retry(sock: &Path) -> IpcStream {
@@ -51,7 +54,7 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
         .to_string_lossy()
         .into_owned();
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let home = repomon_daemon::repomind::ensure_home(&ctx)
         .await
         .expect("ensure_home");
@@ -124,11 +127,6 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }
 
 /// `repomind.status` reports `window: null` - not the stale record, not an error - when the
@@ -151,7 +149,7 @@ async fn repomind_status_reports_null_window_when_nothing_is_live() {
         .to_string_lossy()
         .into_owned();
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let home = repomon_daemon::repomind::ensure_home(&ctx)
         .await
         .expect("ensure_home");
@@ -202,9 +200,4 @@ async fn repomind_status_reports_null_window_when_nothing_is_live() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }

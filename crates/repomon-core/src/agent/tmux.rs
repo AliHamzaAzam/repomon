@@ -188,6 +188,22 @@ impl TmuxRuntime {
         }
     }
 
+    /// Disposable backend for tests. Owns private temporary sockets and terminates only verified
+    /// server PIDs at final drop, including during unwinding and after socket loss.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn isolated(session: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            socket_state: Arc::new(Mutex::new(super::tmux_socket::SocketState::isolated())),
+            streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_legacy_socket_path(&self) -> PathBuf {
+        self.socket_state.lock().unwrap().legacy(&self.session)[0].clone()
+    }
+
     /// Return the resolved tmux program path.
     pub fn tmux_program() -> PathBuf {
         tmux_program()
@@ -1586,7 +1602,7 @@ mod tests {
 
     #[test]
     fn backend_attach_command_matches_the_tmux_invocation() {
-        let rt = TmuxRuntime::new("repomon");
+        let rt = TmuxRuntime::isolated("repomon");
         let cmd = SessionBackend::attach_command(&rt, "repomon:=lane-7");
         assert_eq!(cmd.program, tmux_program().to_string_lossy().as_ref());
         assert_eq!(cmd.args, rt.full_args(&["attach", "-t", "repomon:=lane-7"]));
@@ -1594,7 +1610,7 @@ mod tests {
 
     #[test]
     fn backend_targets_match_the_inherent_formats() {
-        let rt = TmuxRuntime::new("repomon");
+        let rt = TmuxRuntime::isolated("repomon");
         assert_eq!(
             SessionBackend::target_named(&rt, "term-1-1"),
             "repomon:term-1-1"
@@ -1605,7 +1621,7 @@ mod tests {
 
     #[test]
     fn target_format() {
-        let rt = TmuxRuntime::new("repomon");
+        let rt = TmuxRuntime::isolated("repomon");
         assert_eq!(rt.target(7), "repomon:lane-7");
     }
 
@@ -1825,7 +1841,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-killtree-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-killtree-{}", std::process::id()));
         let cwd = std::env::temp_dir();
         rt.spawn_named("orchestrator", &cwd, "sh -c 'sleep 30'")
             .unwrap();
@@ -1848,16 +1864,10 @@ mod tests {
                     .map(|status| !status.success())
                     .unwrap_or(true)
             }) {
-                let _ = Command::new(tmux_program())
-                    .args(rt.full_args(&["kill-server"]))
-                    .output();
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        let _ = Command::new(tmux_program())
-            .args(rt.full_args(&["kill-server"]))
-            .output();
         panic!("pane process tree survived kill_named: {tree:?}");
     }
 
@@ -1886,16 +1896,7 @@ mod tests {
         if !TmuxRuntime::available() {
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-f1-paste-{}", std::process::id()));
-        struct Cleanup(TmuxRuntime);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Command::new(tmux_program())
-                    .args(self.0.full_args(&["kill-server"]))
-                    .output();
-            }
-        }
-        let _cleanup = Cleanup(rt.clone());
+        let rt = TmuxRuntime::isolated(format!("repomon-f1-paste-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         let task = format!(
             "FIRST LINE\n\n{}\nFINAL LINE",
@@ -1955,7 +1956,7 @@ mod tests {
         if !TmuxRuntime::available() {
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-f1-existing-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-f1-existing-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         let original = rt
             .spawn(1, dir.path(), "printf 'EXISTING_IDLE\\n❯ '; sleep 30")
@@ -1986,9 +1987,6 @@ mod tests {
             SessionBackend::window_process_fingerprint(&rt, &original).unwrap(),
             fingerprint
         );
-        let _ = Command::new(tmux_program())
-            .args(rt.full_args(&["kill-server"]))
-            .output();
     }
 
     #[test]
@@ -1997,7 +1995,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-test-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-test-{}", std::process::id()));
         let cwd = std::env::temp_dir();
         let lane: LaneId = 1;
 
@@ -2031,10 +2029,6 @@ mod tests {
         assert_eq!(rt.capture(lane, None).unwrap(), "");
         rt.kill_named("lane-1-2").unwrap();
         assert!(!rt.has_window(lane));
-
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", rt.session()])
-            .output();
     }
 
     #[test]
@@ -2043,7 +2037,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-pipetest-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-pipetest-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("bytes.fifo");
         assert!(
@@ -2088,9 +2082,6 @@ mod tests {
 
         rt.pipe_pane_off_named("lane-1").unwrap();
         rt.kill_named("lane-1").unwrap();
-        let _ = Command::new("tmux")
-            .args(rt.full_args(&["kill-server"]))
-            .output();
     }
 
     #[test]
@@ -2099,7 +2090,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let backend = TmuxRuntime::new(format!("repomon-controltest-{}", std::process::id()));
+        let backend = TmuxRuntime::isolated(format!("repomon-controltest-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         backend.spawn(1, dir.path(), "sh").unwrap();
         backend.resize_named("lane-1", 100, 30).unwrap();
@@ -2152,9 +2143,6 @@ mod tests {
             "control client leaked: {clients:?}"
         );
         backend.kill_named("lane-1").unwrap();
-        let _ = Command::new(tmux_program())
-            .args(backend.full_args(&["kill-server"]))
-            .output();
     }
 
     #[test]
@@ -2163,7 +2151,8 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let backend = TmuxRuntime::new(format!("repomon-control-close-{}", std::process::id()));
+        let backend =
+            TmuxRuntime::isolated(format!("repomon-control-close-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         backend.spawn(1, dir.path(), "sh").unwrap();
         backend.spawn(2, dir.path(), "sh").unwrap();
@@ -2198,9 +2187,6 @@ mod tests {
         );
 
         backend.kill_named("lane-1").unwrap();
-        let _ = Command::new(tmux_program())
-            .args(backend.full_args(&["kill-server"]))
-            .output();
     }
 
     #[test]
@@ -2209,7 +2195,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-ownertest-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-ownertest-{}", std::process::id()));
         // A server must exist before server options can be set - spawn a throwaway window.
         rt.spawn(1, &std::env::temp_dir(), "sh -c 'sleep 30'")
             .unwrap();
@@ -2233,10 +2219,6 @@ mod tests {
             rt.claim_or_verify_owner("daemon-A"),
             "owner still owns after B's attempt"
         );
-
-        let _ = Command::new("tmux")
-            .args(rt.full_args(&["kill-server"]))
-            .output();
     }
 
     /// The session's currently-active window name (the one an attached `tmux attach` client
@@ -2262,7 +2244,7 @@ mod tests {
             eprintln!("tmux not available; skipping live runtime test");
             return;
         }
-        let rt = TmuxRuntime::new(format!("repomon-activetest-{}", std::process::id()));
+        let rt = TmuxRuntime::isolated(format!("repomon-activetest-{}", std::process::id()));
         let cwd = std::env::temp_dir();
 
         rt.spawn(1, &cwd, "sh -c 'sleep 30'").unwrap();
@@ -2301,10 +2283,6 @@ mod tests {
             Some("lane-1"),
             "a terminal window stole the session's active window"
         );
-
-        let _ = Command::new(tmux_program())
-            .args(rt.full_args(&["kill-server"]))
-            .output();
     }
 
     #[test]

@@ -2,13 +2,16 @@
 //! orchestrators. Fake executables avoid provider dependencies; process isolation protects
 //! environment changes.
 
-use std::process::Command;
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::json;
 
 /// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
@@ -59,7 +62,7 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
         .to_string_lossy()
         .into_owned();
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock =
         std::env::temp_dir().join(format!("repomon-orch-codex-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
@@ -126,9 +129,4 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }

@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use repomon_core::{Config, Store};
 use repomon_daemon::Ctx;
+mod runtime;
+use runtime::TestCtx;
 
 static NEXT_NAMESPACE: AtomicU64 = AtomicU64::new(0);
 
@@ -44,7 +46,7 @@ impl Fixture {
                     .into_owned(),
             );
         }
-        let ctx = Ctx::new_with_paths(
+        let ctx = TestCtx::new_with_paths(
             store,
             config,
             db,

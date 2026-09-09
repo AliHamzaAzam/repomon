@@ -448,9 +448,8 @@ mod tests {
         Ctx::new(store, config, None)
     }
 
-    /// Like [`test_ctx`] but pinned to a throwaway tmux `-L` session, for tests that spawn real
-    /// windows: `Config::default()`'s `tmux_session` is `"repomon"`, the real daemon's session, so
-    /// any test that actually talks to tmux must never use it.
+    /// Like [`test_ctx`] with a distinct session name for tests that spawn real windows.
+    /// Unit contexts own private temporary tmux socket paths regardless of session name.
     async fn test_ctx_with_tmux(home: &Path, tmux_session: String) -> Arc<Ctx> {
         let store = Store::open_in_memory().unwrap();
         let mut config = Config {
@@ -461,8 +460,7 @@ mod tests {
         Ctx::new(store, config, None)
     }
 
-    /// A tmux `-L` session name unique to this test run, so parallel tests (and parallel CI
-    /// runs) never collide or touch the operator's real `repomon` session.
+    /// A session name unique to this test run, for readable diagnostics.
     fn unique_tmux_session(tag: &str) -> String {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -470,14 +468,6 @@ mod tests {
             "repomon-primary-window-it-{tag}-{}-{seq}",
             std::process::id()
         )
-    }
-
-    fn kill_tmux_session(session: &str) {
-        let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .arg("-S")
-            .arg(repomon_core::agent::tmux_socket::managed_socket(session))
-            .arg("kill-server")
-            .output();
     }
 
     #[tokio::test]
@@ -783,8 +773,6 @@ mod tests {
             Some(w1),
             "the record must be corrected to the live window"
         );
-
-        kill_tmux_session(&session);
     }
 
     /// Two live controller sessions in the lane (the operator deliberately ran Spawn to add a
@@ -825,7 +813,6 @@ mod tests {
         assert_eq!(ctx.controller_lane_window().await, Some(w2));
 
         let _ = w1;
-        kill_tmux_session(&session);
     }
 
     /// No live session in the controller lane at all - the recorded window is stale and nothing
@@ -856,7 +843,5 @@ mod tests {
 
         let resolved = primary_window(&ctx, lane_id).await.unwrap();
         assert_eq!(resolved, None, "no live session must resolve to None");
-
-        kill_tmux_session(&session);
     }
 }

@@ -1,9 +1,12 @@
 //! One test in its own process so its fixture cache environment cannot race other test cases.
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use chrono::{TimeZone, Utc};
 use repomon_core::usage_ledger::UsageEvent;
 use repomon_core::{Config, Store};
 use repomon_daemon::{
-    Ctx,
     conn::{ConnKind, ConnSession},
     rpc::dispatch,
 };
@@ -59,7 +62,7 @@ async fn cached_snapshot_and_undated_overrides_reprice_historical_summary() {
         .unwrap();
     let config = Config::default();
     assert!(config.usage.refresh_prices);
-    let ctx = Ctx::new_with_config_path(store, config, None, dir.path().join("config.toml"));
+    let ctx = TestCtx::new_with_config_path(store, config, None, dir.path().join("config.toml"));
     let sess = Arc::new(ConnSession::new(1, ConnKind::Local));
     let params = json!({ "range": "custom", "since": "2026-09-01T00:00:00Z",
         "until": "2026-09-02T00:00:00Z", "group_by": "model" });

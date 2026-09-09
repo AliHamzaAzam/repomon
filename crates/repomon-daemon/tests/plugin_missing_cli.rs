@@ -1,12 +1,16 @@
 //! Isolates missing-CLI discovery because successful CLAUDE_CLI discovery is cached for the process
 //! lifetime.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::json;
 
 async fn connect_retry(sock: &std::path::Path) -> IpcStream {
@@ -41,7 +45,7 @@ async fn plugin_update_reports_missing_cli() {
     unsafe { std::env::set_var("REPOMON_CLAUDE_BIN", "/nonexistent/claude-missing-xyz") };
 
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, Config::default(), None);
+    let ctx = TestCtx::create(store, Config::default(), None);
     let sock = std::env::temp_dir().join(format!("repomon-ext3-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let server = {

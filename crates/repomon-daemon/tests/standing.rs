@@ -2,10 +2,14 @@
 //! Runs use a fake agent command (a plain `echo`), which shares the custom-agent code path
 //! with real runs; the claude-flag composition is unit-tested in the daemon crate.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, standing};
+use repomon_daemon::standing;
 
 #[tokio::test]
 async fn run_bounded_captures_stdout_and_stderr() {
@@ -51,7 +55,7 @@ async fn scheduler_fires_due_schedules_once_and_journals() {
         .join("repomind")
         .to_string_lossy()
         .into_owned();
-    let ctx = Ctx::new_with_paths(
+    let ctx = TestCtx::new_with_paths(
         store,
         config,
         None,

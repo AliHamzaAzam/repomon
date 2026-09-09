@@ -320,7 +320,7 @@ mod tests {
     fn live_agent_cwds_defaults_to_probe_unavailable() {
         // Backends without an authoritative process view (tmux) answer `None`, which the
         // daemon's liveness probe already treats as "don't filter" - the safe degradation.
-        let rt = TmuxRuntime::new("repomon-live-cwds-test");
+        let rt = TmuxRuntime::isolated("repomon-live-cwds-test");
         assert!(rt.live_agent_cwds().is_none());
     }
 }

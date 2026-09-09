@@ -1,14 +1,17 @@
 //! Tests orchestrator spawn, adoption, autonomy bookkeeping, and reconciliation with fixture
 //! processes rather than live agents.
 
-use std::process::Command;
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::time::Duration;
 
 use repomon_core::agent::backend::SpawnSpec;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::json;
 
 /// Connect to the daemon's IPC endpoint, retrying while it binds. (A socket-file existence
@@ -45,8 +48,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         eprintln!("tmux not available; skipping orchestrator lifecycle test");
         return;
     }
-    // A unique tmux session (name doubles as the `-L` socket) so parallel CI runs never collide
-    // and we never touch the user's real `repomon` session.
+    // A distinct session name for diagnostics; TestCtx owns private temporary socket paths.
     let session = format!("repomon-orch-lifecycle-it-{}", std::process::id());
     // A throwaway repomind home: `orchestrator.start` ensures the home repo exists, and a test
     // must never create or touch the developer's real `~/repomind`.
@@ -61,7 +63,7 @@ async fn orchestrator_adopts_a_surviving_window() {
         .to_string_lossy()
         .into_owned();
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock = std::env::temp_dir().join(format!(
         "repomon-orch-lifecycle-it-{}.sock",
         std::process::id()
@@ -235,9 +237,4 @@ async fn orchestrator_adopts_a_surviving_window() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }

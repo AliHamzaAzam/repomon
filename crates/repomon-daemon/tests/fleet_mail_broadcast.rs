@@ -2,13 +2,17 @@
 //! explicit self-address is allowed. Process isolation protects environment changes; tmux-dependent
 //! cases skip when tmux is unavailable.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
@@ -214,7 +218,7 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock =
         std::env::temp_dir().join(format!("repomon-broadcast-it-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
@@ -565,11 +569,6 @@ async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_u
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
     unsafe {
         match old_path {
             Some(p) => std::env::set_var("PATH", p),

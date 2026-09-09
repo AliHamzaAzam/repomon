@@ -1,13 +1,17 @@
 //! Verifies that broadcast replies are accepted only by the reverse partner of the parent message.
 //! Process isolation protects environment changes and sender rate-limit budgets.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::process::Command;
 use std::time::Duration;
 
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store, TmuxRuntime};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 
 async fn connect_retry(sock: &std::path::Path) -> IpcStream {
@@ -110,7 +114,7 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
         ..Default::default()
     };
     let store = Store::open_in_memory().unwrap();
-    let ctx = Ctx::new(store, config, None);
+    let ctx = TestCtx::create(store, config, None);
     let sock = std::env::temp_dir().join(format!(
         "repomon-broadcast-reply-it-{}.sock",
         std::process::id()
@@ -225,11 +229,6 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
 
     server.abort();
     let _ = std::fs::remove_file(&sock);
-    let _ = Command::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
     unsafe {
         match old_path {
             Some(p) => std::env::set_var("PATH", p),

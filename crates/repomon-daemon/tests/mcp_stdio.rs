@@ -2,6 +2,10 @@
 //! in-process daemon. This is the orchestrator's actual transport, so it's the one place we
 //! exercise the whole chain: daemon socket -> `repomond mcp` -> newline-delimited JSON-RPC.
 
+#[path = "common/runtime.rs"]
+mod runtime;
+use runtime::TestCtx;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
@@ -10,7 +14,7 @@ use std::time::Duration;
 use repomon_core::protocol::{self, Request, Response};
 use repomon_core::transport::{self, Endpoint, IpcStream};
 use repomon_core::{Config, Store};
-use repomon_daemon::{Ctx, serve};
+use repomon_daemon::serve;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -84,7 +88,7 @@ async fn boot_daemon_cfg(tag: &str, mut config: Config) -> (PathBuf, IpcStream, 
         .join("repomind")
         .to_string_lossy()
         .into_owned();
-    let ctx = Ctx::new_with_paths(
+    let ctx = TestCtx::new_with_paths(
         store,
         config,
         None,
@@ -668,8 +672,7 @@ async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
         eprintln!("tmux not available; skipping spawn_agent notes-embed test");
         return;
     }
-    // A unique tmux session (name doubles as the `-L` socket) so parallel CI runs never collide
-    // and we never touch the user's real `repomon` session.
+    // A distinct session name for diagnostics; TestCtx owns private temporary socket paths.
     let session = format!("repomon-notes-embed-it-{}", std::process::id());
     let mut config = Config {
         tmux_session: session.clone(),
@@ -737,11 +740,6 @@ async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
 
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);
-    let _ = StdCommand::new(repomon_core::agent::tmux_program())
-        .arg("-S")
-        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
-        .arg("kill-server")
-        .output();
 }
 
 /// Spawn an MCP child, initialize it, and return (child, stdin, stdout-lines).
