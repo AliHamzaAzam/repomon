@@ -165,6 +165,10 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && !fleetStarted) {
       fleetStarted = true;
       fleet.start();
+      // `?home=1` is read only by the qa/ screenshot harness (vite.screenshot.config.ts), to
+      // land on the home screen instead of the auto-selected first lane; an ordinary launch
+      // never carries it.
+      if (new URLSearchParams(location.search).get("home") === "1") fleet.selectHome();
       void daemonCall("config.get")
         .then((config) => {
           if (config.theme && typeof config.theme === "string") {

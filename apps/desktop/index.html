@@ -8,7 +8,11 @@
     <title>Repomon</title>
     <script>
       (() => {
-        const saved = localStorage.getItem("repomon-theme") || "system";
+        // `?theme=` is read only by the qa/ screenshot harness (vite.screenshot.config.ts); an
+        // ordinary launch never carries it, so this is a no-op outside that harness.
+        const requested = new URLSearchParams(location.search).get("theme");
+        if (requested) localStorage.setItem("repomon-theme", requested);
+        const saved = requested || localStorage.getItem("repomon-theme") || "system";
         const dark =
           saved === "dark" ||
           (saved === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
