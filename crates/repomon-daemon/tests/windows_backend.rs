@@ -241,7 +241,7 @@ fn byte_stream_replays_then_follows_live_output() {
     wait_for("live frames", || text(&got).contains("STREAM_LIVE"));
 
     // Closing the stream ends the channel, which ends the consumer loop.
-    b.close_byte_stream("lane-1").unwrap();
+    b.close_byte_stream("lane-1", stream.tag).unwrap();
     wait_for("stream closed", || {
         done.load(std::sync::atomic::Ordering::Relaxed)
     });

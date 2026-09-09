@@ -1431,6 +1431,7 @@ impl SessionBackend for TmuxRuntime {
             command.env(key, value);
         }
         let mut child = command.spawn().map_err(Error::Io)?;
+        tracing::debug!(window, tag, pid = child.id(), "control stream opened");
         let input = child
             .stdin
             .take()
@@ -1454,13 +1455,14 @@ impl SessionBackend for TmuxRuntime {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
             let mut line = Vec::new();
-            loop {
+            let reason = loop {
                 line.clear();
-                let Ok(read) = reader.read_until(b'\n', &mut line) else {
-                    break;
+                let read = match reader.read_until(b'\n', &mut line) {
+                    Ok(read) => read,
+                    Err(error) => break format!("read error: {error}"),
                 };
                 if read == 0 {
-                    break;
+                    break "stdout EOF".to_string();
                 }
                 while matches!(line.last(), Some(b'\n' | b'\r')) {
                     line.pop();
@@ -1468,12 +1470,14 @@ impl SessionBackend for TmuxRuntime {
                 match parse_control_event(&line, &window_id, &pane_id) {
                     Some(ControlEvent::Stream(event)) => match tx.send(event) {
                         Ok(()) => {}
-                        Err(_) => break,
+                        Err(_) => break "receiver dropped".to_string(),
                     },
-                    Some(ControlEvent::Closed) => break,
+                    Some(ControlEvent::Closed) => break "target window closed".to_string(),
                     _ => {}
                 }
-            }
+            };
+            let status = child.try_wait().ok().flatten();
+            tracing::debug!(window = %stream_window, tag, %reason, ?status, "control stream ended");
             let _ = child.kill();
             let _ = child.wait();
             let mut streams = streams.lock().expect("control streams lock");
@@ -1484,21 +1488,34 @@ impl SessionBackend for TmuxRuntime {
                 streams.remove(&stream_window);
             }
         });
-        Ok(ByteStream { rx })
+        Ok(ByteStream { tag, rx })
     }
 
-    fn close_byte_stream(&self, window: &str) -> Result<()> {
-        if let Some(mut stream) = self
-            .streams
-            .lock()
-            .expect("control streams lock")
-            .remove(window)
-        {
+    fn close_byte_stream(&self, window: &str, tag: u64) -> Result<()> {
+        let stream = {
+            let mut streams = self.streams.lock().expect("control streams lock");
+            if streams.get(window).is_some_and(|stream| stream.tag == tag) {
+                streams.remove(window)
+            } else {
+                None
+            }
+        };
+        // No registry lock or tmux subprocess during teardown. This input belongs only to the
+        // removed generation, so a concurrent replacement cannot be detached by this close.
+        if let Some(mut stream) = stream {
             let _ = stream.input.write_all(b"detach-client\n");
             let _ = stream.input.flush();
         }
-        // Also clean up a pipe from a daemon version that predates control-mode streaming.
-        self.pipe_pane_off_named(window)
+        Ok(())
+    }
+
+    fn sweep_legacy_byte_streams(&self) -> Result<()> {
+        // pipe-pane is independent of control-mode clients. Never close by window name here:
+        // subscriptions may already have opened their own control stream during startup.
+        for window in self.list_windows()? {
+            let _ = self.pipe_pane_off_named(&window);
+        }
+        Ok(())
     }
 }
 
@@ -2084,6 +2101,47 @@ mod tests {
         rt.kill_named("lane-1").unwrap();
     }
 
+    // Reuse the control-stream test's runtime so this regression inherits the fixture's socket
+    // selection and cleanup, including isolated sockets.
+    fn assert_stale_close_and_legacy_sweep_preserve_replacement(backend: &TmuxRuntime) {
+        let first = backend.open_byte_stream("lane-1").unwrap();
+        let mut replacement = backend.open_byte_stream("lane-1").unwrap();
+        assert_ne!(first.tag, replacement.tag);
+        backend.close_byte_stream("lane-1", first.tag).unwrap();
+        backend.sweep_legacy_byte_streams().unwrap();
+        assert_eq!(
+            backend.streams.lock().unwrap()["lane-1"].tag,
+            replacement.tag
+        );
+        backend
+            .send_text_named("lane-1", "printf TAG_SURVIVED")
+            .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let survived = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(event) = replacement.rx.recv().await {
+                    if let ByteStreamEvent::Bytes(bytes) = event
+                        && bytes
+                            .windows(b"TAG_SURVIVED".len())
+                            .any(|part| part == b"TAG_SURVIVED")
+                    {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        });
+        backend
+            .close_byte_stream("lane-1", replacement.tag)
+            .unwrap();
+        assert!(
+            survived,
+            "stale teardown or legacy sweep closed the replacement"
+        );
+    }
+
     #[test]
     fn control_stream_orders_grid_before_new_size_output_and_ignores_client_size() {
         if !TmuxRuntime::available() {
@@ -2093,6 +2151,7 @@ mod tests {
         let backend = TmuxRuntime::isolated(format!("repomon-controltest-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         backend.spawn(1, dir.path(), "sh").unwrap();
+        assert_stale_close_and_legacy_sweep_preserve_replacement(&backend);
         backend.resize_named("lane-1", 100, 30).unwrap();
         let before = backend.size_named("lane-1");
 
@@ -2133,7 +2192,7 @@ mod tests {
         });
         assert!(ordered, "new-grid output arrived before its layout change");
 
-        backend.close_byte_stream("lane-1").unwrap();
+        backend.close_byte_stream("lane-1", stream.tag).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let clients = backend
             .run_allow_absent(&["list-clients", "-F", "#{client_control_mode}"])

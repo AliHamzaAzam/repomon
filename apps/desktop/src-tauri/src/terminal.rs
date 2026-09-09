@@ -209,10 +209,13 @@ fn append_pending(pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
 
 fn log_term_trace(tag: &str, window: &str, seq: Option<u64>, bytes: &[u8]) {
     use std::io::Write;
+    let Some(path) = std::env::var_os("REPOMON_TERMINAL_TRACE") else {
+        return;
+    };
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/repomon-terminal-trace.log")
+        .open(path)
     else {
         return;
     };
@@ -425,6 +428,9 @@ pub async fn term_watch(
     window: String,
     on_bytes: Channel<InvokeResponseBody>,
 ) -> Result<TermWatchAck, RpcFailure> {
+    if std::env::var_os("REPOMON_ENERGY_TRACE").is_some() {
+        eprintln!("energy agent.watch_bytes on {window}");
+    }
     // Complete stale-watch teardown before joining again so delayed cleanup cannot deregister the
     // replacement watch.
     let stale = state.terminal_watches.lock().unwrap().remove(&window);
@@ -586,7 +592,7 @@ pub async fn term_watch(
                     Err(broadcast::error::RecvError::Lagged(_)) => resync = true,
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
-                _ = ticker.tick() => {
+                _ = ticker.tick(), if resync || !pending.is_empty() => {
                     if resync {
                         if last_resync.elapsed() < RESYNC_RETRY {
                             continue;

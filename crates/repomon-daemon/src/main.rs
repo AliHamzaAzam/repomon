@@ -166,6 +166,7 @@ async fn start_background_tasks(ctx: Arc<Ctx>) {
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
     // Clear unread pipe-panes so tmux cannot buffer their output indefinitely.
+    // Legacy pipe cleanup cannot close control streams and does not gate RPC accept.
     tokio::spawn(repomon_daemon::bytes_stream::sweep(ctx.backend.clone()));
 
     // Stream the repomind orchestrator's pane to a watching command-center view (self-gates on a

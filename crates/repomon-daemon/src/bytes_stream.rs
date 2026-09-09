@@ -23,6 +23,8 @@ pub struct WatchEntry {
     /// Globally-unique tag for THIS stream instance; guards EOF cleanup against a stop→restart
     /// race (see the module doc).
     pub generation: u64,
+    /// Backend stream identity, used to close only the generation this entry owns.
+    pub backend_tag: u64,
     /// Last raw PTY chunk accepted from this generation.
     pub sequence: Arc<AtomicU64>,
     /// Last pane grid observed by either a mediated resize or the byte-watch grid probe.
@@ -98,6 +100,7 @@ pub async fn watch(
     // Hold the lock across setup: a concurrent watcher of the SAME window must either join the
     // entry we create or wait and find it - never start a second stream (the backend allows only
     // one per window).
+    tracing::debug!(%window, conn_id, "byte watch requested");
     let mut map = watches.lock().await;
     if let Some(entry) = map.get_mut(&window) {
         entry.refs.insert(conn_id);
@@ -126,6 +129,7 @@ pub async fn watch(
             lane,
             refs: HashSet::from([conn_id]),
             generation,
+            backend_tag: stream.tag,
             sequence: sequence.clone(),
             grid: initial_grid,
         },
@@ -186,6 +190,7 @@ pub async fn watch(
                     let _ = forward_events.send(value); // Err = no subscribers; fine
                 }
             }
+            tracing::debug!(window = %forward_window, generation, "byte forwarder EOF");
             let closed_current = {
                 let mut map = forward_watches.lock().await;
                 if eof_entry_is_current(&map, &forward_window, generation) {
@@ -233,63 +238,278 @@ pub async fn unwatch(
     window: &str,
     conn_id: u64,
 ) {
-    let mut map = watches.lock().await;
-    let Some(entry) = map.get_mut(window) else {
-        return;
+    let entry = {
+        let mut map = watches.lock().await;
+        let Some(entry) = map.get_mut(window) else {
+            return;
+        };
+        if !release_ref(entry, conn_id) {
+            return; // other connections still share this window's stream
+        }
+        map.remove(window)
+            .expect("entry present under the same lock")
     };
-    if !release_ref(entry, conn_id) {
-        return; // other connections still share this window's stream
-    }
-    map.remove(window)
-        .expect("entry present under the same lock");
-    drop(map);
+    tracing::debug!(window, conn_id, "byte watch last subscriber left");
     let backend = backend.clone();
     let win = window.to_string();
-    let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&win)).await;
+    let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&win, entry.backend_tag))
+        .await;
 }
 
 /// Release `conn_id` from EVERY window it watches, closing the streams that thereby empty. Called
 /// from `Ctx::close_session` so a connection's byte watches die with it, whatever it was watching.
 pub async fn unwatch_all(backend: &Arc<dyn SessionBackend>, watches: &Watches, conn_id: u64) {
-    let mut stopped: Vec<String> = Vec::new();
+    let mut stopped = Vec::new();
     {
         let mut map = watches.lock().await;
         map.retain(|window, entry| {
             if release_ref(entry, conn_id) {
-                stopped.push(window.clone());
+                stopped.push((window.clone(), entry.backend_tag));
                 false
             } else {
                 true
             }
         });
     }
-    for window in stopped {
+    let mut closes = tokio::task::JoinSet::new();
+    for (window, tag) in stopped {
         let backend = backend.clone();
-        let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&window)).await;
+        closes.spawn_blocking(move || backend.close_byte_stream(&window, tag));
     }
+    while closes.join_next().await.is_some() {}
 }
 
-/// Startup sweep: close the byte stream on every window of our session. A daemon that died with
-/// a watch active leaves the backend's pipe running with no reader - on tmux that makes the
-/// server buffer the pane's output in memory without bound.
+/// Startup cleanup for legacy plumbing only. It cannot close any current stream generation and
+/// runs independently of RPC accept, so an unresponsive backend cannot gate daemon startup.
 pub async fn sweep(backend: Arc<dyn SessionBackend>) {
-    let _ = tokio::task::spawn_blocking(move || {
-        for w in backend.list_windows().unwrap_or_default() {
-            let _ = backend.close_byte_stream(&w);
-        }
-    })
-    .await;
+    let _ = tokio::task::spawn_blocking(move || backend.sweep_legacy_byte_streams()).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use repomon_core::agent::backend::{
+        AttachCommand, ByteStream, CaptureOpts, OwnerState, ScrollEvent, SpawnSpec, WindowActivity,
+    };
+    use std::sync::{Condvar, Mutex as StdMutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct ScriptedBackend {
+        opens: AtomicU64,
+        senders:
+            StdMutex<HashMap<String, (u64, tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>)>>,
+        closing: tokio::sync::Notify,
+        block_close: StdMutex<bool>,
+        close_gate: Condvar,
+    }
+    impl SessionBackend for ScriptedBackend {
+        fn available(&self) -> bool {
+            true
+        }
+        fn label(&self) -> String {
+            "scripted".to_string()
+        }
+        fn session_exists(&self) -> bool {
+            true
+        }
+        fn claim_or_verify_owner(&self, _me: &str) -> OwnerState {
+            OwnerState::Owned
+        }
+        fn list_windows(&self) -> repomon_core::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn list_windows_with_activity(&self) -> repomon_core::Result<Vec<WindowActivity>> {
+            Ok(vec![])
+        }
+        fn spawn(&self, _lane: LaneId, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn spawn_named(&self, _window: &str, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn open_named(
+            &self,
+            _window: &str,
+            _cwd: &std::path::Path,
+        ) -> repomon_core::Result<String> {
+            Ok("target".into())
+        }
+        fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
+            Ok(String::new())
+        }
+        fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
+            Some(repomon_core::agent::Cursor { col: 0, row: 0 })
+        }
+        fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
+            Some((80, 24))
+        }
+        fn resize_named(&self, _window: &str, _cols: u16, _rows: u16) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn follow_client_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn alternate_on_named(&self, _window: &str) -> bool {
+            false
+        }
+        fn scroll_wheel_named(
+            &self,
+            _window: &str,
+            _event: ScrollEvent,
+        ) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_literal_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_text_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn send_key_named(&self, _window: &str, _key: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn kill_named(&self, _window: &str) -> repomon_core::Result<()> {
+            Ok(())
+        }
+        fn configure(&self) {}
+        fn target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn exact_target_named(&self, window: &str) -> String {
+            window.to_string()
+        }
+        fn attach_command(&self, target: &str) -> AttachCommand {
+            AttachCommand {
+                program: "tmux".into(),
+                args: vec!["attach".into(), "-t".into(), target.into()],
+            }
+        }
+        fn open_byte_stream(&self, window: &str) -> repomon_core::Result<ByteStream> {
+            let tag = self.opens.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.senders
+                .lock()
+                .unwrap()
+                .insert(window.to_string(), (tag, tx));
+            Ok(ByteStream { tag, rx })
+        }
+        fn close_byte_stream(&self, window: &str, tag: u64) -> repomon_core::Result<()> {
+            self.closing.notify_one();
+            let mut blocked = self.block_close.lock().unwrap();
+            while *blocked && window == "A" {
+                blocked = self.close_gate.wait(blocked).unwrap();
+            }
+            let mut senders = self.senders.lock().unwrap();
+            if senders
+                .get(window)
+                .is_some_and(|(current, _)| *current == tag)
+            {
+                senders.remove(window);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_subscribers_share_one_long_lived_stream_per_window() {
+        let scripted = Arc::new(ScriptedBackend::default());
+        let backend: Arc<dyn SessionBackend> = scripted.clone();
+        let watches = Watches::default();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let first = watch(backend.clone(), events.clone(), &watches, 1, "A".into(), 1)
+            .await
+            .unwrap();
+        for _ in 0..10 {
+            let joined = watch(backend.clone(), events.clone(), &watches, 1, "A".into(), 2)
+                .await
+                .unwrap();
+            assert_eq!(joined, first);
+            tokio::task::yield_now().await;
+        }
+        watch(backend.clone(), events.clone(), &watches, 1, "B".into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(scripted.opens.load(Ordering::SeqCst), 2);
+        unwatch(&backend, &watches, "A", 1).await;
+        scripted.senders.lock().unwrap()["A"]
+            .1
+            .send(ByteStreamEvent::Bytes(b"still live".to_vec()))
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["params"]["generation"], first.generation);
+        assert_eq!(event["params"]["sequence"], 1);
+        assert_eq!(scripted.opens.load(Ordering::SeqCst), 2);
+        unwatch_all(&backend, &watches, 1).await;
+        assert!(cursor(&watches, "A").await.is_some());
+        unwatch_all(&backend, &watches, 2).await;
+        assert!(watches.lock().await.is_empty());
+    }
+
+    async fn teardown_cannot_close_replacement(disconnect: bool) {
+        let scripted = Arc::new(ScriptedBackend::default());
+        let backend: Arc<dyn SessionBackend> = scripted.clone();
+        let watches = Watches::default();
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        watch(backend.clone(), events.clone(), &watches, 1, "A".into(), 1)
+            .await
+            .unwrap();
+        *scripted.block_close.lock().unwrap() = true;
+        let closer = {
+            let backend = backend.clone();
+            let watches = watches.clone();
+            tokio::spawn(async move {
+                if disconnect {
+                    unwatch_all(&backend, &watches, 1).await;
+                } else {
+                    unwatch(&backend, &watches, "A", 1).await;
+                }
+            })
+        };
+        scripted.closing.notified().await;
+        // The close-entered handshake above proves teardown is blocked. Require positive
+        // completion of unrelated registry operations and the replacement before releasing it;
+        // a task that never gets scheduled cannot make this test pass.
+        let raced = tokio::time::timeout(Duration::from_secs(2), async {
+            watch(backend.clone(), events.clone(), &watches, 1, "B".into(), 3)
+                .await
+                .unwrap();
+            assert_eq!(note_grid(&watches, "B", None, (100, 30)).await, Some(true));
+            unwatch(&backend, &watches, "B", 3).await;
+            watch(backend.clone(), events, &watches, 1, "A".into(), 2).await
+        })
+        .await;
+        *scripted.block_close.lock().unwrap() = false;
+        scripted.close_gate.notify_all();
+        closer.await.unwrap();
+        let replacement = raced
+            .expect("blocked close stalled registry operations")
+            .unwrap();
+        assert!(scripted.senders.lock().unwrap().contains_key("A"));
+        assert_eq!(cursor(&watches, "A").await, Some(replacement));
+        unwatch_all(&backend, &watches, 2).await;
+    }
+
+    #[tokio::test]
+    async fn last_unwatch_cannot_close_a_concurrent_replacement() {
+        teardown_cannot_close_replacement(false).await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_cannot_close_a_concurrent_replacement() {
+        teardown_cannot_close_replacement(true).await;
+    }
+
     fn entry(refs: &[u64], generation: u64) -> WatchEntry {
         WatchEntry {
             lane: 1,
             refs: refs.iter().copied().collect(),
             generation,
+            backend_tag: generation,
             sequence: Arc::new(AtomicU64::new(0)),
             grid: Some((80, 24)),
         }

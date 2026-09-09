@@ -4200,6 +4200,7 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?;
                 sess.watched_bytes.lock().unwrap().insert(window.clone());
+                ctx.capture_wake.notify_one();
                 // Return the pane grid so a remote emulator can match it without resizing a
                 // simultaneously attached TUI.
                 let tmux = ctx.backend.clone();
@@ -4234,6 +4235,7 @@ pub async fn dispatch(
                 crate::bytes_stream::unwatch(&ctx.backend, &ctx.bytes_watches, &window, sess.id)
                     .await;
                 sess.watched_bytes.lock().unwrap().remove(&window);
+                ctx.capture_wake.notify_one();
             }
             Ok(Value::Null)
         }
@@ -4765,6 +4767,7 @@ pub async fn dispatch(
             *sess.viewport_focus_at.lock().await = Some(std::time::Instant::now());
             *sess.viewport_windows.lock().await = p.windows;
             ctx.reconcile_lane_watchers().await;
+            ctx.capture_wake.notify_one();
             Ok(Value::Null)
         }
 
@@ -5074,6 +5077,7 @@ pub async fn dispatch(
                         backend,
                     };
                     *orch = Some(session);
+                    ctx.orchestrator_capture_wake.notify_one();
                     let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
                     let status =
                         orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
@@ -5203,6 +5207,7 @@ pub async fn dispatch(
                 backend,
             };
             *orch = Some(session);
+            ctx.orchestrator_capture_wake.notify_one();
             let (attention, headline) = ctx.orchestrator_attention.lock().await.clone();
             let status = orchestrator_status_value(orch.as_ref(), &attention, headline.as_deref());
             ctx.broadcast(crate::pubsub::topic::ORCHESTRATOR_STATUS, status.clone());
@@ -5512,6 +5517,7 @@ pub async fn dispatch(
             warn_deprecated_orchestrator_rpc("orchestrator.watch", "viewport.set");
             let p: OrchestratorWatch = parse(params)?;
             *sess.orchestrator_watched.lock().await = p.on;
+            ctx.orchestrator_capture_wake.notify_one();
             Ok(Value::Null)
         }
         // Size the orchestrator window to the viewer's pane so the streamed capture fills it exactly

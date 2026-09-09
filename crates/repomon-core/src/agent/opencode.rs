@@ -1,8 +1,10 @@
 //! Reads OpenCode sessions from SQLite after validating required tables and columns, returning no
 //! summary for incompatible schemas.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OpenFlags, params};
@@ -58,23 +60,109 @@ fn same_path(left: &Path, right: &Path) -> bool {
         == right.canonicalize().unwrap_or_else(|_| right.to_path_buf())
 }
 
+type FileStamp = Option<(SystemTime, u64)>;
+
+fn file_stamp(path: &Path) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn database_stamp(path: &Path) -> (FileStamp, FileStamp) {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    (file_stamp(path), file_stamp(Path::new(&wal)))
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct SummaryKey {
+    path: PathBuf,
+    cwd: PathBuf,
+    within: Duration,
+    max: usize,
+}
+
+struct SummaryEntry {
+    stamp: (FileStamp, FileStamp),
+    summaries: Vec<TranscriptSummary>,
+}
+
+/// Reuse unchanged database reads. Opening even a read-only SQLite connection can rebuild the
+/// WAL shared-memory index, so avoid opening it once per lane on every idle overlay tick.
 pub fn summaries_for(cwd: &Path, within: Duration, max: usize) -> Vec<TranscriptSummary> {
-    let path = database_path();
+    summaries_at(&database_path(), cwd, within, max)
+}
+
+fn summaries_at(path: &Path, cwd: &Path, within: Duration, max: usize) -> Vec<TranscriptSummary> {
+    static CACHE: OnceLock<Mutex<HashMap<SummaryKey, SummaryEntry>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Mutex::default);
+    let key = SummaryKey {
+        path: path.into(),
+        cwd: cwd.into(),
+        within,
+        max,
+    };
+    let stamp = database_stamp(path);
+    // A missing database has no sessions and must not be created by observation.
+    if stamp.0.is_none() {
+        return Vec::new();
+    }
+    let mut entries = cache.lock().unwrap_or_else(|error| error.into_inner());
+    let summaries = if let Some(entry) = entries.get(&key).filter(|entry| entry.stamp == stamp) {
+        entry.summaries.clone()
+    } else {
+        let Some(summaries) = read_summaries(path, cwd, within, max) else {
+            return Vec::new();
+        };
+        // A concurrent commit must cause another read on the next overlay.
+        if database_stamp(path) == stamp {
+            if entries.len() >= 256 {
+                entries.clear();
+            }
+            entries.insert(
+                key,
+                SummaryEntry {
+                    stamp,
+                    summaries: summaries.clone(),
+                },
+            );
+        }
+        summaries
+    };
+    drop(entries);
+    let now = Utc::now();
+    summaries
+        .into_iter()
+        .filter(|summary| now - summary.last_activity <= within)
+        .map(|mut summary| {
+            if now - summary.last_activity > IDLE_AFTER {
+                summary.status = AgentStatus::Idle;
+            }
+            summary
+        })
+        .collect()
+}
+
+fn read_summaries(
+    path: &Path,
+    cwd: &Path,
+    within: Duration,
+    max: usize,
+) -> Option<Vec<TranscriptSummary>> {
     let Ok(conn) = Connection::open_with_flags(
-        &path,
+        path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) else {
-        return Vec::new();
+        return None;
     };
     if !compatible(&conn) {
-        return Vec::new();
+        return None;
     }
     let cutoff = (Utc::now() - within).timestamp_millis();
     let Ok(mut statement) = conn.prepare(
         "SELECT id, directory, title, time_updated FROM session \
          WHERE time_archived IS NULL AND time_updated >= ?1 ORDER BY time_updated DESC",
     ) else {
-        return Vec::new();
+        return None;
     };
     let Ok(rows) = statement.query_map(params![cutoff], |row| {
         Ok((
@@ -84,13 +172,15 @@ pub fn summaries_for(cwd: &Path, within: Duration, max: usize) -> Vec<Transcript
             row.get::<_, i64>(3)?,
         ))
     }) else {
-        return Vec::new();
+        return None;
     };
-    rows.flatten()
-        .filter(|(_, directory, _, _)| same_path(Path::new(directory), cwd))
-        .take(max)
-        .filter_map(|(id, _, title, updated)| summarize(&conn, &path, id, title, updated))
-        .collect()
+    Some(
+        rows.flatten()
+            .filter(|(_, directory, _, _)| same_path(Path::new(directory), cwd))
+            .take(max)
+            .filter_map(|(id, _, title, updated)| summarize(&conn, path, id, title, updated))
+            .collect(),
+    )
 }
 
 pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
@@ -202,6 +292,32 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_summaries_follow_wal_commits_and_database_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        fixture(&db, dir.path());
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let read = || summaries_at(&db, dir.path(), Duration::hours(6), 10);
+        assert_eq!(read()[0].title.as_deref(), Some("Fix tests"));
+        conn.execute("UPDATE session SET title = 'changed in WAL'", [])
+            .unwrap();
+        assert_eq!(read()[0].title.as_deref(), Some("changed in WAL"));
+        assert_eq!(read()[0].title.as_deref(), Some("changed in WAL"));
+        conn.execute(
+            "UPDATE session SET time_updated = ?1",
+            params![(Utc::now() - Duration::minutes(3)).timestamp_millis()],
+        )
+        .unwrap();
+        assert_eq!(read()[0].status, AgentStatus::Idle);
+        drop(conn);
+        std::fs::remove_file(&db).unwrap();
+        assert!(read().is_empty());
+        fixture(&db, dir.path());
+        assert_eq!(read()[0].title.as_deref(), Some("Fix tests"));
+    }
 
     /// Serialize all environment access in these tests so path overrides cannot race parallel
     /// readers.

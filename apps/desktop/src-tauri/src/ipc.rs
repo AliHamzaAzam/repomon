@@ -53,6 +53,9 @@ pub async fn daemon_call(
     method: String,
     params: Option<Value>,
 ) -> Result<Value, RpcFailure> {
+    if std::env::var_os("REPOMON_ENERGY_TRACE").is_some() {
+        eprintln!("energy ipc {method}");
+    }
     let client = state.client.get().ok_or_else(RpcFailure::not_connected)?;
     client.call(&method, params).await.map_err(map_call_error)
 }

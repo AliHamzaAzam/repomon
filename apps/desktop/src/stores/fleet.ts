@@ -1,3 +1,4 @@
+import { isForeground, startVisibilityPolling } from "./visibilityPolling";
 import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
@@ -434,7 +435,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const [error, setError] = createSignal<string | null>(null);
 
   let active = false;
-  let interval: ReturnType<typeof setInterval> | undefined;
+  let stopPolling: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -569,6 +570,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function usageEvent(event: DaemonEvent) {
+    // Terminal frames do not change the fleet. Reloading on them feeds redraws back into RPC.
+    if (["event.agent.bytes", "event.agent.output", "event.agent.grid"].includes(event.method)) return;
     if (event.method === "event.usage.refreshed") {
       const result = event.params as UsageRefreshed | undefined;
       if (result && Number.isFinite(result.request_id) && Array.isArray(result.snapshot)
@@ -621,10 +624,10 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function queueRefresh() {
-    if (refreshTimer !== undefined) return;
+    if (!active || !isForeground() || refreshTimer !== undefined) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
-      void refresh();
+      if (active && isForeground()) void refresh();
     }, 60);
   }
 
@@ -634,7 +637,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     const token = loadToken;
     void refresh();
     // Heartbeat poll at 1.2s cadence to ensure fast UI updates without excessive overhead.
-    interval = setInterval(() => void refresh(), 1200);
+    stopPolling = startVisibilityPolling(() => void refresh(), 1200);
     subscriptionReady = source
       .subscribe(usageEvent)
       .then((stop) => {
@@ -652,8 +655,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     refreshTimer = undefined;
     setLoading(false);
     if (usageWait) settleUsage(usageWait, undefined);
-    if (interval) clearInterval(interval);
-    interval = undefined;
+    stopPolling?.();
+    stopPolling = undefined;
     unsubscribe?.();
     unsubscribe = undefined;
   }
