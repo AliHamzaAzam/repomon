@@ -78,6 +78,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         29,
         include_str!("../../migrations/0029_usage_recount_failures.sql"),
     ),
+    (
+        30,
+        include_str!("../../migrations/0030_message_push_attempts.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
@@ -1083,6 +1087,8 @@ impl Store {
             let mut stmt = c.prepare(&format!(
                 "SELECT {MESSAGE_COLS} FROM messages
                  WHERE delivered_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM message_push_attempts AS attempt
+                       WHERE attempt.message_id = messages.id AND attempt.window = messages.recipient_window)
                    AND ((?1 = 1 AND sender_lane_id IS NOT NULL)
                      OR (?2 = 1 AND sender_lane_id IS NULL))
                  ORDER BY created_at, id LIMIT ?3"
@@ -1092,6 +1098,32 @@ impl Store {
                 message_from_row,
             )?;
             collect(rows)
+        })
+        .await
+    }
+
+    /// Claim one (message, window) before terminal I/O. Keep uncertain attempts durable so a
+    /// verification miss or daemon restart cannot replay a body that already reached the agent.
+    pub async fn claim_message_push(&self, id: String, window: String) -> Result<bool> {
+        self.call(move |c| {
+            Ok(c.execute(
+                "INSERT OR IGNORE INTO message_push_attempts(message_id, window, attempted_at)
+                 SELECT id, ?2, ?3 FROM messages
+                 WHERE id = ?1 AND delivered_at IS NULL AND recipient_window = ?2",
+                params![id, window, to_iso(&Utc::now())],
+            )? == 1)
+        })
+        .await
+    }
+
+    /// Only release a claim when the verified injector skipped without sending any input.
+    pub async fn release_message_push(&self, id: String, window: String) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "DELETE FROM message_push_attempts WHERE message_id = ?1 AND window = ?2",
+                params![id, window],
+            )?;
+            Ok(())
         })
         .await
     }
@@ -3797,6 +3829,97 @@ mod tests {
         let read = s.mark_message_read(message.id).await.unwrap();
         assert_eq!(read.read_state, MessageReadState::Read);
         assert!(read.read_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn push_claim_is_atomic_and_survives_reopen_until_inbox_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let s = Store::open(&path).unwrap();
+        let body = format!("FIRST LINE\n{}\nFINAL LINE", "long body 🦀 ".repeat(400));
+        let mut recipient = address("lane-2/1");
+        recipient.window = Some("lane-2".into());
+        let message = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("operator"),
+                recipient.clone(),
+                body.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            s.claim_message_push(message.id.clone(), "lane-2".into()),
+            s.claim_message_push(message.id.clone(), "lane-2".into())
+        );
+        assert_ne!(a.unwrap(), b.unwrap());
+        assert!(
+            !s.claim_message_push(message.id.clone(), "lane-2-2".into())
+                .await
+                .unwrap()
+        );
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert!(
+            !s.claim_message_push(message.id.clone(), "lane-2".into())
+                .await
+                .unwrap()
+        );
+        assert!(
+            s.queued_messages_for_injection(true, true, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        s.mark_message_push_delivered(message.id.clone())
+            .await
+            .unwrap();
+        let older_id = message.id.clone();
+        s.call(move |c| {
+            c.execute(
+                "UPDATE messages SET created_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
+                params![older_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let newer = s
+            .send_message(
+                AgentAddress::new("lane-2/1"),
+                address("operator"),
+                recipient,
+                "newer".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let page = s
+            .list_messages(
+                Some(AgentAddress::new("lane-2/1")),
+                None,
+                false,
+                1,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.messages[0].id, newer.id);
+        let page = s
+            .list_messages(
+                Some(AgentAddress::new("lane-2/1")),
+                None,
+                false,
+                1,
+                page.next_before,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.messages[0].body, body);
+        assert_eq!(page.messages[0].id, message.id);
     }
 
     #[tokio::test]

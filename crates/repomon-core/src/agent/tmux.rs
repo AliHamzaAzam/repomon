@@ -842,8 +842,58 @@ impl TmuxRuntime {
 
     pub fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
         tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-literal", text = %text.chars().take(60).collect::<String>(), "tmux write");
+        if text.len() >= 1024 || text.contains('\n') {
+            return self.paste_text_named(window, text);
+        }
         self.run(&["send-keys", "-t", &self.exact_target(window), "-l", text])?;
         Ok(())
+    }
+
+    /// Deliver a single bracketed paste without Enter. Unique buffers avoid concurrent sends
+    /// sharing or overwriting tmux's default clipboard buffer.
+    pub fn paste_text_named(&self, window: &str, text: &str) -> Result<()> {
+        static NEXT_PASTE: AtomicU64 = AtomicU64::new(0);
+        let buffer = format!(
+            "repomon-{}-{}",
+            std::process::id(),
+            NEXT_PASTE.fetch_add(1, Ordering::Relaxed)
+        );
+        let args = ["load-buffer", "-b", &buffer, "-"];
+        let mut cmd = Command::new(tmux_program());
+        cmd.args(self.full_args(&args))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let write = child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(text.as_bytes());
+        let output = child.wait_with_output()?;
+        let result = write.map_err(Error::Io).and_then(|()| {
+            if !output.status.success() {
+                return Err(Error::Agent(format!(
+                    "tmux load-buffer failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            self.run(&[
+                "paste-buffer",
+                "-p",
+                "-d",
+                "-r",
+                "-b",
+                &buffer,
+                "-t",
+                &self.exact_target(window),
+            ])
+            .map(|_| ())
+        });
+        if result.is_err() {
+            let _ = self.run(&["delete-buffer", "-b", &buffer]);
+        }
+        result
     }
 
     /// Type `text` into the agent and press Enter.
@@ -854,7 +904,7 @@ impl TmuxRuntime {
     pub fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
         tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
-        self.run(&["send-keys", "-t", &target, "-l", text])?;
+        self.paste_text_named(window, text)?;
         // Allow the paste-burst detector to settle before Enter so the agent treats it as
         // submission rather than pasted text.
         std::thread::sleep(std::time::Duration::from_millis(80));
@@ -1159,6 +1209,10 @@ fn process_fingerprint(pid: u32) -> Option<String> {
 }
 
 impl SessionBackend for TmuxRuntime {
+    fn paste_text_named(&self, window: &str, text: &str) -> Result<()> {
+        TmuxRuntime::paste_text_named(self, window, text)
+    }
+
     fn available(&self) -> bool {
         TmuxRuntime::available()
     }
@@ -1791,6 +1845,136 @@ mod tests {
             .args(["-L", rt.session(), "kill-server"])
             .output();
         panic!("pane process tree survived kill_named: {tree:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn long_spawn_argument_survives_shell_quoting() {
+        let task = format!(
+            "FIRST LINE\n\n{}\nFINAL LINE",
+            "quote ' \" $value $(literal) `literal` 🦀\n".repeat(70)
+        );
+        for command in ["claude", "codex"] {
+            // printf stands in for the CLI and prints exactly its positional prompt.
+            let spec = SpawnSpec::new("printf '%s'", std::env::temp_dir()).arg(&task);
+            let output = Command::new("sh")
+                .args(["-c", &render_spawn_command(&spec)])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{command}");
+            assert_eq!(output.stdout, task.as_bytes(), "{command}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn long_send_text_respects_each_composers_bracketed_paste_mode() {
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-f1-paste-{}", std::process::id()));
+        struct Cleanup(TmuxRuntime);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new(tmux_program())
+                    .args(["-L", self.0.session(), "kill-server"])
+                    .output();
+            }
+        }
+        let _cleanup = Cleanup(rt.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let task = format!(
+            "FIRST LINE\n\n{}\nFINAL LINE",
+            "quote ' \" $value 🦀\n".repeat(1000)
+        );
+        // Fixtures exercise both advertised modes for each runtime: tmux must send wrappers
+        // only when the current app enabled them, without guessing from its agent kind.
+        let ugly = format!("FIRST LINE{}FINAL LINE", "x".repeat(2101 - 20));
+        assert_eq!(ugly.len(), 2101);
+        for task in [ugly, task] {
+            for kind in ["claude", "codex", "antigravity"] {
+                for bracketed in [false, true] {
+                    let window = format!("{kind}-{bracketed}-{}", task.len());
+                    let received = dir.path().join(&window);
+                    let expected = if bracketed {
+                        format!("\x1b[200~{task}\x1b[201~")
+                    } else {
+                        task.clone()
+                    };
+                    let script = "import os,sys,tty,time; tty.setraw(0); print('\\x1b[?2004'+sys.argv[3]+'READY',flush=True); data=b''; n=int(sys.argv[2])\nwhile len(data)<n:\n data+=os.read(0,65536)\nopen(sys.argv[1],'wb').write(data[:n])\ntime.sleep(30)";
+                    let spec = SpawnSpec::new("python3", dir.path())
+                        .arg("-c")
+                        .arg(script)
+                        .arg(received.to_string_lossy())
+                        .arg(expected.len().to_string())
+                        .arg(if bracketed { "h" } else { "l" });
+                    SessionBackend::spawn_named(&rt, &window, &spec).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while !rt.capture_named(&window, None).unwrap().contains("READY") {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "reader did not start: {window}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    rt.send_text_named(&window, &task).unwrap();
+                    while !received.exists() {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "paste did not finish: {window}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    assert_eq!(
+                        std::fs::read(received).unwrap(),
+                        expected.as_bytes(),
+                        "{window}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn spawning_beside_an_idle_window_does_not_adopt_it() {
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let rt = TmuxRuntime::new(format!("repomon-f1-existing-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let original = rt
+            .spawn(1, dir.path(), "printf 'EXISTING_IDLE\\n❯ '; sleep 30")
+            .unwrap();
+        let fingerprint = SessionBackend::window_process_fingerprint(&rt, &original).unwrap();
+        let spec = SpawnSpec::new("python3", dir.path())
+            .arg("-c")
+            .arg("import sys,time;print(sys.argv[1],flush=True);time.sleep(30)")
+            .arg("FIRST LINE: new task");
+        let spawned = SessionBackend::spawn(&rt, 1, &spec).unwrap();
+        assert_eq!(original, "lane-1");
+        assert_eq!(spawned, "lane-1-2");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !rt
+            .capture_named(&spawned, None)
+            .unwrap()
+            .contains("FIRST LINE: new task")
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            rt.capture_named(&original, None)
+                .unwrap()
+                .contains("EXISTING_IDLE")
+        );
+        assert_eq!(
+            SessionBackend::window_process_fingerprint(&rt, &original).unwrap(),
+            fingerprint
+        );
+        let _ = Command::new(tmux_program())
+            .args(["-L", rt.session(), "kill-server"])
+            .output();
     }
 
     #[test]

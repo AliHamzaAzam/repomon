@@ -11,7 +11,8 @@ use crate::Ctx;
 use crate::inject::{self, AuditSeed, Expectation, Payload, SendOutcome};
 
 const DELIVERY_SWEEP: Duration = Duration::from_secs(1);
-const FAILURE_NOTIFY_AFTER: u32 = 2;
+// An uncertain attempt is not replayed, so surface its failure on the first occurrence.
+const FAILURE_NOTIFY_AFTER: u32 = 1;
 
 pub fn injection_line(message: &FleetMessage) -> String {
     let collapsed: String = message
@@ -22,10 +23,21 @@ pub fn injection_line(message: &FleetMessage) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    // Long bodies stay intact in the durable inbox. A bounded notice cannot silently become a
+    // plausible tail-only instruction, and the recipient can recover it even after push delivery.
+    let collapsed = if collapsed.len() > 512 {
+        format!(
+            "Long message ({} bytes). Read the full body with message_inbox(unread_only:false); find id {}. [BODY OMITTED]",
+            message.body.len(),
+            message.id
+        )
+    } else {
+        collapsed
+    };
     let reply_to = message.reply_to.as_deref().unwrap_or("none");
     format!(
-        "[REPOMAIL id={} from={} reply_to={reply_to}] {collapsed} [END REPOMAIL]",
-        message.id, message.sender.address
+        "[REPOMAIL id={} from={} reply_to={reply_to}] {collapsed} [{}] [END REPOMAIL]",
+        message.id, message.sender.address, message.id
     )
 }
 
@@ -142,15 +154,24 @@ async fn try_deliver(
         .tmux_window
         .clone()
         .expect("inject decision requires a managed window");
+    match ctx
+        .store
+        .claim_message_push(message.id.clone(), window.clone())
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return AttemptOutcome::Deferred,
+        Err(error) => return AttemptOutcome::Failed(error.to_string()),
+    }
     let seed = AuditSeed {
         lane_id,
-        window,
+        window: window.clone(),
         session_id: session.session_id.clone(),
         agent_kind: Some(session.agent.as_str().to_string()),
         trigger: "mail".to_string(),
         dialog_class: None,
         repo_scoped: None,
-        decision: "full_body".to_string(),
+        decision: "push_delivery".to_string(),
         policy_source: None,
         reason: Some("durable push delivery".to_string()),
         subject: None,
@@ -161,13 +182,27 @@ async fn try_deliver(
         Expectation::IdleNoDialog,
         Payload::VerifiedLine {
             text: injection_line(message),
-            marker: "[END REPOMAIL]".to_string(),
+            marker: format!("[{}] [END REPOMAIL]", message.id),
         },
         seed,
     )
     .await
     {
         SendOutcome::Sent { .. } => {
+            let backend = ctx.backend.clone();
+            let capture_window = window.clone();
+            let capture = tokio::task::spawn_blocking(move || {
+                backend.capture_named(
+                    &capture_window,
+                    repomon_core::agent::backend::CaptureOpts::last(2000),
+                )
+            })
+            .await;
+            let head = format!("[REPOMAIL id={}", message.id);
+            if !matches!(capture, Ok(Ok(ref pane)) if crate::spawn_input::contains_head(pane, &head))
+            {
+                return AttemptOutcome::Failed("mail opening could not be verified; automatic replay suppressed, full body remains available in message_inbox(unread_only:false)".into());
+            }
             match ctx
                 .store
                 .mark_message_push_delivered(message.id.clone())
@@ -177,7 +212,16 @@ async fn try_deliver(
                 Err(error) => AttemptOutcome::Failed(error.to_string()),
             }
         }
-        SendOutcome::Skipped { .. } => AttemptOutcome::Deferred,
+        SendOutcome::Skipped { .. } => {
+            match ctx
+                .store
+                .release_message_push(message.id.clone(), window)
+                .await
+            {
+                Ok(()) => AttemptOutcome::Deferred,
+                Err(error) => AttemptOutcome::Failed(error.to_string()),
+            }
+        }
         SendOutcome::Failed { error, .. } => AttemptOutcome::Failed(error),
     }
 }
@@ -200,7 +244,7 @@ pub(crate) async fn force_deliver(
             .await
             .map_err(|error| error.to_string()),
         AttemptOutcome::Deferred => {
-            Err("recipient is not currently safe for message injection".to_string())
+            Err("recipient is not ready or this delivery was already attempted; inspect message_inbox(unread_only:false)".to_string())
         }
         AttemptOutcome::Failed(error) => {
             let _ = ctx
@@ -480,15 +524,17 @@ mod tests {
     fn frame_strips_controls_and_collapses_whitespace() {
         assert_eq!(
             injection_line(&message("hello\n\t fleet\u{7}  now")),
-            "[REPOMAIL id=mail-1 from=operator reply_to=none] hello fleet now [END REPOMAIL]"
+            "[REPOMAIL id=mail-1 from=operator reply_to=none] hello fleet now [mail-1] [END REPOMAIL]"
         );
     }
 
     #[test]
-    fn frame_keeps_the_complete_long_body_and_closing_marker() {
+    fn long_body_stays_in_inbox_and_frame_is_a_bounded_recovery_notice() {
         let body = "x".repeat(8 * 1024);
         let line = injection_line(&message(&body));
-        assert!(line.contains(&body));
+        assert!(line.len() < 512);
+        assert!(line.contains("message_inbox(unread_only:false)"));
+        assert!(line.contains("[BODY OMITTED]"));
         assert!(line.ends_with("[END REPOMAIL]"));
     }
 
@@ -513,8 +559,8 @@ mod tests {
     #[test]
     fn repeated_delivery_failure_raises_attention_exactly_once() {
         let mut state = FailureState::default();
-        assert!(!record_failure(&mut state));
         assert!(record_failure(&mut state));
+        assert!(!record_failure(&mut state));
         assert!(!record_failure(&mut state));
         assert_eq!(state.attempts, 3);
         assert!(state.notified);
@@ -565,6 +611,7 @@ mod tests {
     }
 
     struct ScriptedBackend {
+        hide_head: bool,
         sent_keys: StdMutex<Vec<(String, String)>>,
         sent_text: StdMutex<Vec<(String, String)>>,
     }
@@ -572,6 +619,7 @@ mod tests {
     impl ScriptedBackend {
         fn new() -> Self {
             Self {
+                hide_head: false,
                 sent_keys: StdMutex::new(Vec::new()),
                 sent_text: StdMutex::new(Vec::new()),
             }
@@ -615,7 +663,18 @@ mod tests {
             Ok("target".into())
         }
         fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
-            Ok("› Ask Codex to do anything".to_string())
+            if self.hide_head {
+                return Ok("› Ask Codex to do anything".into());
+            }
+            let history = self
+                .sent_text
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(format!("› Ask Codex to do anything\n{history}"))
         }
         fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::Cursor> {
             Some(repomon_core::agent::Cursor { col: 2, row: 0 })
@@ -696,6 +755,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_2101_byte_mail_delivery_is_once_and_inbox_preserves_the_report() {
+        let backend = Arc::new(ScriptedBackend::new());
+        let ctx = make_mail_ctx(backend.clone());
+        let body = format!("FIRST LINE{}FINAL LINE", "x".repeat(2101 - 20));
+        assert_eq!(body.len(), 2101);
+        let draft = message(&body);
+        let queued = ctx
+            .store
+            .send_message(
+                draft.requested_to,
+                draft.sender,
+                draft.recipient,
+                body.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let lane = lane_with_session(session(AgentStatus::Waiting));
+        let (automatic, forced) = tokio::join!(
+            try_deliver(
+                &ctx,
+                std::slice::from_ref(&lane),
+                &queued,
+                DeliveryMode::Automatic
+            ),
+            try_deliver(
+                &ctx,
+                std::slice::from_ref(&lane),
+                &queued,
+                DeliveryMode::Force
+            ),
+        );
+        assert!(matches!(
+            (automatic, forced),
+            (AttemptOutcome::Delivered, AttemptOutcome::Deferred)
+                | (AttemptOutcome::Deferred, AttemptOutcome::Delivered)
+        ));
+        let sent = backend.sent_text.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0]
+                .1
+                .starts_with(&format!("[REPOMAIL id={}", queued.id))
+        );
+        assert!(sent[0].1.contains("[BODY OMITTED]"));
+        let inbox = ctx
+            .store
+            .list_messages(
+                Some(queued.recipient.address.clone()),
+                None,
+                false,
+                50,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inbox.messages[0].body, body);
+        assert!(inbox.messages[0].delivered_at.is_some());
+        let unread = ctx
+            .store
+            .list_messages(Some(queued.recipient.address), None, true, 50, None, true)
+            .await
+            .unwrap();
+        assert!(unread.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn uncertain_submission_is_not_replayed_and_full_body_is_recoverable() {
+        let mut scripted = ScriptedBackend::new();
+        scripted.hide_head = true;
+        let backend = Arc::new(scripted);
+        let ctx = make_mail_ctx(backend.clone());
+        let draft = message(&"long body ".repeat(600));
+        let queued = ctx
+            .store
+            .send_message(
+                draft.requested_to,
+                draft.sender,
+                draft.recipient,
+                draft.body.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let lane = lane_with_session(session(AgentStatus::Waiting));
+        let outcome = try_deliver(
+            &ctx,
+            std::slice::from_ref(&lane),
+            &queued,
+            DeliveryMode::Automatic,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AttemptOutcome::Failed(ref error) if error.contains("opening could not be verified"))
+        );
+        assert!(
+            ctx.store
+                .get_message(queued.id.clone())
+                .await
+                .unwrap()
+                .delivered_at
+                .is_none()
+        );
+        assert_eq!(
+            try_deliver(&ctx, &[lane], &queued, DeliveryMode::Force).await,
+            AttemptOutcome::Deferred
+        );
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        assert!(
+            backend.sent_text.lock().unwrap()[0]
+                .1
+                .contains("[BODY OMITTED]")
+        );
+        let inbox = ctx
+            .store
+            .list_messages(Some(queued.recipient.address), None, false, 50, None, true)
+            .await
+            .unwrap();
+        assert_eq!(inbox.messages[0].body, draft.body);
+    }
+
+    #[tokio::test]
     async fn supervised_lane_receives_the_actual_body() {
         let backend = Arc::new(ScriptedBackend::new());
         let ctx = make_mail_ctx(backend.clone());
@@ -757,6 +939,38 @@ mod tests {
         );
         assert_eq!(refreshed.read_state, MessageReadState::Read);
         assert_eq!(refreshed.delivered_at, refreshed.read_at);
+        // A stale automatic/force caller must not replay a previously submitted message.
+        let lane = lane_with_session(session(AgentStatus::Waiting));
+        let (automatic, forced) = tokio::join!(
+            try_deliver(
+                &ctx,
+                std::slice::from_ref(&lane),
+                &queued,
+                DeliveryMode::Automatic
+            ),
+            try_deliver(
+                &ctx,
+                std::slice::from_ref(&lane),
+                &queued,
+                DeliveryMode::Force
+            ),
+        );
+        assert_eq!(automatic, AttemptOutcome::Deferred);
+        assert_eq!(forced, AttemptOutcome::Deferred);
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        let inbox = ctx
+            .store
+            .list_messages(
+                Some(queued.recipient.address.clone()),
+                None,
+                false,
+                50,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inbox.messages[0].body, queued.body);
     }
 
     #[tokio::test]

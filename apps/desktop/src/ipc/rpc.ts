@@ -322,7 +322,7 @@ interface RpcMap {
   "agent.add": { params: { name: string; command: string }; result: null };
   "agent.remove": { params: { name: string }; result: null };
   "agent.set_default": { params: { name: string | null }; result: null };
-  "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string } };
+  "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string; spawn_warnings?: string[] } };
   "agent.adopt": { params: { lane_id: number; session_id?: string; agent?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };

@@ -203,7 +203,7 @@ pub fn agent_tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "message_inbox",
-            description: "Read this agent's durable inbox. Polling marks returned mail delivered.",
+            description: "Read this agent's durable inbox, newest first. unread_only:false (the default) includes previously delivered and read messages with their full bodies. Polling marks returned mail delivered.",
             input_schema: object(
                 json!({
                     "unread_only": { "type": "boolean" },

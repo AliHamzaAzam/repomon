@@ -1584,7 +1584,8 @@ fn tool_catalog() -> Vec<ToolDef> {
                 the concurrent-agent cap. Omit 'agent' to use the configured default (usually \
                 claude-code). Optional mode/model/effort tune the launch. The result embeds \
                 repo_notes (the repo's durable notes) when any exist; use them in follow-up \
-                instructions too.",
+                instructions too. Check spawn_warnings in the result: the agent may have started \
+                without confirmed task delivery or effort input. Inspect it before resending.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane (worktree) to work in." },

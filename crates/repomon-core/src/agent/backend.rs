@@ -205,6 +205,12 @@ pub trait SessionBackend: Send + Sync {
     /// as empty output.
     fn capture_named(&self, window: &str, opts: CaptureOpts) -> Result<String>;
 
+    /// Paste one input frame without submitting it. Backends may use a native paste buffer.
+    fn paste_text_named(&self, window: &str, text: &str) -> Result<()> {
+        // Only a backend that knows the app enabled bracketed paste may add its framing.
+        self.send_literal_named(window, text)
+    }
+
     /// The pane's visible cursor, or `None` when hidden or the window is gone.
     fn cursor_named(&self, window: &str) -> Option<Cursor>;
 

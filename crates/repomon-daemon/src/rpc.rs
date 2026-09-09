@@ -3644,8 +3644,6 @@ pub async fn dispatch(
                 p.mode.as_deref(),
                 p.model.as_deref(),
             );
-            // When we must inject `/effort` first, the task is sent as input AFTER the injection
-            // (so effort is set before the task), not appended as a launch argument.
             let task = p
                 .task
                 .as_deref()
@@ -3713,50 +3711,30 @@ pub async fn dispatch(
             ]);
             configure_backend_mcp(&kind, &mut spec, boot.as_deref()).map_err(internal)?;
             let inject = plan.effort_inject;
-            // Hermes has no persistent-mode initial-prompt flag: `-q` is single-turn and exits.
-            // Defer its task until the real TUI reports ready, then submit it like an operator.
-            let inject_task = if inject.is_some() || matches!(kind, AgentKind::Hermes) {
-                task.clone()
-            } else {
-                None
-            };
-            if inject.is_none() && !matches!(kind, AgentKind::Hermes) {
-                if let Some(task) = task {
-                    spec = match kind {
-                        AgentKind::OpenCode => spec.arg("--prompt").arg(task),
-                        AgentKind::Antigravity => spec.arg("--prompt-interactive").arg(task),
-                        _ => spec.arg(task),
-                    };
-                }
-            }
+            spec = crate::spawn_input::task_spec(spec, &kind, task.as_deref());
             let tmux = ctx.backend.clone();
             let lane = p.lane_id;
             let kind_str = kind.as_str().into_owned();
-            let spawned = tokio::task::spawn_blocking(move || -> repomon_core::Result<String> {
-                let window = tmux.spawn(lane, &spec)?;
-                let _ = tmux.set_window_agent_kind(&window, &kind_str);
-                // Best-effort: set the effort level and type the task once the TUI is up. Operators
-                // do exactly this by hand; a short settle lets claude start reading input.
-                if inject_task.is_some() && kind_str == "hermes" {
-                    wait_for_hermes_composer(tmux.as_ref(), &window);
-                }
-                if let Some(eff) = inject {
-                    std::thread::sleep(std::time::Duration::from_millis(2000));
-                    tmux.send_text_named(&window, &eff)?;
-                }
-                if let Some(task) = inject_task {
-                    if kind_str != "hermes" {
-                        std::thread::sleep(std::time::Duration::from_millis(600));
-                    }
-                    tmux.send_text_named(&window, &task)?;
-                }
-                Ok(window)
-            })
+            let delivery_kind = kind.clone();
+            let spawned = tokio::task::spawn_blocking(
+                move || -> repomon_core::Result<(String, Vec<String>)> {
+                    let window = tmux.spawn(lane, &spec)?;
+                    let _ = tmux.set_window_agent_kind(&window, &kind_str);
+                    let warnings = crate::spawn_input::finish(
+                        tmux.as_ref(),
+                        &window,
+                        &delivery_kind,
+                        task.as_deref(),
+                        inject.as_deref(),
+                    );
+                    Ok((window, warnings))
+                },
+            )
             .await
             .map_err(internal)?;
-            let window = match spawned {
-                Ok(window) if window == expected_window => window,
-                Ok(window) => {
+            let (window, spawn_warnings) = match spawned {
+                Ok((window, warnings)) if window == expected_window => (window, warnings),
+                Ok((window, _)) => {
                     let _ = ctx
                         .store
                         .revoke_mcp_identity_for_window(expected_window.clone())
@@ -3822,6 +3800,7 @@ pub async fn dispatch(
                 "window": window,
                 "agent": p.agent,
                 "role": is_controller.then_some(crate::repomind::CONTROLLER_ROLE),
+                "spawn_warnings": spawn_warnings,
             }))
         }
         "agent.adopt" => {
@@ -7954,8 +7933,8 @@ pub(crate) fn orchestrator_base_command(
     }
 }
 
-/// Carry launch flags and optional effort input, which must precede the task when the requested
-/// effort is unavailable as a CLI flag.
+/// Carry launch flags and optional effort input, applied at an idle composer after launch when
+/// the requested effort is unavailable as a CLI flag.
 #[derive(Debug, PartialEq, Eq)]
 struct LaunchPlan {
     command: String,
@@ -8139,12 +8118,6 @@ fn kind_from_command(command: &str) -> AgentKind {
     }
 }
 
-fn hermes_composer_ready(capture: &str) -> bool {
-    // The modern Hermes TUI exposes this stable status token once its composer accepts input.
-    // Keep the prompt glyph as a fallback for older 0.x releases that omit the status bar.
-    capture.contains(" ready │") || capture.lines().rev().take(4).any(|line| line.contains('❯'))
-}
-
 fn agent_spawn_spec(command: String, path: PathBuf, kind: &AgentKind) -> SpawnSpec {
     let spec = SpawnSpec::new(command, path);
     if matches!(kind, AgentKind::Hermes) && spec.program.trim() == "hermes" {
@@ -8178,22 +8151,6 @@ fn hermes_adopt_spec(path: PathBuf, session_id: Option<String>) -> SpawnSpec {
         cwd: path,
         env: Vec::new(),
     }
-}
-
-fn wait_for_hermes_composer(
-    backend: &dyn repomon_core::agent::backend::SessionBackend,
-    window: &str,
-) {
-    for _ in 0..100 {
-        if backend
-            .capture_named(window, CaptureOpts::visible())
-            .is_ok_and(|capture| hermes_composer_ready(&capture))
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    tracing::warn!("spawn: Hermes composer did not report ready within 15s; submitting task");
 }
 
 /// The basename of a program path (`/usr/bin/claude` → `claude`).
@@ -11522,7 +11479,7 @@ mod tests {
     #[test]
     fn launch_options_claude_ultracode_injects_slash_effort() {
         // `ultracode` isn't a valid --effort flag value (claude warns + ignores it), so it is set
-        // via the /effort slash command injected as the session's first input - NOT a launch flag.
+        // via the /effort slash command at an idle composer, not a launch flag.
         let plan = apply_launch_options(
             "claude".into(),
             &AgentKind::ClaudeCode,
@@ -11617,13 +11574,6 @@ mod tests {
             kind_from_command("my-wrapper.sh"),
             AgentKind::Other("my-wrapper.sh".into())
         );
-    }
-
-    #[test]
-    fn hermes_composer_readiness_matches_live_tui_status() {
-        assert!(hermes_composer_ready("─ ready │ hy3:free │ 1s\n ❯ "));
-        assert!(hermes_composer_ready("banner\n ❯ "));
-        assert!(!hermes_composer_ready("loading tools…"));
     }
 
     #[test]

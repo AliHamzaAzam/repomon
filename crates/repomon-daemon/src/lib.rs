@@ -17,6 +17,7 @@ pub mod remote;
 pub mod repomind;
 pub mod rpc;
 pub mod socket;
+mod spawn_input;
 pub mod standing;
 pub mod supervision;
 pub mod usage_ingest;

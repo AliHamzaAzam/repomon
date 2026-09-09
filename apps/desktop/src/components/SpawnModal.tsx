@@ -15,6 +15,8 @@ export default function SpawnModal(props: {
   const [choices, setChoices] = createSignal<AgentChoice[]>([]);
   const [agent, setAgent] = createSignal("");
   const [task, setTask] = createSignal("");
+  const [warnings, setWarnings] = createSignal<string[]>([]);
+  const [spawned, setSpawned] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
 
@@ -31,13 +33,15 @@ export default function SpawnModal(props: {
   });
 
   async function spawn() {
-    if (!agent()) return;
+    if (!agent() || busy() || spawned()) return;
     setBusy(true);
     setError(null);
     try {
-      await daemonCall("agent.spawn", { lane_id: props.lane.id, agent: agent(), task: task().trim() || undefined });
+      const result = await daemonCall("agent.spawn", { lane_id: props.lane.id, agent: agent(), task: task().trim() || undefined });
+      setSpawned(true);
+      setWarnings(result.spawn_warnings ?? []);
       await props.onDone();
-      props.onClose();
+      if (warnings().length === 0) props.onClose();
     } catch (cause) {
       setError(translateError(cause, { binary: "tmux" }));
     } finally {
@@ -57,15 +61,15 @@ export default function SpawnModal(props: {
             class="focus-ring rounded-lg border border-line bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-raised hover:text-foreground"
             onClick={props.onClose}
           >
-            Cancel
+            {spawned() ? "Close" : "Cancel"}
           </button>
           <button
             type="button"
             class="focus-ring rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-signal/90 disabled:opacity-50"
-            disabled={busy() || !agent()}
+            disabled={busy() || !agent() || spawned()}
             onClick={() => void spawn()}
           >
-            {busy() ? "Spawning…" : "Spawn Agent"}
+            {spawned() ? "Agent started" : busy() ? "Spawning…" : "Spawn Agent"}
           </button>
         </>
       }
@@ -138,6 +142,12 @@ export default function SpawnModal(props: {
             onInput={(event) => setTask(event.currentTarget.value)}
           />
         </label>
+        <Show when={warnings().length > 0}>
+          <div role="alert" class="break-words rounded-xl border border-line bg-surface p-3 text-xs text-foreground space-y-2">
+            <p class="font-medium">Agent started with a warning</p>
+            <For each={warnings()}>{(warning) => <p>{warning}</p>}</For>
+          </div>
+        </Show>
         <Show when={error()}>
           {(err) => (
             <div role="alert" class="break-words rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault space-y-1.5">
