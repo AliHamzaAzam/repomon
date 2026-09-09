@@ -30,12 +30,46 @@ pub async fn serve(ctx: Arc<Ctx>, socket_path: &Path) -> std::io::Result<()> {
 pub async fn serve_listener(
     ctx: Arc<Ctx>,
     socket_path: &Path,
+    listener: IpcListener,
+) -> std::io::Result<()> {
+    serve_with_watchdog(ctx, socket_path, listener, Duration::from_secs(600)).await
+}
+
+async fn serve_with_watchdog(
+    ctx: Arc<Ctx>,
+    socket_path: &Path,
     mut listener: IpcListener,
+    interval: Duration,
 ) -> std::io::Result<()> {
     tracing::info!("listening on {}", socket_path.display());
 
+    #[cfg(unix)]
+    let mut identity = listener.bound_identity();
+    let mut watchdog = tokio::time::interval(interval);
+    watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut touched = std::time::Instant::now();
     loop {
         tokio::select! {
+            _ = watchdog.tick() => {
+                #[cfg(unix)]
+                match rebind_if_lost(socket_path, &mut listener, &mut identity).await {
+                    Ok(true) => ctx.broadcast("event.daemon.rebound", serde_json::json!({ "socket": socket_path })),
+                    Ok(false) => {},
+                    Err(error) => tracing::error!(%error, "daemon socket recovery failed; will retry"),
+                }
+                let backend = ctx.backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = backend.maintain_socket() {
+                        tracing::error!(%error, "tmux socket watchdog failed; fleet replacement remains blocked");
+                    }
+                });
+                if touched.elapsed() >= Duration::from_secs(86400) {
+                    if let Err(error) = repomon_core::agent::tmux_socket::touch_socket(socket_path) {
+                        tracing::warn!(%error, "could not refresh daemon socket timestamps");
+                    }
+                    touched = std::time::Instant::now();
+                }
+            },
             _ = ctx.shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
                 Ok(stream) => {
@@ -49,8 +83,37 @@ pub async fn serve_listener(
 
     // Remove the socket file so the next daemon start binds cleanly (pipes vanish on close).
     #[cfg(unix)]
-    let _ = std::fs::remove_file(socket_path);
+    if socket_identity(socket_path).ok() == Some(identity) {
+        let _ = std::fs::remove_file(socket_path);
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn socket_identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::other("listener path is not a socket"));
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(unix)]
+async fn rebind_if_lost(
+    path: &Path,
+    listener: &mut IpcListener,
+    identity: &mut (u64, u64),
+) -> std::io::Result<bool> {
+    if socket_identity(path).ok() == Some(*identity) {
+        return Ok(false);
+    }
+    tracing::error!(path = %path.display(), "daemon listener path was removed or replaced; rebinding");
+    // listen refuses to unlink a live replacement; established connections keep their streams.
+    let replacement = transport::listen(&Endpoint::from_path(path)).await?;
+    *identity = replacement.bound_identity();
+    *listener = replacement;
+    Ok(true)
 }
 
 async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
@@ -180,4 +243,89 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     drop(out_tx);
     forwarder.abort();
     let _ = writer.await;
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn running_daemon_rebinds_and_broadcasts_without_dropping_existing_stream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        // Accepted streams belong to connections, not the listener, and must survive its replacement.
+        let mut old_client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let mut old_server = listener.accept().await.unwrap();
+        let config = repomon_core::Config {
+            tmux_session: format!("i1-watchdog-{}", std::process::id()),
+            ..Default::default()
+        };
+        let ctx = Ctx::new_with_paths(
+            repomon_core::Store::open_in_memory().unwrap(),
+            config,
+            None,
+            dir.path().join("config"),
+            dir.path().join("notes"),
+        );
+        let mut events = ctx.events.subscribe();
+        // Unlink even before serving begins to prove we use the original bound identity.
+        std::fs::remove_file(&path).unwrap();
+        let task = tokio::spawn({
+            let ctx = ctx.clone();
+            let path = path.clone();
+            async move { serve_with_watchdog(ctx, &path, listener, Duration::from_millis(10)).await }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["method"], "event.daemon.rebound");
+        assert_eq!(event["params"]["socket"], path.to_string_lossy().as_ref());
+        let _new_client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        old_client.write_all(b"alive").await.unwrap();
+        let mut data = [0; 5];
+        old_server.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, b"alive");
+        ctx.shutdown.notify_waiters();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn watchdog_recovers_unlinked_listener_and_preserves_live_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        let mut identity = socket_identity(&path).unwrap();
+        let original = identity;
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            rebind_if_lost(&path, &mut listener, &mut identity)
+                .await
+                .unwrap()
+        );
+        assert_ne!(identity, original);
+        let _client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        listener.accept().await.unwrap();
+        assert!(
+            !rebind_if_lost(&path, &mut listener, &mut identity)
+                .await
+                .unwrap()
+        );
+        std::fs::remove_file(&path).unwrap();
+        let other = tokio::net::UnixListener::bind(&path).unwrap();
+        let other_identity = socket_identity(&path).unwrap();
+        assert!(
+            rebind_if_lost(&path, &mut listener, &mut identity)
+                .await
+                .is_err()
+        );
+        assert_eq!(socket_identity(&path).unwrap(), other_identity);
+        drop(other);
+    }
 }

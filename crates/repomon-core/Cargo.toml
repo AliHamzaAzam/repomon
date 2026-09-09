@@ -24,6 +24,7 @@ directories = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+filetime = "0.2"
 async-trait = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
@@ -46,6 +47,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_IO",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

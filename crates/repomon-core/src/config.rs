@@ -606,31 +606,72 @@ fn current_user_from(
         .unwrap_or_else(|| "user".to_string())
 }
 
-#[cfg(target_os = "macos")]
-fn default_socket_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/repomon-{}.sock", current_user()))
+/// Per-user socket directory, outside periodically cleaned temporary directories.
+pub fn runtime_dir() -> PathBuf {
+    runtime_dir_from(
+        std::env::consts::OS,
+        &home(),
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+    )
+}
+
+fn runtime_dir_from(os: &str, home: &std::path::Path, xdg: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(xdg) = xdg.filter(|p| !p.is_empty()) {
+        return PathBuf::from(xdg);
+    }
+    if os == "macos" {
+        home.join("Library/Application Support/repomon/run")
+    } else {
+        home.join(".local/share/repomon/run")
+    }
+}
+
+/// The pre-runtime-directory endpoint, supported by clients for one migration release.
+#[cfg(unix)]
+pub fn legacy_socket_path() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from(format!("/tmp/repomon-{}.sock", current_user()))
+    } else {
+        std::env::temp_dir().join(format!("repomon-{}.sock", current_user()))
+    }
 }
 
 #[cfg(windows)]
 fn default_socket_path() -> PathBuf {
-    // Interpreted as a named-pipe name by `crate::transport` (already in canonical
-    // `\\.\pipe\` form, so it passes through `pipe_name_from_path` verbatim).
     PathBuf::from(format!(r"\\.\pipe\repomon-{}", current_user()))
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(windows))]
 fn default_socket_path() -> PathBuf {
-    if let Ok(x) = std::env::var("XDG_RUNTIME_DIR") {
-        if !x.is_empty() {
-            return PathBuf::from(x).join("repomon.sock");
-        }
-    }
-    std::env::temp_dir().join(format!("repomon-{}.sock", current_user()))
+    runtime_dir().join("repomon.sock")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_paths_are_stable_and_honor_xdg() {
+        let home = std::path::Path::new("/home/test");
+        assert_eq!(
+            runtime_dir_from("macos", home, None),
+            home.join("Library/Application Support/repomon/run")
+        );
+        assert_eq!(
+            runtime_dir_from("linux", home, None),
+            home.join(".local/share/repomon/run")
+        );
+        for os in ["macos", "linux"] {
+            assert_eq!(
+                runtime_dir_from(os, home, Some(std::ffi::OsStr::new("/run/user/123"))),
+                PathBuf::from("/run/user/123")
+            );
+            assert_eq!(
+                runtime_dir_from(os, home, Some(std::ffi::OsStr::new(""))),
+                runtime_dir_from(os, home, None)
+            );
+        }
+    }
 
     #[test]
     fn tmux_session_name_validation() {

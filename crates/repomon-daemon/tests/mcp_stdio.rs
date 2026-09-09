@@ -738,7 +738,9 @@ async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
     shutdown_mcp_child(child, stdin).await;
     let _ = std::fs::remove_file(&sock);
     let _ = StdCommand::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }
 

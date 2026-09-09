@@ -1496,6 +1496,21 @@ impl Store {
         .await
     }
 
+    /// Last transcript observed for a lane and backend, including sessions whose process exited.
+    pub async fn latest_lane_session(
+        &self,
+        lane_id: LaneId,
+        agent_kind: String,
+    ) -> Result<Option<String>> {
+        self.call(move |c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT session_id FROM usage_events WHERE lane_id = ?1 AND agent_kind = ?2 AND session_id IS NOT NULL ORDER BY at DESC, id DESC LIMIT 1",
+                params![lane_id, agent_kind], |row| row.get(0),
+            ).optional()?)
+        }).await
+    }
+
     /// Insert or update a session keyed by its manifest path. Returns its id.
     pub async fn upsert_session(&self, s: AgentSession) -> Result<SessionId> {
         self.call(move |c| {
@@ -4797,6 +4812,40 @@ mod tests {
             source_path: "/t/s.jsonl".to_string(),
             source_offset: offset,
         }
+    }
+
+    #[tokio::test]
+    async fn restore_session_is_latest_for_only_the_requested_lane_and_backend() {
+        let s = store().await;
+        let first = usage_event(0, "model", "2026-09-01T10:00:00Z");
+        let mut last = usage_event(1, "model", "2026-09-02T10:00:00Z");
+        last.session_id = Some("latest".into());
+        let mut other = usage_event(2, "model", "2026-09-03T10:00:00Z");
+        other.agent_kind = "codex".into();
+        other.session_id = Some("codex-session".into());
+        s.record_usage_events(vec![first, last, other])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.latest_lane_session(3, "claude-code".into())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("latest")
+        );
+        assert_eq!(
+            s.latest_lane_session(3, "codex".into())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("codex-session")
+        );
+        assert!(
+            s.latest_lane_session(4, "codex".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

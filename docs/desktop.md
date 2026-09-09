@@ -786,3 +786,17 @@ loses app attribution. Stable signed releases avoid tying the app's identity to 
 build. See Apple's [Accessibility](https://support.apple.com/en-gb/guide/mac-help/mh43185/mac)
 and [Screen Recording](https://support.apple.com/en-mide/guide/mac-help/mchld6aa7d23/mac)
 permission instructions and its [responsible-code and signing explanation](https://developer.apple.com/forums/thread/678819).
+
+## Runtime socket recovery
+
+Desktop daemon discovery shares the CLI's socket resolution: `$XDG_RUNTIME_DIR/repomon.sock` when set,
+otherwise `~/Library/Application Support/repomon/run/repomon.sock` on macOS or
+`~/.local/share/repomon/run/repomon.sock` on Linux. `REPOMON_SOCKET` and the configured `socket_path` remain
+supported. For one release, a live legacy default listener is used with a deprecation warning if the new
+endpoint cannot be reached.
+
+If a cleaner removes a running daemon's socket, its ten-minute watchdog recreates the listener and sends
+`event.daemon.rebound`; established streams survive and desktop reconnection succeeds once the path is back.
+The desktop uses the daemon's returned tmux attach command, including the explicit runtime socket or an
+adopted legacy path. Restoring agents resumes saved Claude and Codex sessions and reports the result through
+`event.notification`. An unreachable living tmux server blocks restoration rather than starting a second fleet.

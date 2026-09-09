@@ -87,6 +87,8 @@ fn pipe_instance(
 /// A bound local IPC listener. Obtain with [`listen`], then call [`IpcListener::accept`].
 pub struct IpcListener {
     inner: ListenerInner,
+    #[cfg(unix)]
+    identity: (u64, u64),
 }
 
 /// Binds local IPC, rejecting an active listener and remote Windows clients while removing only
@@ -96,9 +98,20 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
         #[cfg(unix)]
         Endpoint::Unix(path) => {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(parent)?;
             }
-            if path.exists() {
+            if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                use std::os::unix::fs::FileTypeExt;
+                if !metadata.file_type().is_socket() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "refusing to replace a non-socket endpoint",
+                    ));
+                }
                 // Probe before unlinking: removing a live socket would orphan its daemon and allow
                 // two daemons to control the same backend.
                 if tokio::net::UnixStream::connect(path).await.is_ok() {
@@ -112,8 +125,12 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
                 }
                 let _ = std::fs::remove_file(path);
             }
+            use std::os::unix::fs::MetadataExt;
+            let listener = tokio::net::UnixListener::bind(path)?;
+            let metadata = std::fs::symlink_metadata(path)?;
             Ok(IpcListener {
-                inner: ListenerInner::Unix(tokio::net::UnixListener::bind(path)?),
+                inner: ListenerInner::Unix(listener),
+                identity: (metadata.dev(), metadata.ino()),
             })
         }
         #[cfg(windows)]
@@ -133,6 +150,12 @@ pub async fn listen(endpoint: &Endpoint) -> io::Result<IpcListener> {
 }
 
 impl IpcListener {
+    /// Filesystem identity captured at bind, including if the pathname is later unlinked.
+    #[cfg(unix)]
+    pub fn bound_identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
     /// Wait for and return the next client connection.
     pub async fn accept(&mut self) -> io::Result<IpcStream> {
         match &mut self.inner {
@@ -166,9 +189,13 @@ impl IpcListener {
 pub async fn connect(endpoint: &Endpoint) -> io::Result<IpcStream> {
     match endpoint {
         #[cfg(unix)]
-        Endpoint::Unix(path) => Ok(IpcStream::Unix(
-            tokio::net::UnixStream::connect(path).await?,
-        )),
+        Endpoint::Unix(path) => {
+            let legacy = (*path == crate::config::socket_path(&crate::Config::default()))
+                .then(crate::config::legacy_socket_path);
+            connect_unix(path, legacy.as_deref())
+                .await
+                .map(IpcStream::Unix)
+        }
         #[cfg(windows)]
         Endpoint::Pipe(name) => {
             use tokio::net::windows::named_pipe::ClientOptions;
@@ -189,6 +216,27 @@ pub async fn connect(endpoint: &Endpoint) -> io::Result<IpcStream> {
                     Err(e) => return Err(e),
                 }
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn connect_unix(path: &Path, legacy: Option<&Path>) -> io::Result<tokio::net::UnixStream> {
+    match tokio::net::UnixStream::connect(path).await {
+        Ok(stream) => Ok(stream),
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) {
+                if let Some(legacy) = legacy {
+                    if let Ok(stream) = tokio::net::UnixStream::connect(legacy).await {
+                        tracing::warn!(path = %legacy.display(), "deprecated temporary daemon socket; restart repomond to migrate to the runtime directory");
+                        return Ok(stream);
+                    }
+                }
+            }
+            Err(error)
         }
     }
 }
@@ -336,6 +384,21 @@ mod tests {
         write_frame(&mut a, b"hello").await.unwrap();
         let got = read_frame(&mut b).await.unwrap().expect("frame");
         assert_eq!(got, b"hello");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn migration_prefers_new_listener_and_only_falls_back_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("new.sock");
+        let old = dir.path().join("old.sock");
+        let legacy = tokio::net::UnixListener::bind(&old).unwrap();
+        assert!(connect_unix(&new, None).await.is_err());
+        let _old_client = connect_unix(&new, Some(&old)).await.unwrap();
+        legacy.accept().await.unwrap();
+        let current = tokio::net::UnixListener::bind(&new).unwrap();
+        let _new_client = connect_unix(&new, Some(&old)).await.unwrap();
+        current.accept().await.unwrap();
     }
 
     /// Pipe-name mapping is pure string logic, verified on every OS.

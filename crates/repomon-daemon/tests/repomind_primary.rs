@@ -125,7 +125,9 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }
 
@@ -201,6 +203,8 @@ async fn repomind_status_reports_null_window_when_nothing_is_live() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }

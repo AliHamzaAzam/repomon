@@ -19,6 +19,7 @@ use super::backend::{
 #[derive(Clone, Debug)]
 pub struct TmuxRuntime {
     session: String,
+    socket_state: Arc<Mutex<super::tmux_socket::SocketState>>,
     streams: Arc<Mutex<std::collections::HashMap<String, ActiveControlStream>>>,
 }
 
@@ -182,6 +183,7 @@ impl TmuxRuntime {
     pub fn new(session: impl Into<String>) -> Self {
         Self {
             session: session.into(),
+            socket_state: Arc::new(Mutex::new(Default::default())),
             streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -324,19 +326,30 @@ impl TmuxRuntime {
 
     /// repomon runs its tmux on a dedicated socket (named after the session) so its windows
     /// never collide with - or share a server with - the user's own tmux.
-    fn full_args<'a>(&'a self, args: &'a [&'a str]) -> Vec<&'a str> {
-        let mut full = vec!["-L", self.session.as_str()];
-        full.extend_from_slice(args);
+    fn full_args(&self, args: &[&str]) -> Vec<String> {
+        let mut full = vec![
+            "-S".into(),
+            self.socket_path().to_string_lossy().into_owned(),
+        ];
+        full.extend(args.iter().map(|s| (*s).to_string()));
         full
     }
 
+    pub fn socket_path(&self) -> PathBuf {
+        self.socket_state.lock().unwrap().path(&self.session)
+    }
+
+    fn execute(&self, args: &[&str]) -> Result<std::process::Output> {
+        self.socket_state.lock().unwrap().execute(
+            &tmux_program(),
+            &self.session,
+            args,
+            locale_env(),
+        )
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new(tmux_program());
-        cmd.args(self.full_args(args));
-        if let Some((key, value)) = locale_env() {
-            cmd.env(key, value);
-        }
-        let out = cmd.output().map_err(Error::Io)?;
+        let out = self.execute(args)?;
         if !out.status.success() {
             return Err(Error::Agent(format!(
                 "tmux {} failed: {}",
@@ -350,12 +363,7 @@ impl TmuxRuntime {
     /// Treat missing targets as empty output without a separate preflight process, while
     /// propagating other backend failures.
     fn run_allow_absent(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new(tmux_program());
-        cmd.args(self.full_args(args));
-        if let Some((key, value)) = locale_env() {
-            cmd.env(key, value);
-        }
-        let out = cmd.output().map_err(Error::Io)?;
+        let out = self.execute(args)?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
@@ -380,14 +388,13 @@ impl TmuxRuntime {
     }
 
     fn ok(&self, args: &[&str]) -> bool {
-        Command::new(tmux_program())
-            .args(self.full_args(args))
-            .output()
-            .map(|o| o.status.success())
+        self.execute(args)
+            .map(|out| out.status.success())
             .unwrap_or(false)
     }
 
-    /// The tmux socket label repomon uses (pass as `tmux -L <label>`). Equals the session name.
+    /// Legacy socket label, retained for callers that display it. Use `socket_path` or the
+    /// backend attach command for managed invocations.
     pub fn socket(&self) -> &str {
         &self.session
     }
@@ -590,7 +597,7 @@ impl TmuxRuntime {
     /// agent is never killed, so spawning again runs a second agent side by side. Returns the
     /// bare window name accepted by the named-window operations.
     pub fn spawn(&self, lane: LaneId, cwd: &Path, command: &str) -> Result<String> {
-        let taken = self.windows_for(lane).unwrap_or_default();
+        let taken = self.windows_for(lane)?;
         // Allocate above the highest live slot to preserve spawn order across gaps, matching the
         // Windows allocator.
         let next = taken
@@ -858,6 +865,10 @@ impl TmuxRuntime {
             std::process::id(),
             NEXT_PASTE.fetch_add(1, Ordering::Relaxed)
         );
+        self.socket_state
+            .lock()
+            .unwrap()
+            .ensure(&tmux_program(), &self.session, false)?;
         let args = ["load-buffer", "-b", &buffer, "-"];
         let mut cmd = Command::new(tmux_program());
         cmd.args(self.full_args(&args))
@@ -1180,7 +1191,7 @@ fn parse_control_event(line: &[u8], window_id: &str, pane_id: &str) -> Option<Co
     Some(ControlEvent::Stream(ByteStreamEvent::Grid { cols, rows }))
 }
 
-fn process_fingerprint(pid: u32) -> Option<String> {
+pub(super) fn process_fingerprint(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -1209,6 +1220,14 @@ fn process_fingerprint(pid: u32) -> Option<String> {
 }
 
 impl SessionBackend for TmuxRuntime {
+    fn maintain_socket(&self) -> Result<()> {
+        self.socket_state
+            .lock()
+            .unwrap()
+            .ensure(&tmux_program(), &self.session, false)?;
+        Ok(())
+    }
+
     fn paste_text_named(&self, window: &str, text: &str) -> Result<()> {
         TmuxRuntime::paste_text_named(self, window, text)
     }
@@ -1344,8 +1363,8 @@ impl SessionBackend for TmuxRuntime {
         AttachCommand {
             program: tmux_program().to_string_lossy().into_owned(),
             args: vec![
-                "-L".to_string(),
-                self.session.clone(),
+                "-S".to_string(),
+                self.socket_path().to_string_lossy().into_owned(),
                 "attach".to_string(),
                 "-t".to_string(),
                 target.to_string(),
@@ -1381,16 +1400,14 @@ impl SessionBackend for TmuxRuntime {
         let _ = self.pipe_pane_off_named(window);
         let mut command = Command::new(tmux_program());
         command
-            .args([
-                "-L",
-                self.session.as_str(),
+            .args(self.full_args(&[
                 "-C",
                 "attach-session",
                 "-f",
                 "ignore-size",
                 "-t",
                 target.as_str(),
-            ])
+            ]))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1572,10 +1589,7 @@ mod tests {
         let rt = TmuxRuntime::new("repomon");
         let cmd = SessionBackend::attach_command(&rt, "repomon:=lane-7");
         assert_eq!(cmd.program, tmux_program().to_string_lossy().as_ref());
-        assert_eq!(
-            cmd.args,
-            vec!["-L", "repomon", "attach", "-t", "repomon:=lane-7"]
-        );
+        assert_eq!(cmd.args, rt.full_args(&["attach", "-t", "repomon:=lane-7"]));
     }
 
     #[test]
@@ -1835,14 +1849,14 @@ mod tests {
                     .unwrap_or(true)
             }) {
                 let _ = Command::new(tmux_program())
-                    .args(["-L", rt.session(), "kill-server"])
+                    .args(rt.full_args(&["kill-server"]))
                     .output();
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         let _ = Command::new(tmux_program())
-            .args(["-L", rt.session(), "kill-server"])
+            .args(rt.full_args(&["kill-server"]))
             .output();
         panic!("pane process tree survived kill_named: {tree:?}");
     }
@@ -1877,7 +1891,7 @@ mod tests {
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 let _ = Command::new(tmux_program())
-                    .args(["-L", self.0.session(), "kill-server"])
+                    .args(self.0.full_args(&["kill-server"]))
                     .output();
             }
         }
@@ -1973,7 +1987,7 @@ mod tests {
             fingerprint
         );
         let _ = Command::new(tmux_program())
-            .args(["-L", rt.session(), "kill-server"])
+            .args(rt.full_args(&["kill-server"]))
             .output();
     }
 
@@ -2075,7 +2089,7 @@ mod tests {
         rt.pipe_pane_off_named("lane-1").unwrap();
         rt.kill_named("lane-1").unwrap();
         let _ = Command::new("tmux")
-            .args(["-L", rt.session(), "kill-server"])
+            .args(rt.full_args(&["kill-server"]))
             .output();
     }
 
@@ -2139,7 +2153,7 @@ mod tests {
         );
         backend.kill_named("lane-1").unwrap();
         let _ = Command::new(tmux_program())
-            .args(["-L", backend.session(), "kill-server"])
+            .args(backend.full_args(&["kill-server"]))
             .output();
     }
 
@@ -2185,7 +2199,7 @@ mod tests {
 
         backend.kill_named("lane-1").unwrap();
         let _ = Command::new(tmux_program())
-            .args(["-L", backend.session(), "kill-server"])
+            .args(backend.full_args(&["kill-server"]))
             .output();
     }
 
@@ -2221,7 +2235,7 @@ mod tests {
         );
 
         let _ = Command::new("tmux")
-            .args(["-L", rt.session(), "kill-server"])
+            .args(rt.full_args(&["kill-server"]))
             .output();
     }
 
@@ -2289,7 +2303,7 @@ mod tests {
         );
 
         let _ = Command::new(tmux_program())
-            .args(["-L", rt.session(), "kill-server"])
+            .args(rt.full_args(&["kill-server"]))
             .output();
     }
 

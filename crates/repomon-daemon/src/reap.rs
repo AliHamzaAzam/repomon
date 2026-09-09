@@ -84,16 +84,15 @@ async fn note_possible_session_loss(ctx: &Ctx, lane_count: usize) {
     tracing::error!(
         lane_count,
         session = %ctx.backend.label(),
-        "tmux server has zero windows but the store lists live lanes — the backing tmux \
-         server was lost and every agent it hosted is gone; a fresh empty session will be \
-         created on next connect"
+        "tmux has zero reachable windows but the store lists live lanes; socket recovery \
+         must rule out a surviving server before agents can be restored"
     );
 
     let title = "Repomon lost its agent session";
     let body = format!(
-        "The tmux server backing your agents disappeared — {lane_count} lane{} lost their \
-         agent windows. Reconnecting will start a fresh empty session; nothing here can bring \
-         the old windows back.",
+        "The agent windows for {lane_count} lane{} are unreachable. Repomon will recover a \
+         surviving tmux server before allowing replacement. If the server has exited, use \
+         Restore agents to resume saved sessions.",
         if lane_count == 1 { "" } else { "s" }
     );
     ctx.broadcast(

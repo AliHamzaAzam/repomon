@@ -384,7 +384,9 @@ async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
     unsafe {
         match old_path {

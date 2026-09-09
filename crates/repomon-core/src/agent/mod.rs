@@ -13,6 +13,7 @@ pub mod prompt;
 pub mod supervision;
 pub mod text;
 pub mod tmux;
+pub mod tmux_socket;
 pub mod usage;
 pub mod windows;
 

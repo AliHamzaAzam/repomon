@@ -19,8 +19,15 @@ When you spawn an agent (New Lane, the `e` key, or `agent.spawn`), the daemon la
 `lane-<id>` inside the configured session (default `repomon`). On macOS/Linux that window is a tmux window:
 
 ```
-tmux new-window -t repomon -n lane-7 -c <worktree> '<agent-binary> [task]'
+tmux -S '<runtime-dir>/tmux/repomon' new-window -t repomon -n lane-7 -c <worktree> '<agent-binary> [task]'
 ```
+
+The runtime directory is `$XDG_RUNTIME_DIR` when set, otherwise
+`~/Library/Application Support/repomon/run` on macOS and `~/.local/share/repomon/run` on Linux.
+All managed tmux commands, including returned attach commands and control streams, use that socket.
+A surviving legacy server is adopted on its old socket until it exits; a missing socket is recovered with
+SIGUSR1. A live but unreachable server blocks new windows, so reconnecting cannot silently replace its fleet.
+Agent launch commands receive `REPOMON_MCP_SOCKET` for the daemon's resolved endpoint, including explicit overrides.
 
 On **Windows** there is no tmux: the daemon spawns a detached host process, `repomon-agent-host.exe`, per window
 (`\\.\pipe\repomon-<session>-<window>`). The host owns a ConPTY child and a server-side terminal emulator with

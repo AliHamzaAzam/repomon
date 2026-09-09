@@ -131,6 +131,11 @@ pub trait SessionBackend: Send + Sync {
     /// (tmux: the session name).
     fn label(&self) -> String;
 
+    /// Recover missing socket names and refresh timestamps without spawning replacement agents.
+    fn maintain_socket(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Does the backing session/server currently exist?
     fn session_exists(&self) -> bool;
 

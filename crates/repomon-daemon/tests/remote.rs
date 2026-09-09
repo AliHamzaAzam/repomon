@@ -1044,7 +1044,9 @@ async fn fit_arbitrates_between_two_remote_sessions() {
     assert!(external_event["params"]["sequence"].is_u64());
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }
 
@@ -1184,7 +1186,9 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
     assert!(!ctx.bytes_watches.lock().await.contains_key("lane-2"));
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }
 
@@ -1249,8 +1253,8 @@ async fn watched_window_death_closes_stream_while_sibling_survives() {
 
     let clients = std::process::Command::new(repomon_core::agent::tmux_program())
         .args([
-            "-L",
-            &session,
+            "-S",
+            &repomon_core::agent::tmux_socket::managed_socket(&session).to_string_lossy(),
             "list-clients",
             "-F",
             "#{client_control_mode}",
@@ -1275,6 +1279,8 @@ async fn watched_window_death_closes_stream_while_sibling_survives() {
     assert!(!sess.watched_bytes.lock().unwrap().contains("lane-1"));
 
     let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
 }

@@ -3806,7 +3806,22 @@ pub async fn dispatch(
         "agent.adopt" => {
             // Take over an agent running in another terminal and resume its exact backend session.
             // Omitting `agent` preserves the original Claude-only RPC behavior.
-            let p: AgentAdopt = parse(params)?;
+            let mut p: AgentAdopt = parse(params)?;
+            let backend = ctx.backend.clone();
+            if let Err(error) = tokio::task::spawn_blocking(move || backend.maintain_socket())
+                .await
+                .map_err(internal)?
+            {
+                ctx.broadcast(
+                    "event.notification",
+                    json!({
+                        "id": format!("restore-blocked-{}", p.lane_id), "lane_id": p.lane_id,
+                        "kind": "stalled", "attention": "none",
+                        "title": "Agent restore blocked", "body": error.to_string(),
+                    }),
+                );
+                return Err(internal(error));
+            }
             let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
             let (default_agent, customs) = {
                 let cfg = ctx.config.read().await;
@@ -3824,6 +3839,19 @@ pub async fn dispatch(
                 .as_deref()
                 .map(AgentKind::from_kind_str)
                 .unwrap_or(AgentKind::ClaudeCode);
+            if p.session_id.is_none() {
+                p.session_id = ctx
+                    .store
+                    .latest_lane_session(p.lane_id, kind.as_str().into_owned())
+                    .await
+                    .map_err(internal)?;
+            }
+            if p.session_id
+                .as_deref()
+                .is_some_and(|sid| !valid_session_id(sid))
+            {
+                return Err(RpcError::invalid_params("invalid stored session_id"));
+            }
             let session_id = p.session_id.clone();
             let adopt_kind = kind.clone();
             let mut spec = tokio::task::spawn_blocking(move || match adopt_kind {
@@ -3862,9 +3890,8 @@ pub async fn dispatch(
                     env: Vec::new(),
                 },
                 AgentKind::Codex => SpawnSpec {
-                    // Codex has no stable session-resume flag; re-launch fresh in the worktree.
                     program: "codex".into(),
-                    args: Vec::new(),
+                    args: codex_resume_args(session_id),
                     cwd: path,
                     env: Vec::new(),
                 },
@@ -4020,6 +4047,23 @@ pub async fn dispatch(
                 json!({ "lane_id": p.lane_id, "status": "running" }),
             );
             ctx.invalidate_overlay().await;
+            let body = match &p.session_id {
+                Some(sid) => format!("Restored {} session {sid} in {window}", kind.as_str()),
+                None => format!(
+                    "Started {} in {window} using its continue behavior; no saved session id was available",
+                    kind.as_str()
+                ),
+            };
+            tracing::info!(lane_id = p.lane_id, %body, "agent restore completed");
+            ctx.broadcast(
+                "event.notification",
+                json!({
+                    "id": format!("restore-{window}-{}", chrono::Utc::now().timestamp_millis()),
+                    "lane_id": p.lane_id, "session_id": p.session_id,
+                    "kind": "resumed", "attention": "none",
+                    "title": "Agent restored", "body": body,
+                }),
+            );
             Ok(json!({ "lane_id": p.lane_id, "window": window }))
         }
         "agent.capture" => {
@@ -8127,6 +8171,13 @@ fn agent_spawn_spec(command: String, path: PathBuf, kind: &AgentKind) -> SpawnSp
     }
 }
 
+fn codex_resume_args(session_id: Option<String>) -> Vec<String> {
+    vec![
+        "resume".into(),
+        session_id.unwrap_or_else(|| "--last".into()),
+    ]
+}
+
 fn hermes_adopt_spec(path: PathBuf, session_id: Option<String>) -> SpawnSpec {
     SpawnSpec {
         program: "hermes".into(),
@@ -11587,6 +11638,15 @@ mod tests {
             &AgentKind::Hermes,
         );
         assert!(custom.args.is_empty());
+    }
+
+    #[test]
+    fn codex_adopt_resumes_the_saved_session() {
+        assert_eq!(
+            codex_resume_args(Some("saved-session".into())),
+            ["resume", "saved-session"]
+        );
+        assert_eq!(codex_resume_args(None), ["resume", "--last"]);
     }
 
     #[test]

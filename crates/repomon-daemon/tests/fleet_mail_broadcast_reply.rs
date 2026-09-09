@@ -226,7 +226,9 @@ async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
     server.abort();
     let _ = std::fs::remove_file(&sock);
     let _ = Command::new(repomon_core::agent::tmux_program())
-        .args(["-L", &session, "kill-server"])
+        .arg("-S")
+        .arg(repomon_core::agent::tmux_socket::managed_socket(&session))
+        .arg("kill-server")
         .output();
     unsafe {
         match old_path {

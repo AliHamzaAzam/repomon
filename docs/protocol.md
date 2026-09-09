@@ -11,14 +11,37 @@ JSON-RPC 2.0 over a Unix domain socket on macOS/Linux or a named pipe on Windows
 | API | [Methods](#methods), [events](#events) |
 | Usage | [Ledger and recount](#usage-ledger-and-recount), [model rates](#usage-model-rates), [manual refresh](#manual-usage-refresh) |
 
-- **Socket:** `/tmp/repomon-$USER.sock` (macOS) or `$XDG_RUNTIME_DIR/repomon.sock` (Linux), overridable
+- **Socket:** `$XDG_RUNTIME_DIR/repomon.sock` when set; otherwise
+  `~/Library/Application Support/repomon/run/repomon.sock` (macOS) or
+  `~/.local/share/repomon/run/repomon.sock` (Linux), overridable
   via config or `--socket`.
 - **Requests** carry an integer `id`; the daemon replies with a matching `Response`.
 - **Events** are notifications (no `id`) with a method of the form `event.<topic>`. A client must send
   `subscribe` once to start receiving them.
 
-Test it by hand: `nc -U /tmp/repomon-$USER.sock` and send framed JSON, or use the `repomon` CLI which speaks this
-protocol.
+Test it by hand on macOS: `nc -U "${XDG_RUNTIME_DIR:-$HOME/Library/Application Support/repomon/run}/repomon.sock"`
+and send framed JSON, or use the `repomon` CLI which speaks this protocol.
+
+For one migration release, clients targeting the default endpoint try the old `/tmp/repomon-$USER.sock`
+listener if the new endpoint is absent or refuses a connection, and log a deprecation warning. New daemons
+always bind the resolved runtime endpoint; `--socket` and `socket_path` still override it.
+
+Every ten minutes, the daemon checks its listener pathname against the device and inode captured when it
+bound. If the pathname is removed, the still-running daemon binds a replacement listener at the same path,
+closes its orphaned listener, and broadcasts `event.daemon.rebound` with `{ "socket": "<path>" }`. Existing
+client streams remain connected; new connections work again after the watchdog tick. A live replacement
+listener or non-socket file is not unlinked: recovery logs an error and retries on the next tick. Shutdown
+removes only the socket this listener owns. Socket timestamps are refreshed daily.
+
+Managed tmux servers use `-S <runtime-dir>/tmux/<session-name>` (normally `tmux/repomon`). Startup discovers
+legacy servers by their socket and open descriptors, including sockets already unlinked by a cleaner.
+A living legacy server is adopted in place; SIGUSR1 recreates a missing socket before any window creation.
+The runtime path takes effect when that legacy server exits. Recovery failures and multiple surviving
+servers block replacement instead of presenting a falsely empty fleet.
+
+`agent.adopt` uses the supplied session id, or the lane's last stored id for its backend. Claude uses
+`--resume <id>` and Codex uses `resume <id>`. Without a stored id they use `--continue` and `resume --last`,
+respectively. Successful restores and blocked restores emit `event.notification` for desktop visibility.
 
 ## Remote transport (WebSocket)
 
@@ -286,6 +309,7 @@ and only present when readable (a partial parse still returns what it could).
 
 | Topic | Params |
 |---|---|
+| `event.daemon.rebound` | `{ socket }` - the daemon recreated its lost listener pathname; existing accepted streams remain connected. |
 | `event.repo.added` | `{ repo }` |
 | `event.repo.removed` | `{ repo_id }` |
 | `event.repo.changed` | `{ path, kind? }` |

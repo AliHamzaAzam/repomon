@@ -474,7 +474,9 @@ mod tests {
 
     fn kill_tmux_session(session: &str) {
         let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .args(["-L", session, "kill-server"])
+            .arg("-S")
+            .arg(repomon_core::agent::tmux_socket::managed_socket(session))
+            .arg("kill-server")
             .output();
     }
 

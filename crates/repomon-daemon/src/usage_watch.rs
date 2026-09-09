@@ -826,7 +826,11 @@ mod tests {
             &Cancel::new(PROBE_TIMEOUT),
         );
         let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .args(["-L", "repomon-usagetest-claude", "kill-server"])
+            .arg("-S")
+            .arg(repomon_core::agent::tmux_socket::managed_socket(
+                "repomon-usagetest-claude",
+            ))
+            .arg("kill-server")
             .output();
         let r = report.expect("probe should scrape and parse /usage");
         eprintln!("claude windows: {:?}", r.windows);
@@ -847,7 +851,11 @@ mod tests {
             &Cancel::new(PROBE_TIMEOUT),
         );
         let _ = std::process::Command::new(repomon_core::agent::tmux_program())
-            .args(["-L", "repomon-usagetest-codex", "kill-server"])
+            .arg("-S")
+            .arg(repomon_core::agent::tmux_socket::managed_socket(
+                "repomon-usagetest-codex",
+            ))
+            .arg("kill-server")
             .output();
         let r = report.expect("probe should scrape and parse /status");
         eprintln!("codex windows: {:?}", r.windows);
