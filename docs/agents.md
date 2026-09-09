@@ -33,6 +33,29 @@ Several agents can share a worktree. Further spawns or adoptions take slots `lan
 alongside the first agent. Fleet and sidebar show an `×N` badge. In Split/Focus, Tab and Shift+Tab select the agent that
 receives input and attach.
 
+### Initial tasks and spawn warnings
+
+`agent.spawn` passes an initial task as a launch argument when the runtime supports it. Claude and Codex receive a `--`
+separator before the positional prompt. This boundary prevents Claude's trailing variadic `--allowedTools` option from
+consuming the task as another tool name. OpenCode and Antigravity use their respective prompt flags. Hermes remains on
+the typed-input path because its single-turn query mode exits instead of keeping the interactive session alive.
+
+Typed task delivery or recovery waits for an empty, idle composer with no detected dialog, usage-limit menu, or active
+spinner. Startup polling has an eight-second budget. The daemon checks the first 40 task characters in the pane,
+normalizing ANSI escapes and whitespace, and attempts argument-delivery recovery once when confirmation is missing.
+Typed recovery uses a paste buffer on tmux and checks the opening text before submission. A retry requires an empty,
+ready composer; a partially filled composer is not blindly overwritten or given a duplicate task.
+
+The RPC result includes `spawn_warnings` when task delivery or slash-command effort input cannot be confirmed. A warning
+means the agent was launched but its initial input needs inspection. The MCP spawn result preserves these warnings in
+its text, and the desktop keeps them visible while disabling another spawn from that completed dialog. Inspect the
+agent before resending the task. A hidden or collapsed prompt can produce a conservative warning even if its contents
+arrived intact.
+
+An effort setting available only as a slash command is applied when the launched session is idle. The initial task uses
+its launch effort; if the session remains busy through the startup budget, the result warns that the slash setting was
+not confirmed and should be applied when the agent is idle.
+
 ## Choosing an agent
 
 New Lane lists the **auto-detected** built-ins (claude-code / codex / hermes / opencode / antigravity / aider / cursor,

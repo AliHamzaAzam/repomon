@@ -24,10 +24,15 @@ pub fn injection_line(message: &FleetMessage) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     // Long bodies stay intact in the durable inbox. A bounded notice cannot silently become a
-    // plausible tail-only instruction, and the recipient can recover it even after push delivery.
+    // plausible tail-only instruction. Preserve the head even if inbox recovery is unavailable.
     let collapsed = if collapsed.len() > 512 {
+        let mut head_end = 256;
+        while !collapsed.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let head = &collapsed[..head_end];
         format!(
-            "Long message ({} bytes). Read the full body with message_inbox(unread_only:false); find id {}. [BODY OMITTED]",
+            "{head} [BODY OMITTED] Remaining body omitted ({} original bytes). Read the full body with message_inbox(unread_only:false); find id {}.",
             message.body.len(),
             message.id
         )
@@ -532,10 +537,22 @@ mod tests {
     fn long_body_stays_in_inbox_and_frame_is_a_bounded_recovery_notice() {
         let body = "x".repeat(8 * 1024);
         let line = injection_line(&message(&body));
-        assert!(line.len() < 512);
+        assert!(line.len() < 600);
+        assert!(line.contains(&format!("{} [BODY OMITTED]", "x".repeat(256))));
         assert!(line.contains("message_inbox(unread_only:false)"));
         assert!(line.contains("[BODY OMITTED]"));
         assert!(line.ends_with("[END REPOMAIL]"));
+    }
+
+    #[test]
+    fn long_notice_preserves_head_at_utf8_boundary_and_marks_missing_tail() {
+        let head = format!("{}é", "a".repeat(255));
+        let body = format!("{head}{}TAIL MUST NOT SURVIVE", "z".repeat(2101));
+        let line = injection_line(&message(&body));
+        assert!(line.contains(&format!("{} [BODY OMITTED]", "a".repeat(255))));
+        assert!(!line.contains("TAIL MUST NOT SURVIVE"));
+        assert!(line.contains("Remaining body omitted"));
+        assert!(line.contains("message_inbox(unread_only:false)"));
     }
 
     #[test]

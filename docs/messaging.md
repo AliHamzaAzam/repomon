@@ -102,15 +102,36 @@ losing their place; a sender policy block records a durable `delivery_error` so 
 pending mail.
 
 The injected text is one compact line. Control characters are removed and whitespace is collapsed for this line, while
-the full original body remains in SQLite:
+the full original body remains verbatim in SQLite. A short body is framed as:
 
 ```text
-[REPOMAIL id=<id> from=<address> reply_to=<id>] <body> [END REPOMAIL]
+[REPOMAIL id=<id> from=<address> reply_to=<id>] <body> [<id>] [END REPOMAIL]
 ```
 
-`reply_to` is `none` for a root message. Successful injection sets `delivered_at`. Polling an inbox also marks returned
-queued messages delivered because the recipient has obtained their contents through the durable channel. Reading and
-delivery are separate transitions. Delivery failures are recorded and retried when safe; they do not delete the message.
+`reply_to` is `none` for a root message. The closing receipt includes the message's own ID, so verification cannot
+mistake another message's closing marker for this one. Submitted tmux input uses a paste buffer; bracketed-paste framing
+is added only when the receiving application advertises that mode. The daemon verifies the opening frame identifier
+before recording successful push delivery.
+
+When the collapsed body exceeds 512 UTF-8 bytes, the injected frame contains a short notice with `[BODY OMITTED]`
+after the first 256 UTF-8 bytes of the collapsed body, rounded down to a character boundary. This preserves readable
+context if inbox retrieval is unavailable and explicitly marks the missing remainder. The notice identifies the message
+and asks the recipient to call `message_inbox` with
+`unread_only:false`. This returns full original bodies, including delivered and read messages, newest first with bounded
+pagination. The notice does not truncate or replace the stored report. Short prompts and file pointers are not a
+required convention for avoiding the former input-loss bug; this notice is a mail transport choice.
+
+Before terminal input, the daemon atomically claims the `(message ID, recipient window)` pair in durable storage.
+Concurrent automatic and forced delivery attempts cannot both claim it. A verified skip releases the claim because no
+input was sent, allowing a later attempt when the recipient is ready. Once input has been sent or its outcome is
+uncertain, the claim remains across later sweeps and daemon restarts. That message is never automatically replayed into
+the same window: a verification miss or a crash could otherwise duplicate an instruction the agent already received.
+An uncertain attempt records a delivery error and raises attention; recover its full body through the inbox rather than
+blindly resending it. The same recovery applies if a crash occurred after claiming but before input was written.
+
+Successful push delivery sets both `delivered_at` and `read_at`. Inbox polling marks returned queued messages delivered
+but does not mark them read; `message_mark_read` records that separate transition. Neither delivery errors nor retained
+claims delete the stored message.
 
 ## Local RPC
 
