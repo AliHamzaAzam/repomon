@@ -1,6 +1,7 @@
 import { For, Show, createSignal, onMount } from "solid-js";
 
 import type { AgentChoice, Lane } from "../bindings";
+import { fetchAgentChoices, pickDefaultAgent } from "../ipc/agentChoices";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall } from "../ipc/rpc";
 import { AgentIcon } from "./icons";
@@ -21,13 +22,10 @@ export default function SpawnModal(props: {
   const [error, setError] = createSignal<TranslatedError | null>(null);
 
   onMount(() => {
-    void daemonCall("agent.detect")
+    void fetchAgentChoices()
       .then((detected) => {
         setChoices(detected);
-        const preferred = detected.find((choice) => choice.default && choice.detected)
-          ?? detected.find((choice) => choice.detected)
-          ?? detected[0];
-        setAgent(preferred?.name ?? "claude-code");
+        setAgent(pickDefaultAgent(detected));
       })
       .catch((cause: unknown) => setError(translateError(cause)));
   });

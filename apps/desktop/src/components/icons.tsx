@@ -177,6 +177,27 @@ export function IconGitBranch(props: IconProps): JSX.Element {
   );
 }
 
+export function IconHome(props: IconProps): JSX.Element {
+  const s = () => props.size ?? 13;
+  return (
+    <svg
+      width={s()}
+      height={s()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width={props.strokeWidth ?? 1.75}
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={props.class}
+      aria-hidden="true"
+    >
+      <path d="M3 11.5 12 4l9 7.5" />
+      <path d="M5.5 10v9a1 1 0 0 0 1 1H9.5a1 1 0 0 0 1-1v-4a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v4a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-9" />
+    </svg>
+  );
+}
+
 export function IconMail(props: IconProps): JSX.Element {
   const s = () => props.size ?? 13;
   return (
