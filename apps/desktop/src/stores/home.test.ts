@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
-import { needsInputLanes, recentLanes, slugify, uniqueBranchName } from "./home";
+import { formatStripAge, laneTitle, needsInputLanes, recentLanes, slugify, stripMark, uniqueBranchName } from "./home";
 
 function repo(id: number, name: string): Repo {
   return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
@@ -114,5 +114,59 @@ describe("uniqueBranchName", () => {
   it("appends the smallest free numeric suffix on collision", () => {
     const taken = ["fix-flaky-login-test", "fix-flaky-login-test-2"];
     expect(uniqueBranchName("Fix flaky login test", taken)).toBe("fix-flaky-login-test-3");
+  });
+});
+
+describe("laneTitle", () => {
+  const target = repo(1, "a");
+  const withBranch = lane(1, target, [], "2026-09-10T10:00:00Z", "feature/x");
+  const detached = lane(2, target, [], "2026-09-10T10:00:00Z", null);
+
+  it("prefers the transcript headline when the daemon has one cached", () => {
+    expect(laneTitle(withBranch, "Add collections to charms page")).toBe("Add collections to charms page");
+  });
+
+  it("falls back to the branch name while the headline is loading or absent", () => {
+    expect(laneTitle(withBranch, undefined)).toBe("feature/x");
+    expect(laneTitle(withBranch, null)).toBe("feature/x");
+  });
+
+  it("falls back to the worktree name for a detached lane with no headline", () => {
+    expect(laneTitle(detached, null)).toBe(`wt-${detached.id}`);
+  });
+});
+
+describe("formatStripAge", () => {
+  const now = Date.parse("2026-09-10T12:00:00Z");
+
+  it("formats minutes, hours and days without an 'ago' suffix", () => {
+    expect(formatStripAge("2026-09-10T11:56:00Z", now)).toBe("4m");
+    expect(formatStripAge("2026-09-10T10:00:00Z", now)).toBe("2h");
+    expect(formatStripAge("2026-09-08T12:00:00Z", now)).toBe("2d");
+  });
+
+  it("reads under a minute as now", () => {
+    expect(formatStripAge("2026-09-10T11:59:45Z", now)).toBe("now");
+  });
+});
+
+describe("stripMark", () => {
+  it("marks an urgent state with the attention bolt", () => {
+    expect(stripMark("needs-you")).toEqual({ icon: "bolt", tone: "attention" });
+    expect(stripMark("decision")).toEqual({ icon: "bolt", tone: "attention" });
+  });
+
+  it("marks running and inferred activity with the signal play mark", () => {
+    expect(stripMark("running")).toEqual({ icon: "play", tone: "signal" });
+    expect(stripMark("inferred")).toEqual({ icon: "play", tone: "signal" });
+  });
+
+  it("marks an ended session done rather than idle", () => {
+    expect(stripMark("exited")).toEqual({ icon: "check", tone: "muted" });
+  });
+
+  it("marks idle and lane-less states with the plain square", () => {
+    expect(stripMark("idle")).toEqual({ icon: "stop", tone: "muted" });
+    expect(stripMark(null)).toEqual({ icon: "stop", tone: "muted" });
   });
 });

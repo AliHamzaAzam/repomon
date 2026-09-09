@@ -1,5 +1,5 @@
 import type { Lane } from "../bindings";
-import { agentStateIn, agentStateReason, isUrgentState, laneState } from "./fleet";
+import { agentStateIn, agentStateReason, isUrgentState, laneState, type AgentState, type LaneTone } from "./fleet";
 
 export interface NeedsYouRow {
   lane: Lane;
@@ -64,4 +64,35 @@ export function uniqueBranchName(headline: string, existingBranches: Iterable<st
     const candidate = `${base}-${n}`;
     if (!taken.has(candidate)) return candidate;
   }
+}
+
+/// A strip's title: the lane's transcript headline when the daemon has one cached, else the
+/// branch name, else the worktree name for a detached lane. `headline` is `undefined` while the
+/// `lane.headline` RPC is still in flight, in which case the fallback shows rather than a blank.
+export function laneTitle(lane: Lane, headline: string | null | undefined): string {
+  return headline || lane.worktree.branch || lane.worktree.name;
+}
+
+/// The strip board's compact age column: no "ago" suffix, so it fits the mock's narrow fixed
+/// column. Distinct from `formatRelativeTime`, which is prose-length for use elsewhere.
+export function formatStripAge(iso: string, now: number = Date.now()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const diffSecs = Math.max(0, Math.round((now - then) / 1000));
+  const MINUTE = 60;
+  const HOUR = MINUTE * 60;
+  const DAY = HOUR * 24;
+  if (diffSecs < MINUTE) return "now";
+  if (diffSecs < HOUR) return `${Math.floor(diffSecs / MINUTE)}m`;
+  if (diffSecs < DAY) return `${Math.floor(diffSecs / HOUR)}h`;
+  return `${Math.floor(diffSecs / DAY)}d`;
+}
+
+/// Which SVG mark and tone a strip's status column shows, from the same state vocabulary the
+/// sidebar reads. A lane with no agents at all reads as idle, same as one that is merely quiet.
+export function stripMark(state: AgentState | null): { icon: "bolt" | "play" | "stop" | "check"; tone: LaneTone } {
+  if (state !== null && isUrgentState(state)) return { icon: "bolt", tone: "attention" };
+  if (state === "running" || state === "inferred") return { icon: "play", tone: "signal" };
+  if (state === "exited") return { icon: "check", tone: "muted" };
+  return { icon: "stop", tone: "muted" };
 }

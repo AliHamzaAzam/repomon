@@ -87,6 +87,8 @@ function stubs(repos: Repo[], lanes: Lane[], sortMode = "default") {
     controller: () => controllerSummary(lanes),
     selectedLaneId: () => null,
     setSelectedLaneId: vi.fn(),
+    homeSelected: () => false,
+    selectHome: vi.fn(),
     query: () => "",
     setQuery: vi.fn(),
     urgentOnly: () => false,

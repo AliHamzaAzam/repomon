@@ -365,6 +365,7 @@ function App(props: AppProps) {
       case "layout.focused": workspace.chooseLayout("focused"); break;
       case "layout.split": workspace.chooseLayout("split"); break;
       case "layout.grid": workspace.chooseLayout("grid"); break;
+      case "fleet.home": fleet.selectHome(); break;
       case "fleet.filter": searchInput?.focus(); break;
       case "fleet.urgent": fleet.setUrgentOnly(!fleet.urgentOnly()); break;
       case "fleet.refresh": void fleet.refresh(); break;
