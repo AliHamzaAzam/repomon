@@ -1912,15 +1912,9 @@ mod tests {
             .output();
     }
 
-    #[test]
-    fn stale_close_and_legacy_sweep_preserve_replacement_control_stream() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
-            return;
-        }
-        let backend = TmuxRuntime::new(format!("repomon-tagtest-{}", std::process::id()));
-        let dir = tempfile::tempdir().unwrap();
-        backend.spawn(1, dir.path(), "sh").unwrap();
+    // Reuse the control-stream test's runtime so this regression inherits the fixture's socket
+    // selection and cleanup, including isolated sockets.
+    fn assert_stale_close_and_legacy_sweep_preserve_replacement(backend: &TmuxRuntime) {
         let first = backend.open_byte_stream("lane-1").unwrap();
         let mut replacement = backend.open_byte_stream("lane-1").unwrap();
         assert_ne!(first.tag, replacement.tag);
@@ -1953,10 +1947,6 @@ mod tests {
         backend
             .close_byte_stream("lane-1", replacement.tag)
             .unwrap();
-        backend.kill_named("lane-1").unwrap();
-        let _ = Command::new(tmux_program())
-            .args(["-L", backend.session(), "kill-server"])
-            .output();
         assert!(
             survived,
             "stale teardown or legacy sweep closed the replacement"
@@ -1972,6 +1962,7 @@ mod tests {
         let backend = TmuxRuntime::new(format!("repomon-controltest-{}", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
         backend.spawn(1, dir.path(), "sh").unwrap();
+        assert_stale_close_and_legacy_sweep_preserve_replacement(&backend);
         backend.resize_named("lane-1", 100, 30).unwrap();
         let before = backend.size_named("lane-1");
 
