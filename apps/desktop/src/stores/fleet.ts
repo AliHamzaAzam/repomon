@@ -422,7 +422,20 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   const lanes = () => laneStore;
   const [usage, setUsage] = createSignal<AccountUsage[]>([]);
   const [terminals, setTerminals] = createSignal<Array<{ lane_id: number; id: string }>>([]);
-  const [selectedLaneId, setSelectedLaneId] = createSignal<number | null>(null);
+  const [selectedLaneId, setSelectedLaneIdRaw] = createSignal<number | null>(null);
+  // Whether the operator explicitly asked for the home screen, as opposed to no lane being
+  // selected yet. Without this, the auto-select fallback below would pull the operator back
+  // into a lane on the next 1.2s poll, since it only sees `selectedLaneId() === null`.
+  const [homeSelected, setHomeSelected] = createSignal(false);
+  // Selecting any real lane leaves the home screen; `selectHome` is the only way back in.
+  function setSelectedLaneId(id: number | null) {
+    setHomeSelected(false);
+    setSelectedLaneIdRaw(id);
+  }
+  function selectHome() {
+    setHomeSelected(true);
+    setSelectedLaneIdRaw(null);
+  }
   // The tmux window of the pane in view. Owned by the workspace store (which holds the layout and
   // tab state) and mirrored here, because the usage memo lives on this side of the wiring.
   const [focusedWindow, setFocusedWindow] = createSignal<string | null>(null);
@@ -537,11 +550,11 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
       // Never auto-select into a repo the user hid, and drop the selection if the repo it lives
       // in was just hidden.
       const selectable = snapshot.lanes.filter((lane) => !lane.repo.hidden);
-      if (current === null || !selectable.some((lane) => lane.id === current)) {
+      if (!homeSelected() && (current === null || !selectable.some((lane) => lane.id === current))) {
         // The repomind home is selectable (the pinned row selects it) but never the default:
         // landing there on first sync would leave every repo group unhighlighted.
         const ordinary = selectable.filter((lane) => !isControllerLane(lane));
-        setSelectedLaneId([...ordinary].sort(byPriority)[0]?.id ?? null);
+        setSelectedLaneIdRaw([...ordinary].sort(byPriority)[0]?.id ?? null);
       }
     } catch (cause) {
       if (active && token === loadToken) setError(cause instanceof Error ? cause.message : String(cause));
@@ -686,6 +699,8 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
     selectedLane,
     selectedLaneId,
     setSelectedLaneId,
+    homeSelected,
+    selectHome,
     focusedWindow,
     setFocusedWindow,
     query,

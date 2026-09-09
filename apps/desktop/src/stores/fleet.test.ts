@@ -523,6 +523,25 @@ describe("the repomind home", () => {
     teardown();
   });
 
+  it("holds the strip-board home screen across a refresh instead of auto-selecting a lane", async () => {
+    const lanes = [lane({ id: 10, repo: project }), lane({ id: 90, repo: home, role: "controller" })];
+    const { fleet, teardown } = await startedStore([project, home], lanes);
+    await fleet.refresh();
+    expect(fleet.selectedLaneId()).toBe(10);
+
+    fleet.selectHome();
+    expect(fleet.selectedLaneId()).toBeNull();
+    expect(fleet.homeSelected()).toBe(true);
+
+    await fleet.refresh();
+    expect(fleet.selectedLaneId()).toBeNull();
+    expect(fleet.homeSelected()).toBe(true);
+
+    fleet.setSelectedLaneId(10);
+    expect(fleet.homeSelected()).toBe(false);
+    teardown();
+  });
+
   it("makes the pinned row the first stop of arrow navigation", async () => {
     const lanes = [
       lane({ id: 10, repo: project }),

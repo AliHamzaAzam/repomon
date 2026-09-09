@@ -47,6 +47,7 @@ export type { PluginProvides } from "./PluginProvides";
 export type { PolicyAction } from "./PolicyAction";
 export type { PolicySource } from "./PolicySource";
 export type { PriceOverride } from "./PriceOverride";
+export type { PullRequestSummary } from "./PullRequestSummary";
 export type { RateSource } from "./RateSource";
 export type { RateSourceCounts } from "./RateSourceCounts";
 export type { RatesStatus } from "./RatesStatus";
