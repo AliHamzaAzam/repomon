@@ -1344,6 +1344,7 @@ impl SessionBackend for TmuxRuntime {
             command.env(key, value);
         }
         let mut child = command.spawn().map_err(Error::Io)?;
+        tracing::debug!(window, tag, pid = child.id(), "control stream opened");
         let input = child
             .stdin
             .take()
@@ -1367,13 +1368,14 @@ impl SessionBackend for TmuxRuntime {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
             let mut line = Vec::new();
-            loop {
+            let reason = loop {
                 line.clear();
-                let Ok(read) = reader.read_until(b'\n', &mut line) else {
-                    break;
+                let read = match reader.read_until(b'\n', &mut line) {
+                    Ok(read) => read,
+                    Err(error) => break format!("read error: {error}"),
                 };
                 if read == 0 {
-                    break;
+                    break "stdout EOF".to_string();
                 }
                 while matches!(line.last(), Some(b'\n' | b'\r')) {
                     line.pop();
@@ -1381,12 +1383,14 @@ impl SessionBackend for TmuxRuntime {
                 match parse_control_event(&line, &window_id, &pane_id) {
                     Some(ControlEvent::Stream(event)) => match tx.send(event) {
                         Ok(()) => {}
-                        Err(_) => break,
+                        Err(_) => break "receiver dropped".to_string(),
                     },
-                    Some(ControlEvent::Closed) => break,
+                    Some(ControlEvent::Closed) => break "target window closed".to_string(),
                     _ => {}
                 }
-            }
+            };
+            let status = child.try_wait().ok().flatten();
+            tracing::debug!(window = %stream_window, tag, %reason, ?status, "control stream ended");
             let _ = child.kill();
             let _ = child.wait();
             let mut streams = streams.lock().expect("control streams lock");

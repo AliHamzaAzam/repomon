@@ -166,7 +166,9 @@ async fn start_background_tasks(ctx: Arc<Ctx>) {
     tokio::spawn(repomon_daemon::stream_output(ctx.clone()));
 
     // Clear unread pipe-panes so tmux cannot buffer their output indefinitely.
-    tokio::spawn(repomon_daemon::bytes_stream::sweep(ctx.backend.clone()));
+    // Finish stale-stream cleanup before accepting subscriptions, so startup cannot close
+    // a stream that a newly connected client just opened.
+    repomon_daemon::bytes_stream::sweep(ctx.backend.clone()).await;
 
     // Stream the repomind orchestrator's pane to a watching command-center view (self-gates on a
     // running session + a watcher, so it's free until the orchestrator is opened).
