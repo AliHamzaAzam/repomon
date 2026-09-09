@@ -16,6 +16,7 @@ import RightPanelHost, {
 } from "./components/RightPanelHost";
 import { ResizableSplit } from "./components/ResizableSplit";
 import TerminalWorkspace from "./components/TerminalWorkspace";
+import HomeScreen from "./components/HomeScreen";
 import UpdateBanner from "./components/UpdateBanner";
 import ConnectionTrouble from "./components/ConnectionTrouble";
 import { daemonDiagnostics, openDaemonLog } from "./ipc/boot";
@@ -766,20 +767,24 @@ function App(props: AppProps) {
             aria-hidden={extensionsOpen() || workspace.editorWorkspace() ? "true" : undefined}
             inert={extensionsOpen() || workspace.editorWorkspace()}
           >
-            <TerminalWorkspace
-              fleet={fleet}
-              actions={actions}
-              workspace={workspace}
-              editor={editor}
-              onEnsureEditorOpen={() => {
-                if (!isEditorActive()) {
-                  workspace.setMultitasking(false);
-                  setRepomindOpen(false);
-                  persistRepomindOpen(false);
-                  workspace.setEditorWorkspace(true);
-                }
-              }}
-            />
+            {/* Multitasking spans the whole fleet rather than one lane, so it keeps its own view
+                regardless of selection; the home screen only replaces the single-lane empty state. */}
+            <Show when={workspace.multitasking() || fleet.selectedLaneId() !== null} fallback={<HomeScreen fleet={fleet} />}>
+              <TerminalWorkspace
+                fleet={fleet}
+                actions={actions}
+                workspace={workspace}
+                editor={editor}
+                onEnsureEditorOpen={() => {
+                  if (!isEditorActive()) {
+                    workspace.setMultitasking(false);
+                    setRepomindOpen(false);
+                    persistRepomindOpen(false);
+                    workspace.setEditorWorkspace(true);
+                  }
+                }}
+              />
+            </Show>
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">
