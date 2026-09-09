@@ -417,6 +417,147 @@ mod tests {
         (Ctx::new(store, Config::default(), None), repo.id, lane)
     }
 
+    /// Scans `contents` with the given reader and commits the one resulting session to `lane_id`,
+    /// mirroring what `usage_ingest::ingest_once` does after a scan without going through the
+    /// filesystem discovery it uses to find sources in the first place.
+    async fn commit_scanned_session(
+        ctx: &Arc<Ctx>,
+        lane_id: i64,
+        source_path: &std::path::Path,
+        contents: &str,
+        scan: impl FnOnce(
+            &std::path::Path,
+            u64,
+        ) -> repomon_core::Result<repomon_core::usage_ledger::scan::SourceScan>,
+    ) {
+        std::fs::write(source_path, contents).unwrap();
+        let result = scan(source_path, 0).unwrap();
+        let session = result
+            .sessions
+            .first()
+            .expect("one scanned session")
+            .clone();
+        // `usage_sessions_between` (what `lane_headline` reads through) joins the sessions table
+        // onto `usage_events` by (agent_kind, session_id), so the session row is invisible without
+        // at least one attributed event alongside it, same as a real ingest pass writes both.
+        let events = result
+            .events
+            .into_iter()
+            .map(|e| repomon_core::usage_ledger::UsageEvent {
+                at: e.at,
+                agent_kind: e.agent_kind,
+                model: e.model,
+                account: e.account,
+                lane_id: Some(lane_id),
+                repo_id: None,
+                session_id: e.session_id,
+                window: None,
+                cwd: e.cwd,
+                input_tokens: e.tokens.input,
+                output_tokens: e.tokens.output,
+                cache_read_tokens: e.tokens.cache_read,
+                cache_write_tokens: e.tokens.cache_write,
+                thinking_tokens: e.thinking_tokens,
+                estimated: e.estimated,
+                external: false,
+                subagent: e.subagent,
+                source_path: e.source_path,
+                source_offset: e.source_offset,
+            })
+            .collect();
+        let sessions = vec![repomon_core::usage_ledger::UsageSessionMeta {
+            session_id: session.session_id,
+            agent_kind: session.agent_kind,
+            headline: session.headline,
+            headline_raw: session.headline_raw,
+            headline_version: repomon_core::usage_ledger::HEADLINE_VERSION,
+            cwd: session.cwd,
+            repo_id: None,
+            lane_id: Some(lane_id),
+            started_at: session.first_at,
+            ended_at: session.last_at,
+            turns: session.turns,
+            tool_calls: session.tool_calls,
+            retries: session.retries,
+            external: false,
+            source_path: Some(source_path.display().to_string()),
+            counts_version: repomon_core::usage_ledger::INGEST_VERSION,
+        }];
+        ctx.store
+            .commit_usage_source(
+                UsageCursor {
+                    source_path: source_path.display().to_string(),
+                    offset: result.next_offset,
+                    mtime: 0,
+                    scanned_at: Utc::now(),
+                    error: None,
+                    ingest_version: repomon_core::usage_ledger::INGEST_VERSION,
+                },
+                false,
+                events,
+                sessions,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lane_headline_reads_the_scanned_headline_for_claude_and_codex_sessions() {
+        use repomon_core::usage_ledger::scan::{scan_claude_transcript, scan_codex_rollout};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _repo_id, claude_lane) = ctx_with_repo().await;
+        let codex_lane = ctx
+            .store
+            .get_or_create_lane(_repo_id, "/repos/demo/wt/codex-feature".to_string())
+            .await
+            .unwrap();
+
+        commit_scanned_session(
+            &ctx,
+            claude_lane,
+            &dir.path().join("claude.jsonl"),
+            include_str!("../../repomon-core/src/usage_ledger/fixtures/claude_usage_v0.jsonl"),
+            |path, offset| scan_claude_transcript(path, offset, None),
+        )
+        .await;
+        // No fixture in usage_ledger/fixtures exercises a real (non-injected) codex user_message,
+        // so this inlines the smallest valid rollout that does: session_meta, a turn_context
+        // for the model, one user_message to headline, and one token_count turn.
+        let codex_rollout = r#"{"timestamp": "2026-09-02T09:00:00.000Z", "type": "session_meta", "payload": {"session_id": "sess-codex-headline-1", "id": "roll-1", "timestamp": "2026-09-02T09:00:00.000Z", "cwd": "/repos/demo", "originator": "codex-tui", "cli_version": "0.152.0", "model_provider": "openai"}}
+{"timestamp": "2026-09-02T09:00:01.000Z", "type": "turn_context", "payload": {"turn_id": "turn-1", "cwd": "/repos/demo", "model": "gpt-5.6-sol", "effort": "medium", "summary": "auto"}}
+{"timestamp": "2026-09-02T09:00:02.000Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Wire the ledger to the daily digest"}}
+{"timestamp": "2026-09-02T09:01:00.000Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 100, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 50, "reasoning_output_tokens": 0, "total_tokens": 150}, "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 50, "reasoning_output_tokens": 0, "total_tokens": 150}, "model_context_window": 258400}}}
+{"timestamp": "2026-09-02T09:02:00.000Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-1"}}
+"#;
+        commit_scanned_session(
+            &ctx,
+            codex_lane,
+            &dir.path().join("codex.jsonl"),
+            codex_rollout,
+            scan_codex_rollout,
+        )
+        .await;
+
+        assert_eq!(
+            lane_headline(&ctx, claude_lane).await.unwrap().as_deref(),
+            Some("Wire up the ledger"),
+            "the headline scan_claude_transcript reads from the first real user turn"
+        );
+        assert_eq!(
+            lane_headline(&ctx, codex_lane).await.unwrap().as_deref(),
+            Some("Wire the ledger to the daily digest"),
+            "the headline scan_codex_rollout reads from the first user_message"
+        );
+        // A lane with no ledger session at all falls back to None; callers use the branch name.
+        let no_session_lane = ctx
+            .store
+            .get_or_create_lane(_repo_id, "/repos/demo/wt/untouched".to_string())
+            .await
+            .unwrap();
+        assert_eq!(lane_headline(&ctx, no_session_lane).await.unwrap(), None);
+    }
+
     #[tokio::test]
     async fn repo_and_lane_groups_are_labelled_with_names_not_row_ids() {
         let (ctx, repo_id, lane_id) = ctx_with_repo().await;
