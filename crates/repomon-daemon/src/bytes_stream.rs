@@ -23,6 +23,8 @@ pub struct WatchEntry {
     /// Globally-unique tag for THIS stream instance; guards EOF cleanup against a stop→restart
     /// race (see the module doc).
     pub generation: u64,
+    /// Backend stream identity, used to close only the generation this entry owns.
+    pub backend_tag: u64,
     /// Last raw PTY chunk accepted from this generation.
     pub sequence: Arc<AtomicU64>,
     /// Last pane grid observed by either a mediated resize or the byte-watch grid probe.
@@ -127,6 +129,7 @@ pub async fn watch(
             lane,
             refs: HashSet::from([conn_id]),
             generation,
+            backend_tag: stream.tag,
             sequence: sequence.clone(),
             grid: initial_grid,
         },
@@ -235,55 +238,51 @@ pub async fn unwatch(
     window: &str,
     conn_id: u64,
 ) {
-    let mut map = watches.lock().await;
-    let Some(entry) = map.get_mut(window) else {
-        return;
+    let entry = {
+        let mut map = watches.lock().await;
+        let Some(entry) = map.get_mut(window) else {
+            return;
+        };
+        if !release_ref(entry, conn_id) {
+            return; // other connections still share this window's stream
+        }
+        map.remove(window)
+            .expect("entry present under the same lock")
     };
-    if !release_ref(entry, conn_id) {
-        return; // other connections still share this window's stream
-    }
     tracing::debug!(window, conn_id, "byte watch last subscriber left");
-    map.remove(window)
-        .expect("entry present under the same lock");
-    // Keep setup serialized with teardown: a delayed close must never kill a replacement.
     let backend = backend.clone();
     let win = window.to_string();
-    let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&win)).await;
-    drop(map);
+    let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&win, entry.backend_tag))
+        .await;
 }
 
 /// Release `conn_id` from EVERY window it watches, closing the streams that thereby empty. Called
 /// from `Ctx::close_session` so a connection's byte watches die with it, whatever it was watching.
 pub async fn unwatch_all(backend: &Arc<dyn SessionBackend>, watches: &Watches, conn_id: u64) {
-    let mut stopped: Vec<String> = Vec::new();
-    let mut map = watches.lock().await;
+    let mut stopped = Vec::new();
     {
+        let mut map = watches.lock().await;
         map.retain(|window, entry| {
             if release_ref(entry, conn_id) {
-                stopped.push(window.clone());
+                stopped.push((window.clone(), entry.backend_tag));
                 false
             } else {
                 true
             }
         });
     }
-    for window in stopped {
+    let mut closes = tokio::task::JoinSet::new();
+    for (window, tag) in stopped {
         let backend = backend.clone();
-        let _ = tokio::task::spawn_blocking(move || backend.close_byte_stream(&window)).await;
+        closes.spawn_blocking(move || backend.close_byte_stream(&window, tag));
     }
-    drop(map);
+    while closes.join_next().await.is_some() {}
 }
 
-/// Startup sweep: close the byte stream on every window of our session. A daemon that died with
-/// a watch active leaves the backend's pipe running with no reader - on tmux that makes the
-/// server buffer the pane's output in memory without bound.
+/// Startup cleanup for legacy plumbing only. It cannot close any current stream generation and
+/// runs independently of RPC accept, so an unresponsive backend cannot gate daemon startup.
 pub async fn sweep(backend: Arc<dyn SessionBackend>) {
-    let _ = tokio::task::spawn_blocking(move || {
-        for w in backend.list_windows().unwrap_or_default() {
-            let _ = backend.close_byte_stream(&w);
-        }
-    })
-    .await;
+    let _ = tokio::task::spawn_blocking(move || backend.sweep_legacy_byte_streams()).await;
 }
 
 #[cfg(test)]
@@ -299,7 +298,8 @@ mod tests {
     #[derive(Default)]
     struct ScriptedBackend {
         opens: AtomicU64,
-        senders: StdMutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>>>,
+        senders:
+            StdMutex<HashMap<String, (u64, tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>)>>,
         closing: tokio::sync::Notify,
         block_close: StdMutex<bool>,
         close_gate: Condvar,
@@ -387,18 +387,27 @@ mod tests {
             }
         }
         fn open_byte_stream(&self, window: &str) -> repomon_core::Result<ByteStream> {
-            self.opens.fetch_add(1, Ordering::SeqCst);
+            let tag = self.opens.fetch_add(1, Ordering::SeqCst);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            self.senders.lock().unwrap().insert(window.to_string(), tx);
-            Ok(ByteStream { rx })
+            self.senders
+                .lock()
+                .unwrap()
+                .insert(window.to_string(), (tag, tx));
+            Ok(ByteStream { tag, rx })
         }
-        fn close_byte_stream(&self, window: &str) -> repomon_core::Result<()> {
+        fn close_byte_stream(&self, window: &str, tag: u64) -> repomon_core::Result<()> {
             self.closing.notify_one();
             let mut blocked = self.block_close.lock().unwrap();
-            while *blocked {
+            while *blocked && window == "A" {
                 blocked = self.close_gate.wait(blocked).unwrap();
             }
-            self.senders.lock().unwrap().remove(window);
+            let mut senders = self.senders.lock().unwrap();
+            if senders
+                .get(window)
+                .is_some_and(|(current, _)| *current == tag)
+            {
+                senders.remove(window);
+            }
             Ok(())
         }
     }
@@ -425,6 +434,7 @@ mod tests {
         assert_eq!(scripted.opens.load(Ordering::SeqCst), 2);
         unwatch(&backend, &watches, "A", 1).await;
         scripted.senders.lock().unwrap()["A"]
+            .1
             .send(ByteStreamEvent::Bytes(b"still live".to_vec()))
             .unwrap();
         let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -461,22 +471,26 @@ mod tests {
             })
         };
         scripted.closing.notified().await;
-        let mut replacement = {
-            let backend = backend.clone();
-            let watches = watches.clone();
-            tokio::spawn(async move { watch(backend, events, &watches, 1, "A".into(), 2).await })
-        };
-        let raced = tokio::time::timeout(Duration::from_millis(30), &mut replacement).await;
+        // The close-entered handshake above proves teardown is blocked. Require positive
+        // completion of unrelated registry operations and the replacement before releasing it;
+        // a task that never gets scheduled cannot make this test pass.
+        let raced = tokio::time::timeout(Duration::from_secs(2), async {
+            watch(backend.clone(), events.clone(), &watches, 1, "B".into(), 3)
+                .await
+                .unwrap();
+            assert_eq!(note_grid(&watches, "B", None, (100, 30)).await, Some(true));
+            unwatch(&backend, &watches, "B", 3).await;
+            watch(backend.clone(), events, &watches, 1, "A".into(), 2).await
+        })
+        .await;
         *scripted.block_close.lock().unwrap() = false;
         scripted.close_gate.notify_all();
         closer.await.unwrap();
-        assert!(
-            raced.is_err(),
-            "replacement opened before previous backend teardown completed"
-        );
-        replacement.await.unwrap().unwrap();
+        let replacement = raced
+            .expect("blocked close stalled registry operations")
+            .unwrap();
         assert!(scripted.senders.lock().unwrap().contains_key("A"));
-        assert!(cursor(&watches, "A").await.is_some());
+        assert_eq!(cursor(&watches, "A").await, Some(replacement));
         unwatch_all(&backend, &watches, 2).await;
     }
 
@@ -495,6 +509,7 @@ mod tests {
             lane: 1,
             refs: refs.iter().copied().collect(),
             generation,
+            backend_tag: generation,
             sequence: Arc::new(AtomicU64::new(0)),
             grid: Some((80, 24)),
         }

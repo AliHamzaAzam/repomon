@@ -752,9 +752,9 @@ mod tests {
         }
         fn open_byte_stream(&self, _window: &str) -> repomon_core::Result<ByteStream> {
             let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            Ok(ByteStream { rx })
+            Ok(ByteStream { tag: 0, rx })
         }
-        fn close_byte_stream(&self, _window: &str) -> repomon_core::Result<()> {
+        fn close_byte_stream(&self, _window: &str, _tag: u64) -> repomon_core::Result<()> {
             Ok(())
         }
     }

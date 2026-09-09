@@ -1,4 +1,4 @@
-import { startVisibilityPolling } from "./visibilityPolling";
+import { isForeground, startVisibilityPolling } from "./visibilityPolling";
 import { createMemo, createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
@@ -571,7 +571,7 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
 
   function usageEvent(event: DaemonEvent) {
     // Terminal frames do not change the fleet. Reloading on them feeds redraws back into RPC.
-    if (["event.agent.bytes", "event.agent.output", "event.agent.grid", "event.agent.stream_closed"].includes(event.method)) return;
+    if (["event.agent.bytes", "event.agent.output", "event.agent.grid"].includes(event.method)) return;
     if (event.method === "event.usage.refreshed") {
       const result = event.params as UsageRefreshed | undefined;
       if (result && Number.isFinite(result.request_id) && Array.isArray(result.snapshot)
@@ -624,10 +624,10 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function queueRefresh() {
-    if (refreshTimer !== undefined) return;
+    if (!active || !isForeground() || refreshTimer !== undefined) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
-      void refresh();
+      if (active && isForeground()) void refresh();
     }, 60);
   }
 

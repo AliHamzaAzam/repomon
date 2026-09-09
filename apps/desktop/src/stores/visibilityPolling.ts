@@ -1,16 +1,18 @@
+/// A visible but unfocused app uses the background policy too.
+export const isForeground = () => typeof document === "undefined"
+  || (!document.hidden && document.hasFocus());
+
 /// Keep the foreground heartbeat while backing off disk-backed RPCs in a background window.
-/// Push events remain active; returning to the app refreshes immediately.
+/// Returning to the app refreshes immediately, including changes deferred while in background.
 export function startVisibilityPolling(refresh: () => void, foregroundMs: number) {
   let timer: ReturnType<typeof setInterval> | undefined;
-  const foreground = () => typeof document === "undefined"
-    || (!document.hidden && document.hasFocus());
-  let wasForeground = foreground();
+  let wasForeground = isForeground();
   const schedule = () => {
     if (timer !== undefined) clearInterval(timer);
-    timer = setInterval(refresh, foreground() ? foregroundMs : 30_000);
+    timer = setInterval(refresh, isForeground() ? foregroundMs : 30_000);
   };
   const changed = () => {
-    const active = foreground();
+    const active = isForeground();
     if (active && !wasForeground) refresh();
     wasForeground = active;
     schedule();

@@ -968,11 +968,18 @@ mod host_backend {
                 })
             };
             map.insert(window.to_string(), ActiveStream { id, stop, thread });
-            Ok(ByteStream { rx })
+            Ok(ByteStream { tag: id, rx })
         }
 
-        fn close_byte_stream(&self, window: &str) -> Result<()> {
-            let entry = self.streams.lock().expect("streams lock").remove(window);
+        fn close_byte_stream(&self, window: &str, tag: u64) -> Result<()> {
+            let entry = {
+                let mut streams = self.streams.lock().expect("streams lock");
+                if streams.get(window).is_some_and(|entry| entry.id == tag) {
+                    streams.remove(window)
+                } else {
+                    None
+                }
+            };
             if let Some(entry) = entry {
                 stop_stream(entry);
             }

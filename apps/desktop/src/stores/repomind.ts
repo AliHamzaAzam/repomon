@@ -1,4 +1,4 @@
-import { startVisibilityPolling } from "./visibilityPolling";
+import { isForeground, startVisibilityPolling } from "./visibilityPolling";
 import { createSignal } from "solid-js";
 
 import type { RepomindStatus } from "../bindings";
@@ -76,6 +76,7 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
   let inFlight = false;
   let token = 0;
   let stopPolling: (() => void) | undefined;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let unsubscribe: (() => void) | undefined;
   // Windows the controller lane owns, kept up to date by the caller so the event filter does not
   // need its own copy of the fleet.
@@ -88,7 +89,7 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
   async function refresh() {
     // `repomind.status` walks the home's directories; overlapping calls would queue disk work
     // behind a heartbeat that has already moved on.
-    if (inFlight) return;
+    if (!active || inFlight) return;
     inFlight = true;
     const mine = ++token;
     try {
@@ -110,14 +111,22 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
     controllerWindows = new Set(windows);
   }
 
+  function queueRefresh() {
+    if (!active || !isForeground() || refreshTimer !== undefined) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      if (active && isForeground()) void refresh();
+    }, 60);
+  }
+
   function onEvent(event: DaemonEvent) {
     if (event.method === "event.repo.changed" || event.method.startsWith("event.repomind.")) {
-      void refresh();
+      queueRefresh();
       return;
     }
     if (event.method !== "event.agent.status") return;
     const window = (event.params as AgentStatusEvent).window;
-    if (typeof window === "string" && controllerWindows.has(window)) void refresh();
+    if (typeof window === "string" && controllerWindows.has(window)) queueRefresh();
   }
 
   /// Rewrite the boot document, then re-read the status so the panel shows the new size and trim
@@ -165,6 +174,8 @@ export function createRepomindStore(source: RepomindSource = daemonRepomindSourc
 
   function stop() {
     active = false;
+    if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+    refreshTimer = undefined;
     stopPolling?.();
     stopPolling = undefined;
     unsubscribe?.();

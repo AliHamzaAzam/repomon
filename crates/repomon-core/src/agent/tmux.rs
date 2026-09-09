@@ -1401,21 +1401,34 @@ impl SessionBackend for TmuxRuntime {
                 streams.remove(&stream_window);
             }
         });
-        Ok(ByteStream { rx })
+        Ok(ByteStream { tag, rx })
     }
 
-    fn close_byte_stream(&self, window: &str) -> Result<()> {
-        if let Some(mut stream) = self
-            .streams
-            .lock()
-            .expect("control streams lock")
-            .remove(window)
-        {
+    fn close_byte_stream(&self, window: &str, tag: u64) -> Result<()> {
+        let stream = {
+            let mut streams = self.streams.lock().expect("control streams lock");
+            if streams.get(window).is_some_and(|stream| stream.tag == tag) {
+                streams.remove(window)
+            } else {
+                None
+            }
+        };
+        // No registry lock or tmux subprocess during teardown. This input belongs only to the
+        // removed generation, so a concurrent replacement cannot be detached by this close.
+        if let Some(mut stream) = stream {
             let _ = stream.input.write_all(b"detach-client\n");
             let _ = stream.input.flush();
         }
-        // Also clean up a pipe from a daemon version that predates control-mode streaming.
-        self.pipe_pane_off_named(window)
+        Ok(())
+    }
+
+    fn sweep_legacy_byte_streams(&self) -> Result<()> {
+        // pipe-pane is independent of control-mode clients. Never close by window name here:
+        // subscriptions may already have opened their own control stream during startup.
+        for window in self.list_windows()? {
+            let _ = self.pipe_pane_off_named(&window);
+        }
+        Ok(())
     }
 }
 
@@ -1900,6 +1913,57 @@ mod tests {
     }
 
     #[test]
+    fn stale_close_and_legacy_sweep_preserve_replacement_control_stream() {
+        if !TmuxRuntime::available() {
+            eprintln!("tmux not available; skipping live runtime test");
+            return;
+        }
+        let backend = TmuxRuntime::new(format!("repomon-tagtest-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        backend.spawn(1, dir.path(), "sh").unwrap();
+        let first = backend.open_byte_stream("lane-1").unwrap();
+        let mut replacement = backend.open_byte_stream("lane-1").unwrap();
+        assert_ne!(first.tag, replacement.tag);
+        backend.close_byte_stream("lane-1", first.tag).unwrap();
+        backend.sweep_legacy_byte_streams().unwrap();
+        assert_eq!(
+            backend.streams.lock().unwrap()["lane-1"].tag,
+            replacement.tag
+        );
+        backend
+            .send_text_named("lane-1", "printf TAG_SURVIVED")
+            .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let survived = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(event) = replacement.rx.recv().await {
+                    if let ByteStreamEvent::Bytes(bytes) = event
+                        && bytes
+                            .windows(b"TAG_SURVIVED".len())
+                            .any(|part| part == b"TAG_SURVIVED")
+                    {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        });
+        backend
+            .close_byte_stream("lane-1", replacement.tag)
+            .unwrap();
+        backend.kill_named("lane-1").unwrap();
+        let _ = Command::new(tmux_program())
+            .args(["-L", backend.session(), "kill-server"])
+            .output();
+        assert!(
+            survived,
+            "stale teardown or legacy sweep closed the replacement"
+        );
+    }
+
+    #[test]
     fn control_stream_orders_grid_before_new_size_output_and_ignores_client_size() {
         if !TmuxRuntime::available() {
             eprintln!("tmux not available; skipping live runtime test");
@@ -1948,7 +2012,7 @@ mod tests {
         });
         assert!(ordered, "new-grid output arrived before its layout change");
 
-        backend.close_byte_stream("lane-1").unwrap();
+        backend.close_byte_stream("lane-1", stream.tag).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let clients = backend
             .run_allow_absent(&["list-clients", "-F", "#{client_control_mode}"])

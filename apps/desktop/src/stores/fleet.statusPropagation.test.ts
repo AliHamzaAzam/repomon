@@ -1,5 +1,5 @@
 import { createEffect, createRoot } from "solid-js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
 import type { DaemonEvent } from "../ipc/rpc";
@@ -122,6 +122,14 @@ function mutableSource() {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+beforeEach(() => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe("status propagation to the sidebar", () => {
   it("flips the lane pill from idle to running and back on the next poll", async () => {
@@ -246,6 +254,41 @@ describe("status propagation latency", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(laneIndicator(fleet.lanes()[0]).label).toBe("running");
     teardown();
+  });
+});
+
+describe("fleet event foreground policy", () => {
+  it("defers background bursts and updates dead windows inside the foreground debounce", async () => {
+    vi.useFakeTimers();
+    let focused = true;
+    vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+    const feed = mutableSource();
+    const { fleet, teardown } = createRoot((dispose) => {
+      const store = createFleetStore(feed.source);
+      store.start();
+      return { fleet: store, teardown: () => { store.stop(); dispose(); } };
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const initialLoads = feed.loads();
+      feed.emit("event.repo.changed", {});
+      focused = false;
+      window.dispatchEvent(new Event("blur"));
+      for (let i = 0; i < 100; i += 1) feed.emit("event.repo.changed", {});
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(feed.loads()).toBe(initialLoads);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(feed.loads()).toBe(initialLoads + 1);
+      focused = true;
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(feed.loads()).toBe(initialLoads + 2);
+      feed.setSessions([]);
+      feed.emit("event.agent.stream_closed", { window: "lane-7-1" });
+      await vi.advanceTimersByTimeAsync(60);
+      expect(fleet.lanes()[0].agent_sessions).toEqual([]);
+      expect(feed.loads()).toBe(initialLoads + 3);
+    } finally { teardown(); }
   });
 });
 

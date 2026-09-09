@@ -7,10 +7,12 @@ vi.mock("../ipc/rpc", () => ({
   subscribeDaemon: vi.fn(async () => () => {}),
 }));
 
-const { addGoal } = await import("./repomind");
+const { addGoal, createRepomindStore } = await import("./repomind");
 
 afterEach(() => {
   daemonCall.mockReset();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("addGoal", () => {
@@ -71,5 +73,72 @@ describe("addGoal", () => {
       { content: string },
     ];
     expect(writeParams.content).toContain("Next step: Ship it");
+  });
+});
+
+
+describe("Repomind event refreshes", () => {
+  it("coalesces bursts, gates background events, resumes on focus and cancels on stop", async () => {
+    vi.useFakeTimers();
+    let focused = true;
+    let hidden = false;
+    vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+    vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    let emit!: Parameters<import("./repomind").RepomindSource["subscribe"]>[0];
+    const status = vi.fn(async () => ({}) as import("../bindings").RepomindStatus);
+    const store = createRepomindStore({
+      status,
+      boot: async () => {},
+      export: async () => {},
+      subscribe: async (sink) => { emit = sink; return () => {}; },
+    });
+    const event = (method: `event.${string}`, params = {}) => emit({ jsonrpc: "2.0", method, params });
+    store.setControllerWindows(["controller"]);
+    store.start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 100; i += 1) event("event.repo.changed");
+      event("event.repomind.changed");
+      event("event.agent.status", { window: "controller" });
+      await vi.advanceTimersByTimeAsync(59);
+      expect(status).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(status).toHaveBeenCalledTimes(2);
+      event("event.agent.status", { window: "other" });
+      await vi.advanceTimersByTimeAsync(60);
+      expect(status).toHaveBeenCalledTimes(2);
+
+      // A queued foreground event must not escape the policy if focus leaves before it fires.
+      event("event.repo.changed");
+      focused = false;
+      window.dispatchEvent(new Event("blur"));
+      for (let i = 0; i < 100; i += 1) event("event.repo.changed");
+      event("event.agent.status", { window: "controller" });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(status).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(status).toHaveBeenCalledTimes(3);
+      focused = true;
+      window.dispatchEvent(new Event("focus"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status).toHaveBeenCalledTimes(4);
+
+      hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      event("event.repo.changed");
+      await vi.advanceTimersByTimeAsync(60);
+      expect(status).toHaveBeenCalledTimes(4);
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status).toHaveBeenCalledTimes(5);
+      event("event.repo.changed");
+      store.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+      event("event.repo.changed");
+      await vi.advanceTimersByTimeAsync(60);
+      expect(status).toHaveBeenCalledTimes(5);
+    } finally { store.stop(); }
   });
 });

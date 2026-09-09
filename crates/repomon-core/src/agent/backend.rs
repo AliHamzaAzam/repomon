@@ -117,6 +117,8 @@ pub enum ByteStreamEvent {
 /// [`SessionBackend::open_byte_stream`]. The backend owns the plumbing; the consumer just drains
 /// `rx`. The channel closes when the stream ends or the window dies.
 pub struct ByteStream {
+    /// Backend-owned identity; a close may only stop this stream generation.
+    pub tag: u64,
     /// Ordered raw-output and grid-change events.
     pub rx: tokio::sync::mpsc::UnboundedReceiver<ByteStreamEvent>,
 }
@@ -254,9 +256,14 @@ pub trait SessionBackend: Send + Sync {
     /// watchers and share one stream per window.
     fn open_byte_stream(&self, window: &str) -> Result<ByteStream>;
 
-    /// Stop streaming the window's bytes (EOFs the reader). Benign when the window - or the
-    /// whole server - is already gone.
-    fn close_byte_stream(&self, window: &str) -> Result<()>;
+    /// Stop only the matching stream generation (EOFs its reader). A stale tag is a no-op.
+    fn close_byte_stream(&self, window: &str, tag: u64) -> Result<()>;
+
+    /// Clean up legacy plumbing left by an older daemon. Must not close current byte streams;
+    /// startup runs this concurrently with new subscriptions.
+    fn sweep_legacy_byte_streams(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Returns authoritative live-agent counts by working directory, or `None` to request the
     /// platform process probe.
