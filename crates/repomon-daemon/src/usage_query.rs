@@ -181,6 +181,37 @@ pub async fn sessions(
     Ok(rows)
 }
 
+/// TTL for `lane_headline`'s cache: long enough that a home screen full of lanes doesn't re-run
+/// the session query per render, short enough that a lane's first message shows up promptly.
+const HEADLINE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The lane's title for the home screen: the first user message of its most recent usage-ledger
+/// session (already parsed by `scan_claude_transcript` / `scan_codex_rollout`), via
+/// `headline_from_text`. `None` for a lane with no ledger session yet (an agent kind the ledger
+/// doesn't parse, or one that hasn't produced a transcript); callers fall back to the branch
+/// name.
+pub async fn lane_headline(
+    ctx: &Arc<Ctx>,
+    lane_id: repomon_core::model::LaneId,
+) -> repomon_core::Result<Option<String>> {
+    {
+        let cache = ctx.headline_cache.lock().await;
+        if let Some((at, headline)) = cache.get(&lane_id) {
+            if at.elapsed() < HEADLINE_CACHE_TTL {
+                return Ok(headline.clone());
+            }
+        }
+    }
+    let window = (DateTime::<Utc>::UNIX_EPOCH, Utc::now());
+    let rows = sessions(ctx, window, Some(lane_id), 1).await?;
+    let headline = rows.into_iter().next().and_then(|r| r.headline);
+    ctx.headline_cache
+        .lock()
+        .await
+        .insert(lane_id, (std::time::Instant::now(), headline.clone()));
+    Ok(headline)
+}
+
 /// Optimize-panel findings over `[from, to]`.
 pub async fn findings(
     ctx: &Arc<Ctx>,

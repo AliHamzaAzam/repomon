@@ -1583,6 +1583,11 @@ struct UsageTimelineParams {
     bucket: repomon_core::usage_ledger::Bucket,
 }
 
+#[derive(Deserialize)]
+struct LaneHeadlineParams {
+    lane_id: repomon_core::model::LaneId,
+}
+
 #[derive(Deserialize, Default)]
 struct UsageSessionsParams {
     #[serde(flatten)]
@@ -4813,6 +4818,33 @@ pub async fn dispatch(
                 .await
                 .map_err(internal)?,
             )
+        }
+        "lane.headline" => {
+            let p: LaneHeadlineParams = parse(params)?;
+            to_value(
+                crate::usage_query::lane_headline(ctx, p.lane_id)
+                    .await
+                    .map_err(internal)?,
+            )
+        }
+        "repo.pull_requests" => {
+            const PR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+            let cached = {
+                let cache = ctx.pr_cache.lock().await;
+                cache
+                    .as_ref()
+                    .filter(|(at, _)| at.elapsed() < PR_CACHE_TTL)
+                    .map(|(_, items)| items.clone())
+            };
+            let items = match cached {
+                Some(items) => items,
+                None => {
+                    let items = crate::pull_requests::list(ctx).await;
+                    *ctx.pr_cache.lock().await = Some((std::time::Instant::now(), items.clone()));
+                    items
+                }
+            };
+            to_value(items)
         }
         "usage.findings" => {
             let p: UsageWindowParams = parse_opt(params)?;

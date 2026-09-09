@@ -865,6 +865,24 @@ pub struct AgentChoice {
     pub default: bool,
 }
 
+/// One open pull request for the home screen's PR strips, from `gh pr list`. Only produced when
+/// `gh` is on PATH; a repo with none, or a missing `gh`, yields no rows rather than an error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct PullRequestSummary {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub repo_id: RepoId,
+    pub repo_name: String,
+    /// `u32`, not `u64`: ts-rs maps `u64` to a TS `bigint`, which JSON responses never actually
+    /// carry, and no PR number will approach the `u32` ceiling.
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    pub is_draft: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// One entry in the interactive repo browser (directories only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
