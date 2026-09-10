@@ -754,6 +754,11 @@ mod host_backend {
             Ok(self.scan().into_iter().map(|h| h.hello.window).collect())
         }
 
+        fn window_started_at(&self, window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+            let host = self.scan().into_iter().find(|h| h.hello.window == window)?;
+            chrono::DateTime::from_timestamp(host.hello.started_at, 0)
+        }
+
         fn list_windows_with_activity(&self) -> Result<Vec<WindowActivity>> {
             Ok(self
                 .scan()

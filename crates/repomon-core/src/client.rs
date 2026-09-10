@@ -48,6 +48,7 @@ struct Inner {
     /// the socket, so reconnect replays every open desktop tile. The TUI normally keeps one entry;
     /// the desktop mission-control layouts keep several.
     active_watches: Mutex<HashMap<String, Value>>,
+    active_transcript_watches: Mutex<HashMap<String, Value>>,
     /// Bumped every time `spawn_io` starts a new connection. A reader task captures its own
     /// epoch at spawn and only runs disconnect cleanup if it's still current, so a stale reader
     /// from a superseded connection can't clobber a healthy reconnect.
@@ -78,6 +79,7 @@ impl DaemonClient {
             reconnecting: tokio::sync::Mutex::new(()),
             subscribe_params: Mutex::new(None),
             active_watches: Mutex::new(HashMap::new()),
+            active_transcript_watches: Mutex::new(HashMap::new()),
             epoch: AtomicU64::new(0),
         });
         inner.spawn_io(stream);
@@ -121,16 +123,20 @@ impl DaemonClient {
                     if method == "subscribe" {
                         *self.inner.subscribe_params.lock().unwrap() = Some(params.clone());
                     }
-                    if method == "agent.watch_bytes" {
+                    if matches!(method, "agent.watch_bytes" | "agent.transcript_watch") {
                         // Track the live watch so `reconnect` can re-assert it. `on:true` records
                         // the params; `on:false` (the stop path) clears them.
                         let on = params
                             .as_ref()
                             .and_then(|p| p.get("on"))
                             .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                            .unwrap_or(method == "agent.transcript_watch");
                         if let Some(params) = params.as_ref() {
-                            let mut watches = self.inner.active_watches.lock().unwrap();
+                            let mut watches = if method == "agent.transcript_watch" {
+                                self.inner.active_transcript_watches.lock().unwrap()
+                            } else {
+                                self.inner.active_watches.lock().unwrap()
+                            };
                             let lane_id = params.get("lane_id").and_then(Value::as_i64);
                             if on {
                                 watches.insert(watch_key(params), params.clone());
@@ -255,20 +261,19 @@ impl Inner {
             }
         }
 
-        // Replay byte watches on the new connection, whose server-side subscriptions start empty.
-        let watches: Vec<Value> = self
-            .active_watches
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        for params in watches {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let req = Request::new(id, "agent.watch_bytes", Some(params));
-            if let Ok(bytes) = serde_json::to_vec(&req) {
-                let out = self.out_tx.lock().unwrap().clone();
-                let _ = out.send(bytes).await;
+        // Both watch types are per connection and must be restored after reconnecting.
+        for (method, registry) in [
+            ("agent.watch_bytes", &self.active_watches),
+            ("agent.transcript_watch", &self.active_transcript_watches),
+        ] {
+            let watches: Vec<Value> = registry.lock().unwrap().values().cloned().collect();
+            for params in watches {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let req = Request::new(id, method, Some(params));
+                if let Ok(bytes) = serde_json::to_vec(&req) {
+                    let out = self.out_tx.lock().unwrap().clone();
+                    let _ = out.send(bytes).await;
+                }
             }
         }
         Ok(())
@@ -398,6 +403,13 @@ mod tests {
             .await
             .unwrap();
 
+        client
+            .call(
+                "agent.transcript_watch",
+                Some(serde_json::json!({"lane_id": 1, "window": "lane-1", "on": true})),
+            )
+            .await
+            .unwrap();
         // Mark the connection dead to exercise replay before the next call.
         client.inner.connected.store(false, Ordering::SeqCst);
         client.call("ping", None).await.unwrap();
@@ -408,6 +420,7 @@ mod tests {
                 let seen = latest.lock().unwrap();
                 if seen.iter().any(|m| m == "subscribe")
                     && seen.iter().filter(|m| *m == "agent.watch_bytes").count() >= 2
+                    && seen.iter().any(|m| m == "agent.transcript_watch")
                 {
                     ok = true;
                     break;
@@ -504,6 +517,7 @@ mod tests {
             reconnecting: tokio::sync::Mutex::new(()),
             subscribe_params: Mutex::new(None),
             active_watches: Mutex::new(HashMap::new()),
+            active_transcript_watches: Mutex::new(HashMap::new()),
             epoch: AtomicU64::new(0),
         });
 

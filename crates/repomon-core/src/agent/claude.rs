@@ -697,6 +697,7 @@ fn transcript_items<'a>(
             role: "tools".into(),
             text,
             at: at.take(),
+            ..Default::default()
         });
         tools.clear();
     }
@@ -735,6 +736,7 @@ fn transcript_items<'a>(
                                             .map(|limit| truncate(t, limit))
                                             .unwrap_or_else(|| t.to_string()),
                                         at,
+                                        ..Default::default()
                                     });
                                 }
                             }
@@ -765,6 +767,7 @@ fn transcript_items<'a>(
                             role: "user".into(),
                             text: text_limit.map(|limit| truncate(&t, limit)).unwrap_or(t),
                             at,
+                            ..Default::default()
                         });
                     }
                 }

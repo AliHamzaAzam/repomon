@@ -420,6 +420,7 @@ mod tests {
             ],
             last_activity_at: Utc::now(),
             pinned: false,
+            view_mode: None,
             role: None,
         };
         let digest = project_lane(&lane, Utc::now());
@@ -469,6 +470,7 @@ mod tests {
             agent_sessions: sessions,
             last_activity_at: Utc::now(),
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }

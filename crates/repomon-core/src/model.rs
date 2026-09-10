@@ -708,6 +708,9 @@ pub struct Lane {
     /// or merged.
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub view_mode: Option<String>,
 }
 
 /// Persisted per-lane metadata not derivable from git (pin state, tmux window, agent kind).
@@ -727,6 +730,9 @@ pub struct LaneMeta {
     /// The lane's role. See [`Lane::role`].
     #[serde(default)]
     pub role: Option<String>,
+    /// Null inherits the configured default for the agent kind.
+    #[serde(default)]
+    pub view_mode: Option<String>,
 }
 
 /// Parameters for creating a new lane (and its worktree).
@@ -832,19 +838,66 @@ pub struct TimelineData {
     pub correlations: Vec<Correlation>,
 }
 
-/// One conversation item from an agent transcript, rendered for clients that lay text out
-/// themselves (the mobile chat view): a user or assistant message with the full *unwrapped*
-/// text, or an aggregated run of tool calls between messages.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One normalized conversation row. The original role/text/at fields remain readable by legacy
+/// history clients; optional fields describe richer transcript rows and live pane previews.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
 pub struct TranscriptItem {
     /// "user" | "assistant" | "tools".
     pub role: String,
-    /// Message text, or for "tools" a compact summary ("Bash ×2 · Edit").
+    /// Markdown message text, or a readable fallback for tool and status rows.
     pub text: String,
     /// The entry's timestamp, when the transcript records one.
     pub at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub id: Option<String>,
+
+    /// user, assistant, tool_call, dialog, status, or terminal_block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub kind: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub model: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub input_summary: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub result_summary: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub status: Option<ToolCallStatus>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub diff: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub status_kind: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cost_usd: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub partial: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub dialog: Option<crate::agent::prompt::PendingDialog>,
 }
 
 /// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.
@@ -1279,6 +1332,34 @@ pub struct SystemDoctorResult {
     #[serde(default)]
     pub agent_host: Option<AgentHostDoctorInfo>,
     pub agents: Vec<AgentDoctorInfo>,
+}
+
+/// State of a tool invocation, shared by pane previews and durable transcript rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    Running,
+    Ok,
+    Error,
+}
+
+impl TranscriptItem {
+    pub fn new(kind: &str, text: impl Into<String>, at: Option<DateTime<Utc>>) -> Self {
+        Self {
+            role: match kind {
+                "user" => "user",
+                "tool_call" => "tools",
+                _ => "assistant",
+            }
+            .into(),
+            kind: Some(kind.into()),
+            text: text.into(),
+            at,
+            ..Self::default()
+        }
+    }
 }
 
 #[cfg(test)]

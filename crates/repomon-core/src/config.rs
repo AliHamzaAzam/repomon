@@ -58,6 +58,9 @@ pub struct Config {
     /// Custom icon assignment for agent kinds or custom agent names, mapping agent name -> icon key
     /// (e.g. "my-agent" -> "compass", "codex" -> "bolt").
     pub agent_icons: HashMap<String, String>,
+    /// Per-kind conversation defaults; an absent kind uses the terminal.
+    #[serde(default)]
+    pub agent_views: HashMap<String, String>,
     /// Auto-continue managed agents that pause on a usage limit (resume at the reset time).
     /// On by default; a per-lane key (`C`) can disable it for a single lane this session.
     pub auto_continue: bool,
@@ -182,6 +185,7 @@ impl Default for Config {
             default_agent: None,
             agents: HashMap::new(),
             agent_icons: HashMap::new(),
+            agent_views: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
             spawn_prompt: true,
@@ -644,6 +648,19 @@ fn default_socket_path() -> PathBuf {
 #[cfg(not(windows))]
 fn default_socket_path() -> PathBuf {
     runtime_dir().join("repomon.sock")
+}
+
+/// Lane override, then kind preference, then the terminal. Invalid persisted values fall through.
+pub fn resolve_agent_view<'a>(config: &'a Config, kind: &str, lane: Option<&'a str>) -> &'a str {
+    lane.filter(|v| matches!(*v, "terminal" | "conversation"))
+        .or_else(|| {
+            config
+                .agent_views
+                .get(kind)
+                .map(String::as_str)
+                .filter(|v| matches!(*v, "terminal" | "conversation"))
+        })
+        .unwrap_or("terminal")
 }
 
 #[cfg(test)]
@@ -1179,6 +1196,32 @@ output_per_mtok = 7.5
         assert_eq!(
             back.usage.price_overrides["claude-opus-5"].input_per_mtok,
             Some(4.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::*;
+    #[test]
+    fn partial_defaults_round_trip_and_resolution() {
+        let cfg: Config = toml::from_str(
+            r#"[agent_views]
+codex = "conversation"
+"#,
+        )
+        .unwrap();
+        let round: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round.agent_views, cfg.agent_views);
+        assert_eq!(resolve_agent_view(&round, "codex", None), "conversation");
+        assert_eq!(
+            resolve_agent_view(&round, "codex", Some("terminal")),
+            "terminal"
+        );
+        assert_eq!(resolve_agent_view(&round, "claude-code", None), "terminal");
+        assert_eq!(
+            resolve_agent_view(&round, "claude-code", Some("conversation")),
+            "conversation"
         );
     }
 }

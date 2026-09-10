@@ -854,6 +854,7 @@ mod legacy_auto_approve_tests {
             agent_sessions: vec![session],
             last_activity_at: Utc::now(),
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }
@@ -1172,6 +1173,7 @@ mod status_tests {
             agent_sessions: sessions,
             last_activity_at: now,
             pinned: false,
+            view_mode: None,
             role: None,
         }]
     }

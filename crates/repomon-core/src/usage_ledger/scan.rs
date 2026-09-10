@@ -7,6 +7,7 @@ use std::path::Path;
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
+pub use super::transcript::TranscriptEntry;
 use crate::error::Result;
 use crate::pricing::TokenCounts;
 
@@ -58,9 +59,18 @@ pub struct ScannedSession {
     pub subagent: bool,
 }
 
+/// Optional work for callers that also need a conversation view.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOptions {
+    /// Allocate and map conversation rows. Ledger-only scans leave this disabled.
+    pub collect_transcript: bool,
+}
+
 /// The result of reading one source from an offset.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceScan {
+    /// Conversation rows decoded by the same pass as ledger usage, when explicitly requested.
+    pub transcript: Vec<TranscriptEntry>,
     pub events: Vec<ScannedEvent>,
     pub sessions: Vec<ScannedSession>,
     /// Where a later scan of the same source should resume.
@@ -103,8 +113,12 @@ where
         };
         let line = &text[at..end];
         if !line.trim().is_empty() {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                on_line(&v, at as i64);
+            match serde_json::from_str::<Value>(line) {
+                Ok(v) => on_line(&v, at as i64),
+                Err(_) => on_line(
+                    &serde_json::json!({"type":"unparsed", "raw":line}),
+                    at as i64,
+                ),
             }
         }
         at = end + 1;
@@ -132,10 +146,21 @@ struct MessageGroup {
 
 /// Reads Claude usage from an offset, attributing subagents to their parent without replacing its
 /// headline and replaying the unsettled final message until its counts stabilize.
+/// Conversation rows are not collected; use [`scan_claude_transcript_with_options`] to opt in.
 pub fn scan_claude_transcript(
     path: &Path,
     from_offset: u64,
     account: Option<&str>,
+) -> Result<SourceScan> {
+    scan_claude_transcript_with_options(path, from_offset, account, ScanOptions::default())
+}
+
+/// Reads Claude usage with optional conversation-row collection in the same JSONL pass.
+pub fn scan_claude_transcript_with_options(
+    path: &Path,
+    from_offset: u64,
+    account: Option<&str>,
+    options: ScanOptions,
 ) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
     let account = account.unwrap_or("default").to_string();
@@ -159,7 +184,13 @@ pub fn scan_claude_transcript(
     let mut session_id: Option<String> = None;
     let mut pick = HeadlinePick::default();
 
+    let mut transcript = options
+        .collect_transcript
+        .then(super::transcript::Mapper::default);
     let consumed = for_each_line(path, from_offset, |v, offset| {
+        if let Some(transcript) = &mut transcript {
+            transcript.claude(v, offset);
+        }
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "user" {
             if let Some(text) = v.get("message").and_then(message_text) {
@@ -331,6 +362,7 @@ pub fn scan_claude_transcript(
         }
     }
     Ok(SourceScan {
+        transcript: transcript.map(|mapper| mapper.rows).unwrap_or_default(),
         events,
         sessions: session.into_iter().collect(),
         next_offset: match open {
@@ -342,7 +374,17 @@ pub fn scan_claude_transcript(
 
 /// Reads Codex usage from an offset, backfilling early events with the first observed model or a
 /// metadata/unknown fallback so model IDs are never empty.
+/// Conversation rows are not collected; use [`scan_codex_rollout_with_options`] to opt in.
 pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
+    scan_codex_rollout_with_options(path, from_offset, ScanOptions::default())
+}
+
+/// Reads Codex usage with optional conversation-row collection in the same JSONL pass.
+pub fn scan_codex_rollout_with_options(
+    path: &Path,
+    from_offset: u64,
+    options: ScanOptions,
+) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
     let mut events: Vec<ScannedEvent> = Vec::new();
     let mut session_id: Option<String> = None;
@@ -355,13 +397,20 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut last_at: Option<DateTime<Utc>> = None;
 
+    let mut transcript = options
+        .collect_transcript
+        .then(super::transcript::Mapper::default);
     let next_offset = for_each_line(path, from_offset, |v, offset| {
+        if let Some(transcript) = &mut transcript {
+            transcript.codex(v, offset);
+        }
         let payload = v.get("payload");
         let at = parse_at(v, "timestamp");
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "session_meta" => {
                 if let Some(p) = payload {
-                    session_id = str_at(p, "session_id");
+                    session_id = str_at(p, "session_id").or_else(|| str_at(p, "id"));
+                    first_at = first_at.or(at);
                     cwd = str_at(p, "cwd");
                     if meta_model.is_none() {
                         meta_model = str_at(p, "model");
@@ -480,6 +529,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
         .into_iter()
         .collect();
     Ok(SourceScan {
+        transcript: transcript.map(|mapper| mapper.rows).unwrap_or_default(),
         events,
         sessions,
         next_offset,
@@ -578,6 +628,7 @@ pub fn scan_antigravity_transcript(
         .into_iter()
         .collect();
     Ok(SourceScan {
+        transcript: Vec::new(),
         events,
         sessions,
         next_offset,
@@ -681,6 +732,7 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
         });
     }
     Ok(SourceScan {
+        transcript: Vec::new(),
         events,
         sessions: sessions.into_values().collect(),
         next_offset: watermark,
@@ -894,6 +946,69 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
         p
+    }
+
+    #[test]
+    fn conversation_collection_is_opt_in_and_preserves_ledger_results() {
+        let dir = tempfile::tempdir().unwrap();
+        for (claude, name, body) in [
+            (
+                true,
+                "claude-usage",
+                include_str!("fixtures/claude_usage_v0.jsonl"),
+            ),
+            (
+                true,
+                "claude-multiblock",
+                include_str!("fixtures/claude_multiblock_v0.jsonl"),
+            ),
+            (
+                false,
+                "codex-usage",
+                include_str!("fixtures/codex_usage_v0.jsonl"),
+            ),
+            (
+                false,
+                "codex-preamble",
+                include_str!("fixtures/codex_injected_preamble_v0.jsonl"),
+            ),
+            (
+                false,
+                "codex-model",
+                include_str!("fixtures/codex_model_before_context_v0.jsonl"),
+            ),
+            (true, "claude-malformed", "broken record\n{\"unfinished\""),
+            (false, "codex-malformed", "broken record\n{\"unfinished\""),
+        ] {
+            let path = write(dir.path(), name, body);
+            // Exercise complete scans and every suffix cursor, including the incomplete tail.
+            let offsets =
+                std::iter::once(0).chain(body.match_indices('\n').map(|(at, _)| (at + 1) as u64));
+            for offset in offsets {
+                let options = ScanOptions {
+                    collect_transcript: true,
+                };
+                let (ledger, mut conversation) = if claude {
+                    (
+                        scan_claude_transcript(&path, offset, Some("work")).unwrap(),
+                        scan_claude_transcript_with_options(&path, offset, Some("work"), options)
+                            .unwrap(),
+                    )
+                } else {
+                    (
+                        scan_codex_rollout(&path, offset).unwrap(),
+                        scan_codex_rollout_with_options(&path, offset, options).unwrap(),
+                    )
+                };
+                assert!(ledger.transcript.is_empty(), "{name} at {offset}");
+                assert_eq!(ledger.transcript.capacity(), 0, "{name} at {offset}");
+                if offset == 0 {
+                    assert!(!conversation.transcript.is_empty(), "{name}");
+                }
+                conversation.transcript.clear();
+                assert_eq!(ledger, conversation, "{name} at {offset}");
+            }
+        }
     }
 
     #[test]

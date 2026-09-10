@@ -177,6 +177,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "agent_icons": cfg.agent_icons,
         "supervision": cfg.supervision,
     });
+    value["agent_views"] = json!(cfg.agent_views);
     value["message_hop_refresh_senders"] = json!(cfg.message_hop_refresh_senders);
     value["usage_enabled"] = json!(cfg.usage.enabled);
     value["usage_refresh_prices"] = json!(cfg.usage.refresh_prices);
@@ -996,6 +997,8 @@ struct ConfigSet {
     #[serde(default)]
     agent_icons: Option<HashMap<String, String>>,
     #[serde(default)]
+    agent_views: Option<HashMap<String, String>>,
+    #[serde(default)]
     supervision: Option<repomon_core::agent::supervision::SupervisionConfig>,
     #[serde(default)]
     usage_enabled: Option<bool>,
@@ -1124,16 +1127,6 @@ struct AgentTranscript {
 }
 fn default_transcript_limit() -> usize {
     50
-}
-#[derive(Deserialize)]
-struct AgentTranscriptPage {
-    lane_id: repomon_core::model::LaneId,
-    /// Which session's transcript; `None` = the lane's most recent.
-    #[serde(default)]
-    session_id: Option<String>,
-    /// Exclusive byte offset returned as `next_before` by the previous page.
-    #[serde(default)]
-    before: Option<u64>,
 }
 #[derive(Deserialize)]
 struct AgentAdopt {
@@ -3336,6 +3329,15 @@ pub async fn dispatch(
         }
         "config.set" => {
             let p: ConfigSet = parse(params)?;
+            if p.agent_views.as_ref().is_some_and(|views| {
+                views
+                    .values()
+                    .any(|v| !matches!(v.as_str(), "terminal" | "conversation"))
+            }) {
+                return Err(RpcError::invalid_params(
+                    "view must be terminal or conversation",
+                ));
+            }
             // Validate the entire rate patch before mutating any live configuration.
             if p.usage_price_override_upsert.is_some() && p.usage_price_override_reset.is_some() {
                 return Err(RpcError::invalid_params(
@@ -3513,6 +3515,9 @@ pub async fn dispatch(
                 }
                 if let Some(m) = p.orchestrator_model {
                     cfg.orchestrator_model = (!m.is_empty()).then_some(m);
+                }
+                if let Some(views) = p.agent_views {
+                    cfg.agent_views = views;
                 }
                 if let Some(icons) = p.agent_icons {
                     cfg.agent_icons = icons;
@@ -4645,31 +4650,38 @@ pub async fn dispatch(
         // A bounded page read backwards from a stable JSONL byte offset. The desktop uses this
         // for native full-history scrolling without putting an unbounded transcript in xterm.
         "agent.transcript_page" => {
-            let p: AgentTranscriptPage = parse(params)?;
-            let path = ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
-            let page = tokio::task::spawn_blocking(move || {
-                let manifest = match &p.session_id {
-                    Some(id) => agent::claude::transcript_path_for_session(&path, id),
-                    None => {
-                        let within = chrono::Duration::hours(SESSION_WINDOW_HOURS);
-                        agent::claude::summaries_for(&path, within, MAX_SESSIONS_PER_LANE)
-                            .first()
-                            .map(|summary| summary.manifest_path.clone())
-                    }
-                };
-                manifest
-                    .map(|manifest| agent::claude::transcript_page(&manifest, p.before))
-                    .map(|page| {
-                        json!({
-                            "items": page.items,
-                            "next_before": page.next_before,
-                        })
-                    })
-                    .unwrap_or_else(|| json!({ "items": [], "next_before": null }))
-            })
-            .await
-            .map_err(internal)?;
-            Ok(page)
+            let p: crate::transcript::Params = parse(params)?;
+            crate::transcript::page(ctx, &p).await.map_err(internal)
+        }
+        "agent.transcript_watch" => {
+            let p: crate::transcript::Params = parse(params)?;
+            crate::transcript::watch(ctx, sess, p)
+                .await
+                .map_err(internal)
+        }
+        "lane.set_view" => {
+            #[derive(Deserialize)]
+            struct SetView {
+                lane_id: i64,
+                view_mode: Option<String>,
+            }
+            let p: SetView = parse(params)?;
+            if p.view_mode
+                .as_deref()
+                .is_some_and(|v| !matches!(v, "terminal" | "conversation"))
+            {
+                return Err(RpcError::invalid_params(
+                    "view must be terminal, conversation, or null",
+                ));
+            }
+            ctx.lanes.focus(p.lane_id).await.map_err(internal)?;
+            ctx.store
+                .set_lane_view(p.lane_id, p.view_mode)
+                .await
+                .map_err(internal)?;
+            ctx.invalidate_overlay().await;
+            ctx.broadcast("event.lane.changed", json!({ "lane_id": p.lane_id }));
+            Ok(Value::Null)
         }
         // Push-notification device registration (the iOS companion).
         // ---- remote devices (LOCAL SOCKET ONLY - blocked over the bridge by the allowlist) ----
@@ -9561,6 +9573,7 @@ mod tests {
             agent_sessions,
             last_activity_at: now,
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }
@@ -9643,6 +9656,7 @@ mod tests {
             agent_sessions,
             last_activity_at: now,
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }
@@ -12045,6 +12059,7 @@ mod tests {
             repo_id: 7,
             worktree_path: PathBuf::from("/repo-7"),
             pinned: false,
+            view_mode: None,
             role: None,
             tmux_window: Some("lane-7".into()),
             agent_kind: Some("claude-code".into()),
