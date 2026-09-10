@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-li
 import { createRoot } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentChoice, Lane, Repo } from "../bindings";
+import type { AgentChoice, AgentSession, Lane, Repo } from "../bindings";
 import { createFleetStore, type FleetSource } from "../stores/fleet";
 import HomeScreen from "./HomeScreen";
 
@@ -57,13 +57,13 @@ function repo(id: number, name: string): Repo {
   return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
 }
 
-async function mountedHomeScreen() {
+async function mountedHomeScreen(lanes: Lane[] = []) {
   const target = repo(1, "repomon");
   const source: FleetSource = {
     load: () =>
       Promise.resolve({
-        repos: [target],
-        lanes: [],
+        repos: lanes.length ? lanes.map((lane) => lane.repo) : [target],
+        lanes,
         usage: [],
         terminals: [],
         sortReposByActivity: false,
@@ -101,4 +101,82 @@ describe("HomeScreen compose", () => {
     fleet.stop();
     dispose();
   });
+});
+
+
+function ordinaryLane(id: number, name: string, status?: AgentSession["status"]): Lane {
+  const target = repo(id, name);
+  return {
+    id, repo: target,
+    worktree: { id, repo_id: id, path: `/code/${name}`, branch: "main", head: "abc", is_main: true, name: "main" },
+    state: { worktree_id: id, head: "abc", branch: "main", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null }, pinned: false, role: null, last_activity_at: "2026-09-10T10:00:00Z",
+    agent_sessions: status ? [{
+      id, repo_id: id, worktree_id: id, agent: "codex", status, title: null,
+      started_at: "2026-09-10T00:00:00Z", last_activity_at: "2026-09-10T10:00:00Z",
+      ended_at: status === "ended" ? "2026-09-10T10:00:00Z" : null,
+      manifest_path: "", tool_call_count: 0, external: false, session_id: `s${id}`,
+      resume_at: null, inferred: false, tmux_window: `lane-${id}`, last_message: null,
+      pending_prompt: null, pending_dialog: null, stale: false, stalled_since: null,
+      subagent_running: null, gate: null, config_dir: null, custom_label: null,
+      generated_label: null, status_reason: null,
+    }] : [],
+  };
+}
+
+describe("HomeScreen ordinary fleet", () => {
+  it("identifies repeated main lanes by repo, exposes distinct states, and opens the right lane by keyboard", async () => {
+    const { fleet, dispose } = await mountedHomeScreen([
+      ordinaryLane(1, "repomon", "running"), ordinaryLane(2, "Mira", "idle"),
+      ordinaryLane(3, "SAAS", "ended"), ordinaryLane(4, "portfolio"),
+    ]);
+    expect(screen.getByText("Nothing needs you")).toBeTruthy();
+    expect(screen.getByText("1 running")).toBeTruthy();
+    const first = screen.getByRole("button", { name: "repomon: main, Running" });
+    const second = screen.getByRole("button", { name: "Mira: main, Idle" });
+    expect(screen.getByRole("button", { name: "SAAS: main, Exited" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "portfolio: main, No agent" })).toBeTruthy();
+    expect(second.textContent).toContain("Mira");
+    screen.getAllByRole("button").filter((node) => node.classList.contains("home-strip")).forEach((node, index) => {
+      const rect = new DOMRect(0, index * 40, 600, 40);
+      vi.spyOn(node, "getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+      vi.spyOn(node, "getBoundingClientRect").mockReturnValue(rect);
+    });
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(second);
+    fireEvent.click(second);
+    expect(fleet.selectedLaneId()).toBe(2);
+    fleet.stop();
+    dispose();
+  });
+
+  it("adds the lane number only when repo and title still collide", async () => {
+    const first = ordinaryLane(1, "repomon");
+    const second = ordinaryLane(2, "repomon");
+    second.repo = first.repo;
+    second.worktree.repo_id = first.repo.id;
+    const { fleet, dispose } = await mountedHomeScreen([first, second]);
+    expect(screen.getByRole("button", { name: "repomon: main, lane 1, No agent" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "repomon: main, lane 2, No agent" }));
+    expect(fleet.selectedLaneId()).toBe(2);
+    fleet.stop();
+    dispose();
+  });
+
+});
+
+it("moves spatially through the wide board's two columns", async () => {
+  const {fleet,dispose} = await mountedHomeScreen([ordinaryLane(1,"one"),ordinaryLane(2,"two"),ordinaryLane(3,"three"),ordinaryLane(4,"four")]);
+  const rows = screen.getAllByRole("button").filter((node) => node.classList.contains("home-strip"));
+  rows.forEach((node,index) => {
+    const rect = new DOMRect(index % 2 * 400, Math.floor(index / 2) * 48, 400, 48);
+    vi.spyOn(node,"getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+    vi.spyOn(node,"getBoundingClientRect").mockReturnValue(rect);
+  });
+  rows[0].focus();
+  fireEvent.keyDown(rows[0],{key:"ArrowDown"}); expect(document.activeElement).toBe(rows[2]);
+  fireEvent.keyDown(rows[2],{key:"ArrowRight"}); expect(document.activeElement).toBe(rows[3]);
+  fireEvent.keyDown(rows[3],{key:"ArrowUp"}); expect(document.activeElement).toBe(rows[1]);
+  fireEvent.keyDown(rows[1],{key:"ArrowLeft"}); expect(document.activeElement).toBe(rows[0]);
+  fleet.stop(); dispose();
 });

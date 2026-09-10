@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentSession, Lane, Repo } from "../bindings";
-import { formatStripAge, laneTitle, needsInputLanes, recentLanes, slugify, stripMark, uniqueBranchName } from "./home";
+import { formatStripAge, laneTitle, needsInputLanes, recentLanes, slugify, stripMark, stripStatus, uniqueBranchName } from "./home";
 
 function repo(id: number, name: string): Repo {
   return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
@@ -191,12 +191,31 @@ describe("stripMark", () => {
     expect(stripMark("inferred")).toEqual({ icon: "play", tone: "signal" });
   });
 
-  it("marks an ended session done rather than idle", () => {
-    expect(stripMark("exited")).toEqual({ icon: "check", tone: "muted" });
+  it("marks an exited process without claiming task completion", () => {
+    expect(stripMark("exited")).toEqual({ icon: "stop", tone: "muted" });
   });
 
-  it("marks idle and lane-less states with the plain square", () => {
-    expect(stripMark("idle")).toEqual({ icon: "stop", tone: "muted" });
-    expect(stripMark(null)).toEqual({ icon: "stop", tone: "muted" });
+  it("distinguishes idle sessions from lanes with no agent", () => {
+    expect(stripMark("idle")).toEqual({ icon: "idle", tone: "muted" });
+    expect(stripMark(null)).toEqual({ icon: "branch", tone: "muted" });
+  });
+});
+
+
+describe("ordinary fleet identity and status", () => {
+  it("ignores whitespace headlines and retains detached worktree names", () => {
+    expect(laneTitle(lane(1, repo(1, "repomon"), [], "", "main"), "  ")).toBe("main");
+    expect(laneTitle(lane(2, repo(1, "repomon"), [], "", null), null)).toBe("wt-2");
+  });
+
+  it("requires explicit completion metadata and never treats exit as success", () => {
+    const target = repo(1, "repomon");
+    expect(stripStatus(lane(1, target, [session({ status: "ended" })], "")).label).toBe("Exited");
+    expect(stripStatus(lane(2, target, [session({ status: "waiting" })], "")).label).toBe("Needs you");
+    const completed = lane(3, target, [session({ status: "waiting", attention_kind: "end_of_turn" })], "");
+    expect(stripStatus(completed).label).toBe("Turn complete");
+    expect(needsInputLanes([completed])).toHaveLength(1);
+    completed.agent_sessions[0].pending_prompt = "Which approach?";
+    expect(stripStatus(completed).label).toBe("Needs you");
   });
 });

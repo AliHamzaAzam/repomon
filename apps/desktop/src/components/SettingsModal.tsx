@@ -1,3 +1,5 @@
+import ViewToggle from "./controls/ViewToggle";
+import { STATUS_ROWS, setAgentStatusRows, hasTranscriptSource, resolveAgentView, setAgentViewDefaults } from "../stores/agentViews";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
@@ -368,6 +370,8 @@ export default function SettingsModal(props: SettingsModalProps) {
     try {
       const saved = await daemonCall("config.set", nextConfig);
       setConfig(saved);
+      setAgentViewDefaults(saved.agent_views ?? {});
+      setAgentStatusRows(saved.agent_status_rows ?? {});
       props.onConfigSaved?.(saved);
       if (saved.accent) applyAccent(saved.accent);
       if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
@@ -897,6 +901,36 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "agents"}>
               <div class="space-y-6">
+                <section aria-label="Default agent views">
+                  <p class="section-label">Default view</p>
+                  <p class="mt-1 mb-3 text-xs text-muted">Choose how each agent opens. A lane can keep its own view.</p>
+                  <For each={knownAgentsList().map((agent) => agent.name)}>{(name) => <div class="flex items-center justify-between gap-4 border-b border-line py-2.5">
+                    <span class="font-mono text-xs">{name}</span>
+                    <div class="flex items-center gap-3">
+                      <Show when={!hasTranscriptSource(name)}><span class="text-xs text-muted">Terminal only</span></Show>
+                      <ViewToggle label={`${name} default view`} disabled={!hasTranscriptSource(name)} value={hasTranscriptSource(name) ? resolveAgentView(null, name, config()?.agent_views ?? {}) : "terminal"} onChange={(view) => patch({ agent_views: { ...config()?.agent_views, [name]: view } })} />
+                    </div>
+                  </div>}</For>
+                </section>
+
+                <section aria-label="Conversation detail" class="space-y-3 scroll-mt-20">
+                  <p class="section-label">Chat detail</p>
+                  <p class="text-xs text-muted">Summary keeps work collapsed and hides notices. Normal adds limit notices. Verbose opens work and includes all turn notices. Your chat's detail control sets this unless you customize an agent below.</p>
+                  <For each={knownAgentsList().filter((agent) => hasTranscriptSource(agent.name)).map((agent) => agent.name)}>{(name) => <details class="border-b border-line py-2">
+                    <summary class="focus-ring cursor-pointer text-xs py-1">{name}<span class="ml-3 text-muted">{config()?.agent_status_rows?.[name] === undefined ? "Follow detail level" : "Custom turn notices"}</span></summary>
+                    <div class="py-3 space-y-2">
+                      <Switch label={`${name}: Follow detail level`} checked={config()?.agent_status_rows?.[name] === undefined} onChange={(follow) => {
+                        const next = { ...config()?.agent_status_rows };
+                        if (follow) delete next[name]; else next[name] = ["rate_limit", "usage_limit"];
+                        patch({ agent_status_rows: next });
+                      }} />
+                      <Show when={config()?.agent_status_rows?.[name] !== undefined}><p class="text-xs text-muted">These notices appear inside the turn's work summary at every detail level.</p><For each={STATUS_ROWS}>{([key, label]) => <Switch label={`${name}: ${label}`} checked={config()?.agent_status_rows?.[name]?.includes(key) ?? false} onChange={(show) => {
+                        const current = config()?.agent_status_rows?.[name] ?? [];
+                        patch({ agent_status_rows: { ...config()?.agent_status_rows, [name]: show ? [...current, key] : current.filter((item) => item !== key) } });
+                      }} />}</For></Show>
+                    </div>
+                  </details>}</For>
+                </section>
 
                 <section class="space-y-4">
                   <div>

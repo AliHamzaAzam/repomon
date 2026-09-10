@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-10T12:52:47.784759+00:00",
+  "title": "Design System: Repomon desktop",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "menu",
+        "value": "0 12px 36px var(--shadow)",
+        "purpose": "Existing Select menu."
+      },
+      {
+        "name": "modal",
+        "value": "0 24px 80px var(--shadow)",
+        "purpose": "Existing shared Modal shell."
+      }
+    ],
+    "motion": [
+      {
+        "name": "settings-field-transition",
+        "value": "border-color 120ms ease, box-shadow 120ms ease",
+        "purpose": "Existing settings-input boundary transition."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "Existing global reduced-motion animation and transition override."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1100px"
+      },
+      {
+        "name": "wide",
+        "value": "1600px"
+      },
+      {
+        "name": "short-height",
+        "value": "720px"
+      },
+      {
+        "name": "home-and-chat-context-container-min",
+        "value": "1200px"
+      },
+      {
+        "name": "chat-compact-container-max",
+        "value": "800px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Existing settings primary action.",
+      "html": "<button class=\"ds-primary\">Install update</button>",
+      "css": ".ds-primary{font-family:var(--font-sans);font-size:12px;line-height:1.333333;border-radius:0.5rem;padding:0.375rem 0.875rem;cursor:pointer;transition:color 150ms,background-color 150ms,border-color 150ms;border:0;background:var(--signal);color:var(--background);font-weight:600;}.ds-primary:hover{background:color-mix(in srgb,var(--signal) 90%,transparent);}.ds-primary:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-primary:disabled{opacity:0.5;}"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Existing bordered settings action.",
+      "html": "<button class=\"ds-secondary\">Check for updates</button>",
+      "css": ".ds-secondary{font-family:var(--font-sans);font-size:12px;line-height:1.333333;border-radius:0.5rem;padding:0.375rem 0.875rem;cursor:pointer;transition:color 150ms,background-color 150ms,border-color 150ms;border:1px solid var(--line);background:var(--surface);color:var(--foreground);font-weight:500;}.ds-secondary:hover{background:var(--raised);}.ds-secondary:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-secondary:disabled{opacity:0.5;}"
+    },
+    {
+      "name": "Attachment composer",
+      "kind": "custom",
+      "refersTo": "reply-field",
+      "description": "Text rests at 40px and grows/shrinks to 160px. Plus and 28px removable typed chips share the leading group; observed model and send share the trailing group. Focus reveals the hint below; saving feedback also reveals it.",
+      "html": "<div class=\"ds-composer-wrap\"><div class=\"ds-composer\"><textarea class=\"ds-reply\" rows=\"1\" aria-label=\"Reply to codex\" placeholder=\"Ask a question or describe a change\u2026\"></textarea><div class=\"ds-composer-actions\"><div class=\"ds-composer-leading\"><button class=\"ds-attach\" type=\"button\" aria-label=\"Attach images or files\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 5v14M5 12h14\"/></svg></button><ul class=\"ds-attachments\" aria-label=\"Attachments\"><li><span class=\"ds-attachment\" title=\"/example/design.pdf\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z\"/><path d=\"M14 2v6h6\"/></svg><span>design.pdf</span><span class=\"ds-attachment-type\">PDF</span><button type=\"button\" aria-label=\"Remove design.pdf\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M18 6 6 18M6 6l12 12\"/></svg></button></span></li></ul></div><div class=\"ds-composer-trailing\"><span class=\"ds-agent\">codex <span>\u00b7 observed model</span></span><button class=\"ds-send\" type=\"button\" aria-label=\"Send reply\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"m5 12 7-7 7 7M12 5v14\"/></svg></button></div></div></div><p class=\"ds-composer-hint\">Shift + Enter for a new line</p></div>",
+      "css": ".ds-composer-wrap{max-width:844px;container-type:inline-size;font-family:var(--font-sans);}.ds-composer{background:var(--surface);border:1px solid var(--line);border-radius:0.25rem;color:var(--foreground);}.ds-composer:focus-within{border-color:var(--signal);}.ds-reply{display:block;box-sizing:border-box;width:100%;height:40px;min-height:0;resize:none;background:transparent;border:0;color:var(--foreground);font:13px/1.6 var(--font-sans);padding:12px 14px 6px;max-height:160px;caret-color:var(--signal);}.ds-reply:focus-visible{outline:none;}.ds-reply::placeholder{color:var(--muted);}.ds-reply:disabled{opacity:0.65;cursor:not-allowed;}.ds-attachments{list-style:none;display:flex;flex-wrap:wrap;gap:4px;margin:0;padding:0;min-width:0;}.ds-attachments>li{min-width:0;max-width:100%;}.ds-attachment{display:inline-flex;align-items:center;gap:5px;max-width:100%;background:var(--raised);border:1px solid var(--line);border-radius:0.25rem;padding:3px 6px;font:11px/1.45 var(--font-sans);color:var(--foreground);}.ds-attachment>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.ds-attachment .ds-attachment-type{flex-shrink:0;font-size:10px;color:var(--muted);}.ds-attachment svg{flex-shrink:0;}.ds-attachment button{display:grid;place-items:center;box-sizing:border-box;min-width:20px;min-height:20px;padding:3px;background:transparent;border:0;color:var(--muted);border-radius:0.25rem;}.ds-attachment button:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-attachment button:disabled{opacity:0.45;cursor:not-allowed;}.ds-composer-actions{display:flex;align-items:center;gap:12px;padding:4px 8px 8px;}.ds-composer-leading{display:flex;align-items:center;gap:6px;min-width:0;flex:1;}.ds-composer-trailing{display:flex;align-items:center;gap:10px;min-width:0;max-width:55%;}.ds-composer-actions>div>button{display:grid;place-items:center;width:30px;height:30px;flex-shrink:0;border:0;border-radius:0.25rem;cursor:pointer;}.ds-attach{background:transparent;color:var(--muted);}.ds-attach:hover:not(:disabled){background:var(--raised);color:var(--foreground);}.ds-send{background:var(--signal);color:var(--background);}.ds-send:hover:not(:disabled){opacity:0.85;}.ds-agent{font-size:11px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.ds-agent span{color:var(--muted);}.ds-composer button:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-composer button:disabled{opacity:0.45;cursor:not-allowed;}.ds-composer-hint{visibility:hidden;margin:4px 2px 0;color:var(--muted);font-size:10px;}.ds-composer-wrap:focus-within .ds-composer-hint,.ds-composer-hint.ds-is-staging{visibility:visible;}@container(max-width:800px){.ds-composer-trailing{max-width:45%;}}"
+    },
+    {
+      "name": "View toggle",
+      "kind": "nav",
+      "refersTo": "view-toggle",
+      "description": "Primary Terminal/Chat representation control; transcript detail uses the existing frameless Select.",
+      "html": "<div class=\"ds-toggle\" role=\"group\" aria-label=\"Agent view\"><button class=\"ds-segment\" aria-pressed=\"false\">Terminal</button><button class=\"ds-segment\" aria-pressed=\"true\">Chat</button></div>",
+      "css": ".ds-toggle{display:inline-flex;padding:0.125rem;border:1px solid var(--line);border-radius:0.25rem;background:var(--raised);}.ds-segment{border:0;border-radius:0.25rem;background:transparent;color:var(--muted);padding:0.25rem 0.625rem;font:12px/1.333333 var(--font-sans);cursor:pointer;transition:color 150ms,background-color 150ms;}.ds-segment[aria-pressed=\"true\"]{background:var(--surface);color:var(--foreground);}.ds-segment:hover{color:var(--foreground);}.ds-segment:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-segment:disabled{cursor:not-allowed;opacity:0.5;}"
+    },
+    {
+      "name": "Status chip",
+      "kind": "chip",
+      "refersTo": "status-chip",
+      "description": "A compact semantic label already used in Settings.",
+      "html": "<span class=\"ds-chip\">service</span>",
+      "css": ".ds-chip{display:inline-flex;align-items:center;gap:0.375rem;border-radius:0.375rem;padding:0.125rem 0.5rem;font:500 10px/1.45 var(--font-sans);background:color-mix(in srgb,var(--signal) 10%,transparent);color:var(--signal);}"
+    },
+    {
+      "name": "Settings container",
+      "kind": "card",
+      "refersTo": "settings-card",
+      "description": "Existing grouped settings surface with compact text.",
+      "html": "<div class=\"ds-card\"><strong class=\"ds-card-title\">Background Daemon</strong><p class=\"ds-card-copy\">The daemon streams terminal state and manages agent sessions.</p></div>",
+      "css": ".ds-card{border:1px solid color-mix(in srgb,var(--line) 80%,transparent);border-radius:0.75rem;background:color-mix(in srgb,var(--surface) 50%,transparent);padding:1rem;color:var(--foreground);font-family:var(--font-sans);}.ds-card-title{font-size:12px;font-weight:500;}.ds-card-copy{margin:0.125rem 0 0;font-size:11px;line-height:1.375;color:var(--muted);}"
+    },
+    {
+      "name": "Settings text field",
+      "kind": "input",
+      "refersTo": "settings-field",
+      "description": "The compact text field used by SettingsModal.",
+      "html": "<label class=\"ds-field-label\">Model<input class=\"ds-field\" type=\"text\" placeholder=\"Model name\"></label>",
+      "css": ".ds-field-label{display:block;color:var(--foreground);font:12px/1.45 var(--font-sans);}.ds-field{display:block;margin-top:0.375rem;height:2rem;width:100%;border-radius:0.5rem;border:1px solid var(--line);background:var(--surface);padding:0 0.75rem;color:var(--foreground);font:12px/1.333333 var(--font-sans);}.ds-field::placeholder{color:color-mix(in srgb,var(--muted) 60%,transparent);}.ds-field:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}"
+    },
+    {
+      "name": "Turn work disclosure",
+      "kind": "custom",
+      "description": "One summary per turn; failures and selected limits stay visible when closed. Selected notices and daemon cost live inside disclosed work.",
+      "html": "<details class=\"ds-work\"><summary class=\"ds-work-summary\">Used 3 tools <span class=\"ds-work-failed\">1 failed</span><span class=\"ds-work-limit\">Limit reached</span></summary><div class=\"ds-work-details\"><p class=\"ds-work-notice\">Selected turn notice from the daemon.</p></div></details>",
+      "css": ".ds-work{color:var(--muted);font-family:var(--font-sans);}.ds-work-summary{padding:5px 0;font-size:12px;cursor:pointer;}.ds-work-summary span{margin-left:8px;}.ds-work-summary:hover{color:var(--foreground);}.ds-work-summary:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-work-failed{color:var(--fault);}.ds-work-limit{color:var(--attention);}.ds-work-details{margin-top:8px;padding:8px 12px;background:var(--surface);border:1px solid var(--line);}.ds-work-notice{margin:8px 0;font:11px/1.6 var(--font-mono);}"
+    },
+    {
+      "name": "Transcript detail Select",
+      "kind": "custom",
+      "description": "Subordinate frameless trigger for Summary, Normal, and Verbose detail; the actual Select owns keyboard and portaled listbox behavior.",
+      "html": "<button type=\"button\" class=\"ds-detail\" role=\"combobox\" aria-label=\"Transcript detail\" aria-expanded=\"false\" aria-haspopup=\"listbox\">Normal detail<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"m6 9 6 6 6-6\"/></svg></button>",
+      "css": ".ds-detail{display:flex;align-items:center;justify-content:space-between;gap:6px;height:32px;padding:0 6px;border:0;background:transparent;color:var(--muted);font:500 12px/1.333333 var(--font-sans);cursor:pointer;transition:color 150ms;}.ds-detail:hover{color:var(--foreground);}.ds-detail:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-detail:disabled{opacity:0.5;cursor:not-allowed;}"
+    },
+    {
+      "name": "Transcript attachment fallback",
+      "kind": "custom",
+      "description": "Actual image files load above prose through the native asset protocol, at up to 240px by 160px. Human previews align right. This standalone snippet shows the shared typed fallback used while loading or when unreadable, with an inline numbered reference and tooltip-only path. Non-images use the same chip in prose.",
+      "html": "<div class=\"ds-user-attachment\"><div class=\"ds-image-row\"><span class=\"ds-attachment\" title=\"/example/screen.png\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z\"/><path d=\"M14 2v6h6\"/></svg><span>screen.png</span><span class=\"ds-attachment-type\">PNG</span></span></div><div class=\"ds-image-message\"><span class=\"ds-image-reference\" title=\"/example/screen.png\">[Image #1]</span><p>Review this screen.</p></div></div>",
+      "css": ".ds-attachment{display:inline-flex;align-items:center;gap:5px;max-width:100%;background:var(--raised);border:1px solid var(--line);border-radius:0.25rem;padding:3px 6px;font:11px/1.45 var(--font-sans);color:var(--foreground);}.ds-attachment>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.ds-attachment .ds-attachment-type{flex-shrink:0;font-size:10px;color:var(--muted);}.ds-attachment svg{flex-shrink:0;}.ds-attachment button{display:grid;place-items:center;box-sizing:border-box;min-width:20px;min-height:20px;padding:3px;background:transparent;border:0;color:var(--muted);border-radius:0.25rem;}.ds-attachment button:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-attachment button:disabled{opacity:0.45;cursor:not-allowed;}.ds-user-attachment{display:flex;flex-direction:column;align-items:flex-end;max-width:90%;margin-left:auto;color:var(--foreground);font:13px/1.7 var(--font-sans);}.ds-image-row{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:flex-end;gap:8px;margin-bottom:8px;}.ds-image-row img{max-width:240px;max-height:160px;width:auto;height:auto;object-fit:contain;border:1px solid var(--line);border-radius:0.25rem;}.ds-image-message{background:var(--raised);padding:12px 16px;border-radius:0.25rem;}.ds-image-reference{display:inline-block;font-size:12px;margin:4px 6px 0 0;}.ds-image-message p{margin:0;}"
+    },
+    {
+      "name": "Bounded fallback disclosure",
+      "kind": "custom",
+      "description": "Fallback output starts collapsed regardless of detail level. Live pane output is labeled Terminal excerpt; malformed entries are labeled Unformatted entry. Both preserve content in a 160px scrollable excerpt without Writing.",
+      "html": "<details class=\"ds-excerpt\"><summary class=\"ds-excerpt-toggle\">Terminal excerpt <span>3 lines</span></summary><pre class=\"ds-excerpt-content\">Preserved terminal output\nSecond line\nThird line</pre></details>",
+      "css": ".ds-excerpt{color:var(--muted);font-family:var(--font-sans);}.ds-excerpt-toggle{padding:5px 0;font-size:12px;cursor:pointer;}.ds-excerpt-toggle span{margin-left:8px;}.ds-excerpt-toggle:hover{color:var(--foreground);}.ds-excerpt-toggle:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-excerpt-content{box-sizing:border-box;max-height:160px;overflow:auto;margin:8px 0 0;padding:10px 12px;background:var(--surface);border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.6 var(--font-mono);}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Order carries attention",
+    "overview": "Repomon keeps agent work in a dense, quiet desktop workspace. Home and Settings prioritize operating the fleet; Conversation gives assistant prose a continuous reading track, contains human turns on the right, and collects work behind one disclosure per turn. Wide panes earn repository context while reading widths stay bounded. The incumbent chrome, repo-leading strips, and transcript ledger remain authoritative.",
+    "keyCharacteristics": [
+      "Semantic theme colors and existing SVG controls.",
+      "Compact operational rows with explicit state words.",
+      "Assistant-led prose, grouped work, and a unified attachment composer.",
+      "Useful wide context with compact pane fallbacks."
+    ],
+    "rules": [
+      {
+        "name": "The Zero Urgency Rule",
+        "body": "When a synced fleet has lanes and none needs attention, show the quiet summary and retain the recessed separator. Do not manufacture an urgent row.",
+        "section": "colors"
+      },
+      {
+        "name": "The Identity Rule",
+        "body": "Home leads with the repository, then the accepted headline or branch fallback. Repeated repository/title pairs retain the lane identifier.",
+        "section": "typography"
+      },
+      {
+        "name": "The Context Width Rule",
+        "body": "Spend wide pane space on compact lane columns and repository context while retaining a bounded transcript and composer.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do reuse the existing CSS custom properties, control components, and SVG icon library.",
+      "Do keep state words visible alongside color and preserve focus, selected, and disabled states.",
+      "Do retain the existing app tabs and mounted Terminal/Chat session when changing views.",
+      "Do check light and dark themes at 1040x680, 1440x900, and 2000x1000."
+    ],
+    "donts": [
+      "Don't introduce a new palette, font system, decorative assets, emoji, or glyph icons.",
+      "Don't depend on a rich headline, model label, timestamp, or valid Markdown for readable identity and content.",
+      "Don't replace useful wide-pane context with longer prose or a full-width reply action.",
+      "Don't give routine turn notices separate transcript rows or duplicate the daemon's cost text.",
+      "Don't make an observed model label look editable.",
+      "Don't present a terminal excerpt as assistant prose or label fallback output Writing.",
+      "Don't expose full attachment paths as message content or replace a failed preview with an empty image frame."
+    ]
+  }
+}

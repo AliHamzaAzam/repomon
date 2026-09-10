@@ -5,7 +5,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
 import {
@@ -32,7 +32,11 @@ import { onLayoutChanged } from "../stores/uiSettings";
 import type { FleetStore } from "../stores/fleet";
 import type { EditorStore } from "../stores/editor";
 import type { WorkspaceStore } from "../stores/workspace";
-import AgentHistory from "./AgentHistory";
+import ConversationPane from "./ConversationPane";
+import ViewToggle from "./controls/ViewToggle";
+import TranscriptDetailToggle, { type TranscriptDetail } from "./controls/TranscriptDetailToggle";
+import { type AgentView } from "../stores/agentViews";
+import { matchChord } from "../keymap";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 import { multitaskRowFloor } from "./terminalMetrics";
 import { findPathRefs, isMacPlatform } from "./terminalPathLinks";
@@ -56,8 +60,6 @@ interface TerminalPaneProps extends TerminalTarget {
   workspace?: WorkspaceStore;
   onEnsureEditorOpen?: () => void;
 }
-
-type PaneView = "live" | "history";
 
 interface TerminalHostInsets {
   left: number;
@@ -172,12 +174,32 @@ export default function TerminalPane(props: TerminalPaneProps) {
   let retryWatch: (() => void) | undefined;
   // Generation checks prevent a delayed retry from replacing or orphaning a newer watch.
   let watchRun = 0;
+  const [viewError, setViewError] = createSignal<string | null>(null);
   const [transportError, setTransportError] = createSignal<string | null>(null);
   const [retrying, setRetrying] = createSignal(false);
   const [ready, setReady] = createSignal(false);
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
-  const [view, setView] = createSignal<PaneView>("live");
+  const [detail, setDetail] = createSignal<TranscriptDetail>("normal");
+  const [headline, setHeadline] = createSignal<string | null>(null);
+  const lane = createMemo(() => props.fleet?.lanes().find((item) => item.id === props.laneId));
+  const taskTitle = () => headline()?.trim() || lane()?.worktree.branch || lane()?.worktree.name || props.label;
+  createEffect(() => {
+    const laneId = props.laneId;
+    let disposed = false;
+    setHeadline(null);
+    void daemonCall("lane.headline", { lane_id: laneId }).then((value) => { if (!disposed) setHeadline(value); }).catch(() => undefined);
+    onCleanup(() => { disposed = true; });
+  });
+  const [localView, setLocalView] = createSignal<AgentView>("terminal");
+  const agentKind = createMemo(() => props.fleet?.lanes().find((lane) => lane.id === props.laneId)?.agent_sessions?.find((agent) => agent.tmux_window === props.window)?.agent ?? "agent");
+  const view = createMemo(() => props.workspace?.viewFor?.({ laneId: props.laneId, agent: agentKind(), shell: !!props.shell }) ?? localView());
+  const setView = (value: AgentView | null) => {
+    setFinding(false);
+    setViewError(null);
+    if (props.workspace) void props.workspace.setView(props.laneId, value).catch((error) => setViewError(String(error)));
+    else setLocalView(value ?? "terminal");
+  };
   const [paneBg, setPaneBg] = createSignal<string>("");
 
   createEffect(() => {
@@ -196,7 +218,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       !disposed
       && props.followTail
       && props.visible !== false
-      && view() === "live"
+      && view() === "terminal"
     ) {
       terminal?.scrollToBottom();
     }
@@ -332,7 +354,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       cancelAnimationFrame(visibleSyncFrame);
       visibleSyncFrame = undefined;
     }
-    if (!visible || view() !== "live" || disposed) return;
+    if (!visible || view() !== "terminal" || disposed) return;
     let retriesRemaining = VISIBLE_LAYOUT_RETRY_FRAMES;
     const syncVisiblePane = () => {
       visibleSyncFrame = requestAnimationFrame(() => {
@@ -340,7 +362,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if (
           disposed
           || props.visible === false
-          || view() !== "live"
+          || view() !== "terminal"
           || !terminal
           || !container?.isConnected
         ) return;
@@ -364,9 +386,6 @@ export default function TerminalPane(props: TerminalPaneProps) {
     syncVisiblePane();
   });
 
-  createEffect(() => {
-    if (!props.sessionId && view() === "history") setView("live");
-  });
 
   onMount(() => {
     void (async () => {
@@ -484,6 +503,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
 
       terminal.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
+        if (matchChord(event)?.id === "lane.toggleView") return false;
         if (isTerminalFindChord(event)) {
           event.preventDefault();
           openFind();
@@ -559,7 +579,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // resized directly. Shared agent panes use the arbitrated fit call so the TUI and desktop
       // never fight over dimensions.
       syncSize = async () => {
-        if (disposed || !terminal || !fit || props.visible === false || view() !== "live") return;
+        if (disposed || !terminal || !fit || props.visible === false || view() !== "terminal") return;
         if (!container || !container.isConnected || container.clientWidth === 0 || container.clientHeight === 0) return;
         const hostRealigned = alignTerminalHostToDevicePixels();
         let proposed: { cols: number; rows: number } | undefined;
@@ -833,7 +853,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
               await watch.stop();
             };
             setTransportError(null);
-            if (props.focused && view() === "live" && terminal) terminal.focus();
+            if (props.focused && view() === "terminal" && terminal) terminal.focus();
             return;
           } catch (error) {
             if (disposed || run !== watchRun) return;
@@ -924,23 +944,23 @@ export default function TerminalPane(props: TerminalPaneProps) {
  * cannot paint over this or another pane’s controls. */}
       <div
         ref={container}
-        class={`terminal-host absolute inset-x-2 bottom-0 top-7 overflow-hidden ${view() === "live" ? "" : "invisible pointer-events-none"}`}
+        class={`terminal-host absolute inset-x-2 bottom-0 top-10 overflow-hidden ${view() === "terminal" ? "" : "invisible pointer-events-none"}`}
         style={{ "background-color": paneBg() || undefined }}
-        aria-hidden={view() !== "live"}
+        aria-hidden={view() !== "terminal"}
       />
-      <Show when={props.sessionId}>
-        <div class={`absolute inset-0 z-[5] pt-6 ${view() === "history" ? "" : "hidden"}`}>
-          <AgentHistory
-            laneId={props.laneId}
-            sessionId={props.sessionId ?? null}
-            visible={props.visible !== false && view() === "history"}
-          />
+      <Show when={!props.shell}>
+        <div class={`absolute inset-0 z-[5] pt-10 ${view() === "conversation" ? "" : "hidden"}`}>
+          <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: props.sessionId ?? undefined, kind: agentKind() }}
+            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} detail={detail()} visible={props.visible !== false && view() === "conversation"} onTerminal={() => setView("terminal")} />
         </div>
       </Show>
-      <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-7 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">
+      <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-10 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">
         <Show
           when={finding()}
-          fallback={<span class="truncate font-semibold text-foreground/80">{props.label}</span>}
+          fallback={<span class="flex min-w-0 items-baseline gap-3 normal-case tracking-normal" title={`${taskTitle()}${lane() ? ` · ${lane()!.repo.label ?? lane()!.repo.name}` : ""}`}>
+            <span class="truncate font-sans text-xs font-semibold text-foreground">{props.shell ? props.label : taskTitle()}</span>
+            <Show when={lane() && !props.shell}><span class="max-w-32 truncate font-mono text-[10px] text-muted">{lane()!.repo.label ?? lane()!.repo.name}</span></Show>
+          </span>}
         >
           <form
             class="pointer-events-auto flex min-w-0 flex-1 items-center gap-1.5"
@@ -1003,59 +1023,26 @@ export default function TerminalPane(props: TerminalPaneProps) {
           </form>
         </Show>
         <div class="ml-2 flex shrink-0 items-center gap-2">
-          <Show when={props.sessionId && !finding()}>
-            <div class="pointer-events-auto flex items-center text-[10px]" role="tablist" aria-label="Agent pane views">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view() === "live"}
-                class={`focus-ring px-1.5 py-0.5 font-medium transition-colors ${
-                  view() === "live"
-                    ? "text-foreground font-semibold"
-                    : "text-muted/70 hover:text-foreground"
-                }`}
-                onClick={() => {
-                  setView("live");
-                  queueMicrotask(() => terminal?.focus());
-                }}
-              >Live</button>
-              <span class="h-2.5 w-px bg-line/60 mx-0.5" aria-hidden="true" />
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view() === "history"}
-                class={`focus-ring px-1.5 py-0.5 font-medium transition-colors ${
-                  view() === "history"
-                    ? "text-foreground font-semibold"
-                    : "text-muted/70 hover:text-foreground"
-                }`}
-                onClick={() => {
-                  setFinding(false);
-                  setView("history");
-                }}
-              >History</button>
-            </div>
-          </Show>
-          <Show when={view() === "history"}>
-            <span class="pointer-events-none rounded border border-line/40 bg-raised/30 px-1.5 py-0.5 font-mono text-[9px] font-normal tracking-wide text-muted/60 select-none">
-              HISTORY
-            </span>
+          <Show when={!props.shell && !finding()}>
+            <button class="pointer-events-auto focus-ring text-[10px] normal-case tracking-normal hover:text-foreground" title="Use the default view from Settings > Agents" onClick={() => setView(null)}>Use default</button>
+            <ViewToggle value={view()} onChange={setView} />
+            <Show when={view() === "conversation"}><TranscriptDetailToggle value={detail()} onChange={setDetail} /></Show>
           </Show>
         </div>
       </div>
-      <Show when={view() === "live" && transportError()}>
+      <Show when={viewError() || (view() === "terminal" && transportError())}>
         <div
           role="alert"
           class="absolute inset-x-4 top-10 z-20 flex items-center justify-between gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg"
         >
-          <span>Terminal transport unavailable: {transportError()}</span>
+          <span>{viewError() ? `Could not save view: ${viewError()}` : `Terminal transport unavailable: ${transportError()}`}</span>
           <button
             type="button"
             class="focus-ring shrink-0 rounded-md border border-fault/40 px-2 py-1 font-medium text-fault transition-colors hover:bg-fault/10 disabled:opacity-50"
-            disabled={retrying()}
-            onClick={() => retryWatch?.()}
+            disabled={!viewError() && retrying()}
+            onClick={() => viewError() ? setViewError(null) : retryWatch?.()}
           >
-            {retrying() ? "Retrying…" : "Retry"}
+            {viewError() ? "Dismiss" : retrying() ? "Retrying…" : "Retry"}
           </button>
         </div>
       </Show>

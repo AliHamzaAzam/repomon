@@ -221,3 +221,34 @@ describe("workspace store", () => {
     });
   });
 });
+
+describe("lane view persistence", () => {
+  it("writes an override, resets to inherited kind settings, and keeps shells in Terminal", async () => {
+    const { daemonCall } = await import("../ipc/rpc");
+    const { setAgentViewDefaults } = await import("./agentViews");
+    setAgentViewDefaults({ codex: "conversation" });
+    let dispose!: () => void;
+    const ws = createRoot((end) => { dispose = end; return createWorkspaceStore(fleetStub({ lanes: () => [lane(7, ["a"])] })); });
+    const agent = { ...target("a"), agent: "codex" };
+    expect(ws.viewFor(agent)).toBe("conversation");
+    await ws.setView(7, "terminal");
+    expect(daemonCall).toHaveBeenCalledWith("lane.set_view", { lane_id: 7, view_mode: "terminal" });
+    expect(ws.viewFor(agent)).toBe("terminal");
+    await ws.setView(7, null);
+    expect(daemonCall).toHaveBeenCalledWith("lane.set_view", { lane_id: 7, view_mode: null });
+    expect(ws.viewFor(agent)).toBe("conversation");
+    expect(ws.viewFor({ ...agent, shell: true })).toBe("terminal");
+    dispose(); setAgentViewDefaults({});
+  });
+  it("rolls a failed override back without discarding another lane's saved choice", async () => {
+    const { daemonCall } = await import("../ipc/rpc");
+    let dispose!: () => void;
+    const ws = createRoot((end) => { dispose = end; return createWorkspaceStore(fleetStub()); });
+    await ws.setView(8, "conversation");
+    vi.mocked(daemonCall).mockRejectedValueOnce(new Error("Could not save"));
+    await expect(ws.setView(7, "conversation")).rejects.toThrow("Could not save");
+    expect(ws.viewFor(target("a"))).toBe("terminal");
+    expect(ws.viewFor({ ...target("b"), laneId: 8 })).toBe("conversation");
+    dispose();
+  });
+});

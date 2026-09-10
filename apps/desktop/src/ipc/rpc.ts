@@ -87,7 +87,14 @@ export interface UsageWindowParams {
   until?: string | null;
 }
 
+export interface TranscriptTarget { lane_id: number; window?: string; session_id?: string; kind?: string }
+export interface TranscriptPage { items: TranscriptItem[]; next_before: number | null }
+// subscription_id is daemon-internal connection routing, never a UI row identity.
+export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }
+
 export interface ConfigView {
+  agent_views?: Record<string, string>;
+  agent_status_rows?: Record<string, string[]>;
   accent?: string | null;
   theme?: string | null;
   worktree_template: string;
@@ -333,11 +340,13 @@ interface RpcMap {
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
   "agent.transcript_page": {
-    params: { lane_id: number; session_id?: string; before?: number };
-    result: { items: TranscriptItem[]; next_before: number | null };
+    params: TranscriptTarget & { before?: number };
+    result: TranscriptPage;
   };
+  "agent.transcript_watch": { params: TranscriptTarget & { on: boolean }; result: TranscriptPage | null };
+  "lane.set_view": { params: { lane_id: number; view_mode: "terminal" | "conversation" | null }; result: null };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
-  "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: null };
+  "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: { answered: string; sent: string[] } };
   "agent.pin": { params: { lane_id: number; pinned: boolean }; result: null };
   "agent.auto_continue": { params: { lane_id: number; enabled: boolean }; result: null };
   "agent.send_input": { params: { lane_id: number; window?: string; text: string; enter?: boolean }; result: null };
