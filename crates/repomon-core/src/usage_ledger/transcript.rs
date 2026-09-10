@@ -270,7 +270,12 @@ impl Mapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage_ledger::scan::{scan_claude_transcript, scan_codex_rollout};
+    use crate::usage_ledger::scan::{
+        ScanOptions, scan_claude_transcript_with_options, scan_codex_rollout_with_options,
+    };
+    const CONVERSATION: ScanOptions = ScanOptions {
+        collect_transcript: true,
+    };
     fn fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/usage_ledger/fixtures")
@@ -278,7 +283,13 @@ mod tests {
     }
     #[test]
     fn ledger_fixtures_map_both_providers() {
-        let claude = scan_claude_transcript(&fixture("claude_usage_v0.jsonl"), 0, None).unwrap();
+        let claude = scan_claude_transcript_with_options(
+            &fixture("claude_usage_v0.jsonl"),
+            0,
+            None,
+            CONVERSATION,
+        )
+        .unwrap();
         assert!(
             claude
                 .transcript
@@ -299,14 +310,21 @@ mod tests {
             .unwrap();
         assert_eq!(tool.item.status, Some(ToolCallStatus::Running));
         assert!(tool.item.input_summary.as_ref().unwrap().contains("a.rs"));
-        let codex = scan_codex_rollout(&fixture("codex_injected_preamble_v0.jsonl"), 0).unwrap();
+        let codex = scan_codex_rollout_with_options(
+            &fixture("codex_injected_preamble_v0.jsonl"),
+            0,
+            CONVERSATION,
+        )
+        .unwrap();
         assert!(
             codex
                 .transcript
                 .iter()
                 .any(|r| r.item.kind.as_deref() == Some("user"))
         );
-        let usage = scan_codex_rollout(&fixture("codex_usage_v0.jsonl"), 0).unwrap();
+        let usage =
+            scan_codex_rollout_with_options(&fixture("codex_usage_v0.jsonl"), 0, CONVERSATION)
+                .unwrap();
         assert!(
             usage
                 .transcript
@@ -347,8 +365,8 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "broken record\n{\"unfinished\"").unwrap();
         for scan in [
-            scan_codex_rollout(file.path(), 0).unwrap(),
-            scan_claude_transcript(file.path(), 0, None).unwrap(),
+            scan_codex_rollout_with_options(file.path(), 0, CONVERSATION).unwrap(),
+            scan_claude_transcript_with_options(file.path(), 0, None, CONVERSATION).unwrap(),
         ] {
             assert_eq!(scan.transcript.len(), 1);
             assert_eq!(

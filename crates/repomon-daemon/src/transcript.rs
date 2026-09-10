@@ -9,7 +9,10 @@ use repomon_core::agent::{
 use repomon_core::model::{LaneId, TranscriptItem};
 use repomon_core::usage_ledger::{
     FleetIndex,
-    scan::{SourceScan, scan_claude_transcript, scan_codex_rollout},
+    scan::{
+        ScanOptions, SourceScan, scan_claude_transcript, scan_claude_transcript_with_options,
+        scan_codex_rollout, scan_codex_rollout_with_options,
+    },
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -163,9 +166,12 @@ fn scan(source: &Source) -> Result<SourceScan, String> {
     let Some(path) = &source.path else {
         return Ok(SourceScan::default());
     };
+    let options = ScanOptions {
+        collect_transcript: true,
+    };
     match source.kind.as_str() {
-        "claude-code" => scan_claude_transcript(path, 0, None),
-        "codex" => scan_codex_rollout(path, 0),
+        "claude-code" => scan_claude_transcript_with_options(path, 0, None, options),
+        "codex" => scan_codex_rollout_with_options(path, 0, options),
         _ => return Ok(SourceScan::default()),
     }
     .map_err(|e| e.to_string())
