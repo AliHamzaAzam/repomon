@@ -88,7 +88,9 @@ export interface UsageWindowParams {
 }
 
 export interface TranscriptTarget { lane_id: number; window?: string; session_id?: string; kind?: string }
-export interface TranscriptPage { items: TranscriptItem[]; next_before: number | null }
+// remaining_before is how many earlier transcript items sit before this page's cursor, when the
+// daemon can supply that count cheaply. Absent (not zero) means unknown, not "no more history".
+export interface TranscriptPage { items: TranscriptItem[]; next_before: number | null; remaining_before?: number | null }
 // subscription_id is daemon-internal connection routing, never a UI row identity.
 export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }
 

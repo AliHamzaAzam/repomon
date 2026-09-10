@@ -34,15 +34,31 @@ export function mergeTranscript(current: ConversationRow[], incoming: Conversati
 export function createTranscript(target: () => TranscriptTarget | null) {
   const [state, setState] = createStore<{ rows: ConversationRow[] }>({ rows: [] });
   const [nextBefore, setNextBefore] = createSignal<number | null>(null);
+  const [remaining, setRemaining] = createSignal<number | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [revision, setRevision] = createSignal(0);
+  const [pagedOnce, setPagedOnce] = createSignal(false);
   let epoch = 0;
   let paged = false;
   let historyTarget = "";
   let lifecycle: Promise<void> = Promise.resolve();
+  // Mirrors state.rows' key -> index so a pure upsert (every incoming key already present, no
+  // removals, no prepend - the common case for a streamed partial/final delta) can patch just
+  // the changed rows in place instead of rebuilding and re-diffing the whole loaded history on
+  // every token. Structural changes (paging, removal, a brand new row) still rebuild fully below
+  // and then refresh this index; those happen far less often than a streamed content update.
+  let indexByKey = new Map<string, number>();
+  const rebuildIndex = () => { indexByKey = new Map(state.rows.map((row, i) => [row.key, i])); };
+
   const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false) => {
-    setState("rows", reconcile(mergeTranscript([...state.rows], rows, removed, prepend), { key: "key" }));
+    const structural = prepend || removed.length > 0 || rows.some((row) => !indexByKey.has(row.key));
+    if (structural) {
+      setState("rows", reconcile(mergeTranscript([...state.rows], rows, removed, prepend), { key: "key" }));
+      rebuildIndex();
+    } else {
+      for (const row of rows) setState("rows", indexByKey.get(row.key)!, reconcile(row));
+    }
     setRevision((n) => n + 1);
   };
 
@@ -60,13 +76,16 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       historyTarget = identity;
       paged = false;
       setState("rows", []);
+      indexByKey = new Map();
       setNextBefore(null);
+      setRemaining(null);
+      setPagedOnce(false);
     }
     setLoading(true);
     setError(null);
     const update = (value: TranscriptUpdate) => {
       apply(value.items.map((item, index) => transcriptRow(item, `event:${run}:${index}`)), value.removed_ids);
-      if (!paged) setNextBefore(value.next_before);
+      if (!paged) { setNextBefore(value.next_before); setRemaining(value.remaining_before ?? null); }
     };
     lifecycle = lifecycle.catch(() => undefined).then(async () => {
       if (disposed) return;
@@ -85,7 +104,7 @@ export function createTranscript(target: () => TranscriptTarget | null) {
         const present = new Set(incoming.map((row) => row.key));
         const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
         apply(incoming, staleLive);
-        if (!paged) setNextBefore(page.next_before);
+        if (!paged) { setNextBefore(page.next_before); setRemaining(page.remaining_before ?? null); }
         initialized = true;
         buffered.forEach(update);
         setRevision((n) => n + 1);
@@ -117,13 +136,16 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       const page = await daemonCall("agent.transcript_page", { ...params, before });
       if (run !== epoch) return;
       paged = true;
+      setPagedOnce(true);
       apply(page.items.map((item, index) => transcriptRow(item, `page:${before}:${index}`)), [], true);
       setNextBefore(page.next_before);
+      setRemaining(page.remaining_before ?? null);
+      return page.items.length;
     } catch (cause) {
       if (run === epoch) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (run === epoch) setLoading(false);
     }
   }
-  return { rows: () => state.rows, nextBefore, loading, error, revision, loadOlder };
+  return { rows: () => state.rows, nextBefore, remaining, loading, error, revision, pagedOnce, loadOlder };
 }
