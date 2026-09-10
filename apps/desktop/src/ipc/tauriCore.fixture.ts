@@ -342,6 +342,12 @@ function transcriptItems(): TranscriptItem[] {
     item("a1", "assistant", "The EU tax bands are in place, using the existing pricing table so no schema change was needed. Checkout totals now include the new bands for EU carts.", { model:"gemini-3-pro" }),
   ];
   if (scenario === "long-history") return Array.from({ length: 40 }, (_, i) => item(`h${i}`, i % 6 === 0 ? "user" : "assistant", i % 6 === 0 ? `Round ${i / 6 + 1}: keep going on the migration.` : `Batch ${i} of the migration is done; the existing schema stayed untouched.`));
+  if (scenario === "queued") return [
+    item("u1", "user", "Attached file: \"/fixture/attachments/screen.png\"\n\nCheck this layout before you continue."),
+    item("a1", "assistant", "The layout matches the reference. Continuing with the migration.", { model:"claude-opus-5" }),
+    item("u2", "user", "Also check the mobile breakpoint.", { partial:true }),
+    item("u3", "user", "And the tablet one too.", { partial:true }),
+  ];
   if (scenario === "dull" || scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
   if (scenario === "broken") return brokenItems;
   if (scenario === "dialog") return richItems.slice(0, -2);
@@ -354,7 +360,13 @@ function transcriptItems(): TranscriptItem[] {
     item("usage", "status", "Usage limit reached for this account.", { status_kind:"usage_limit" })];
   return richItems;
 }
-const initialPage = () => ({ items:transcriptItems(), next_before: scenario === "rich" ? 120 : scenario === "long-history" ? 40 : null, remaining_before: scenario === "long-history" ? 57 : undefined });
+const initialPage = () => ({
+  items:transcriptItems(),
+  next_before: scenario === "rich" ? 120 : scenario === "long-history" ? 40 : null,
+  older_message_count: scenario === "long-history" ? 57 : undefined,
+  order: scenario === "queued" ? ["u1", "a1", "u2", "u3"] : undefined,
+  input_states: scenario === "queued" ? { u2:"consumed", u3:"queued" } : undefined,
+});
 let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"}, agent_status_rows:query.has("notices") ? {codex:["rate_limit", "usage_limit"]} : {} };
 if (query.get("focus") === "reply") {
   const focusReply = setInterval(() => {
@@ -385,6 +397,16 @@ if (scenario === "attachments" || scenario.startsWith("defect-composer")) {
       }
     }
     field.focus(); clearInterval(timer);
+  }, 100);
+}
+if (query.has("drag")) {
+  const timer = setInterval(() => {
+    const dropZone = document.querySelector<HTMLElement>(".conversation-reply");
+    if (!dropZone) return;
+    clearInterval(timer);
+    const data = new DataTransfer();
+    data.items.add(new File(["fixture image bytes"], "screenshot.png", { type:"image/png" }));
+    dropZone.dispatchEvent(new DragEvent("dragenter", { bubbles:true, dataTransfer:data }));
   }, 100);
 }
 if (scenario === "defect-excerpt-open" || scenario === "broken") {
@@ -448,7 +470,7 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "agent.answer": () => { promptAnswered = true; return { answered:"Yes", sent:["Enter"] }; },
   "agent.send_input": () => null,
   "agent.transcript_page": () => scenario === "long-history"
-    ? { items: Array.from({ length: 57 }, (_, i) => item(`older${i}`, i % 6 === 0 ? "user" : "assistant", i === 0 ? "Round 0: start the migration off the legacy schema." : `Setup step ${i} of the migration.`)), next_before: null, remaining_before: null }
+    ? { items: Array.from({ length: 57 }, (_, i) => item(`older${i}`, i % 6 === 0 ? "user" : "assistant", i === 0 ? "Round 0: start the migration off the legacy schema." : `Setup step ${i} of the migration.`)), next_before: null, older_message_count: null }
     : { items:[item("older:1", "user", "Use the existing brand styles for the collection filter.")], next_before:null },
   "agent.transcript_watch": (params) => {
     const target = params as { lane_id:number; window:string; on:boolean };
