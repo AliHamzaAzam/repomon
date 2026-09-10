@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, within, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SystemDoctorResult } from "../bindings";
@@ -548,7 +548,7 @@ describe("System Health tab", () => {
       ));
 
       await screen.findByText("Custom Agent Registrations");
-      expect(screen.getByText("custom-runner")).toBeInTheDocument();
+      expect(screen.getAllByText("custom-runner")).toHaveLength(2);
       expect(screen.getByText("python -m runner")).toBeInTheDocument();
 
       const nameInput = screen.getByPlaceholderText("e.g. 'devin', 'gemini-cli', 'deepseek'");
@@ -569,7 +569,7 @@ describe("System Health tab", () => {
       });
 
       await screen.findByText("Registered custom agent 'devin'");
-      expect(screen.getByText("devin")).toBeInTheDocument();
+      expect(screen.getAllByText("devin")).toHaveLength(2);
     });
 
     it("displays friendly validation error when trying to add a built-in agent name", async () => {
@@ -645,7 +645,7 @@ describe("System Health tab", () => {
       ));
 
       await screen.findByText("Custom Agent Registrations");
-      expect(screen.getByText("to-delete")).toBeInTheDocument();
+      expect(screen.getAllByText("to-delete")).toHaveLength(2);
 
       const removeButton = screen.getByRole("button", { name: "Remove agent to-delete" });
       fireEvent.click(removeButton);
@@ -660,5 +660,20 @@ describe("System Health tab", () => {
         expect(calls.removedAgents).toContain("to-delete");
       });
     });
+  });
+});
+
+
+describe("Default agent views", () => {
+  it("persists a supported kind's default and disables unsupported kinds", async () => {
+    state.config = { ...config, agent_views: { codex: "terminal" } };
+    render(() => <SettingsModal initialTab="agents" onClose={() => undefined} />);
+    const codex = await screen.findByRole("group", { name: "codex default view" });
+    fireEvent.click(within(codex).getByRole("button", { name: "Chat" }));
+    await waitFor(() => expect(calls.saved[calls.saved.length - 1]).toMatchObject({ agent_views: { codex: "conversation" } }));
+    expect(within(codex).getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true");
+    const cursor = screen.getByRole("group", { name: "cursor default view" });
+    expect(within(cursor).getByRole("button", { name: "Chat" })).toBeDisabled();
+    expect(within(cursor).getByRole("button", { name: "Terminal" })).toBeDisabled();
   });
 });

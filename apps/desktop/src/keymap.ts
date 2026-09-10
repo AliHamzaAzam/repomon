@@ -96,6 +96,7 @@ export const BINDINGS: Binding[] = [
   { id: "fleet.repoNotes", chord: "mod+shift+b", label: "Edit the selected lane's project notes", section: "Fleet", when: "lane" },
 
   { id: "lane.spawn", chord: "mod+e", label: "Spawn agent", section: "Lane", when: "lane" },
+  { id: "lane.toggleView", chord: "mod+shift+j", label: "Switch Terminal / Chat", section: "Lane", when: "lane" },
   { id: "lane.terminal", chord: "mod+t", label: "Open terminal", section: "Lane", when: "lane" },
   { id: "lane.pin", chord: "mod+shift+p", label: "Pin or unpin lane", section: "Lane", when: "lane" },
   { id: "lane.delete", chord: "mod+d", label: "Delete lane (asks first)", section: "Lane", when: "lane" },

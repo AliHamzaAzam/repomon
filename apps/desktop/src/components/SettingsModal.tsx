@@ -1,3 +1,5 @@
+import ViewToggle from "./controls/ViewToggle";
+import { hasTranscriptSource, resolveAgentView, setAgentViewDefaults } from "../stores/agentViews";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import type { AgentChoice } from "../bindings";
@@ -368,6 +370,7 @@ export default function SettingsModal(props: SettingsModalProps) {
     try {
       const saved = await daemonCall("config.set", nextConfig);
       setConfig(saved);
+      setAgentViewDefaults(saved.agent_views ?? {});
       props.onConfigSaved?.(saved);
       if (saved.accent) applyAccent(saved.accent);
       if (saved.agent_icons) setAgentIconOverrides(saved.agent_icons);
@@ -897,6 +900,17 @@ export default function SettingsModal(props: SettingsModalProps) {
 
             <Show when={tab() === "agents"}>
               <div class="space-y-6">
+                <section aria-label="Default agent views">
+                  <p class="section-label">Default view</p>
+                  <p class="mt-1 mb-3 text-xs text-muted">Choose how each agent opens. A lane can keep its own view.</p>
+                  <For each={knownAgentsList().map((agent) => agent.name)}>{(name) => <div class="flex items-center justify-between gap-4 border-b border-line py-2.5">
+                    <span class="font-mono text-xs">{name}</span>
+                    <div class="flex items-center gap-3">
+                      <Show when={!hasTranscriptSource(name)}><span class="text-xs text-muted">Terminal only</span></Show>
+                      <ViewToggle label={`${name} default view`} disabled={!hasTranscriptSource(name)} value={hasTranscriptSource(name) ? resolveAgentView(null, name, config()?.agent_views ?? {}) : "terminal"} onChange={(view) => patch({ agent_views: { ...config()?.agent_views, [name]: view } })} />
+                    </div>
+                  </div>}</For>
+                </section>
 
                 <section class="space-y-4">
                   <div>
