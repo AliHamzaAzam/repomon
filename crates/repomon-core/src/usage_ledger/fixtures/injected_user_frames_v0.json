@@ -1,0 +1,125 @@
+{
+  "source": "operator-supplied evidence in /Users/azaleas/repomind/fleet/repomon/tasks/2026-09-10-c1-design-round4.md; no live session capture",
+  "cases": [
+    {
+      "name": "reported_task_notification",
+      "text": "<task-notification> <task-id>bsli5vp2x</task-id> <tool-use-id>toolu_01NL...</tool-use-id> <output-file>/private/tmp/...</output-file> <status>completed</status> <summary>...</summary>",
+      "expected": null,
+      "provenance": "operator evidence, round 4 task file; truncated exactly as supplied"
+    },
+    {
+      "name": "reported_image_source",
+      "text": "[Image: source: /Users/azaleas/.claude/image-cache/.../4.png]",
+      "expected": null,
+      "provenance": "operator evidence, round 4 task file; abbreviated path exactly as supplied"
+    },
+    {
+      "name": "closed_notification",
+      "text": "<task-notification> <task-id>bsli5vp2x</task-id> <tool-use-id>toolu_01NL...</tool-use-id> <output-file>/private/tmp/...</output-file> <status>completed</status> <summary>...</summary></task-notification>",
+      "expected": null,
+      "provenance": "derived, completed wrapper"
+    },
+    {
+      "name": "notification_then_prose",
+      "text": "<task-notification> <task-id>bsli5vp2x</task-id> <tool-use-id>toolu_01NL...</tool-use-id> <output-file>/private/tmp/...</output-file> <status>completed</status> <summary>...</summary></task-notification>\nFix the preview sizing.",
+      "expected": "Fix the preview sizing.",
+      "provenance": "derived, mixed turn"
+    },
+    {
+      "name": "prose_then_truncated_notification",
+      "text": "Fix the preview sizing.\n<task-notification> <task-id>bsli5vp2x</task-id> <tool-use-id>toolu_01NL...</tool-use-id> <output-file>/private/tmp/...</output-file> <status>completed</status> <summary>...</summary>",
+      "expected": "Fix the preview sizing.",
+      "provenance": "derived, truncated suffix"
+    },
+    {
+      "name": "standalone_task_id",
+      "text": "<task-id>bsli5vp2x</task-id>",
+      "expected": null,
+      "provenance": "derived from reported child wrapper"
+    },
+    {
+      "name": "standalone_tool_use_id",
+      "text": "<tool-use-id>toolu_01NL...</tool-use-id>",
+      "expected": null,
+      "provenance": "derived from reported child wrapper"
+    },
+    {
+      "name": "tool_use_wrapper",
+      "text": "<tool-use id=\"toolu_01NL...\">background task completed</tool-use>",
+      "expected": null,
+      "provenance": "derived, tool-use wrapper"
+    },
+    {
+      "name": "standalone_output_file",
+      "text": "<output-file>/private/tmp/...</output-file>",
+      "expected": null,
+      "provenance": "derived from reported child wrapper"
+    },
+    {
+      "name": "image_then_prose",
+      "text": "[Image: source: /Users/azaleas/.claude/image-cache/.../4.png]\nCompare the attached screenshot.",
+      "expected": "Compare the attached screenshot.",
+      "provenance": "derived, mixed turn"
+    },
+    {
+      "name": "truncated_image",
+      "text": "[Image: source: /Users/azaleas/.claude/image-cache/",
+      "expected": null,
+      "provenance": "derived, truncated wrapper"
+    },
+    {
+      "name": "multiple_frames",
+      "text": "<task-id>task</task-id>\n<tool-use-id>tool</tool-use-id>\n<output-file>/private/tmp/out</output-file>\n[Image: source: /Users/azaleas/.claude/image-cache/.../4.png]",
+      "expected": null,
+      "provenance": "derived, repeated frames"
+    },
+    {
+      "name": "tag_boundary_suffix",
+      "text": "<tool-use-id>tool</tool-use-id>\nKeep the compose button enabled.",
+      "expected": "Keep the compose button enabled.",
+      "provenance": "derived, tag name boundary"
+    },
+    {
+      "name": "self_closing_wrapper",
+      "text": "<output-file path=\"/private/tmp/out\"/>\nShow the result.",
+      "expected": "Show the result.",
+      "provenance": "derived, self-closing wrapper"
+    },
+    {
+      "name": "markdown_inside_prose",
+      "text": "Review this:\n\n    indented code\n\n[Image: source: /Users/azaleas/.claude/image-cache/.../4.png]\n\nThen fix it.",
+      "expected": "Review this:\n\n    indented code\n\n \n\nThen fix it.",
+      "provenance": "derived, preserve internal Markdown whitespace"
+    },
+    {
+      "name": "plain_attachment_path",
+      "text": "Use /Users/azaleas/design/4.png as the reference.",
+      "expected": "Use /Users/azaleas/design/4.png as the reference.",
+      "provenance": "preservation control, ordinary attachment path"
+    },
+    {
+      "name": "markdown_image",
+      "text": "Compare ![reference](/Users/azaleas/design/4.png).",
+      "expected": "Compare ![reference](/Users/azaleas/design/4.png).",
+      "provenance": "preservation control, Markdown image"
+    },
+    {
+      "name": "similar_tag_name",
+      "text": "Document <output-file-format>PNG</output-file-format>.",
+      "expected": "Document <output-file-format>PNG</output-file-format>.",
+      "provenance": "preservation control, distinct XML name"
+    },
+    {
+      "name": "ordinary_whitespace",
+      "text": "  Keep this spacing.\n\n    code\n",
+      "expected": "  Keep this spacing.\n\n    code\n",
+      "provenance": "preservation control, untouched whitespace"
+    },
+    {
+      "name": "multiline_notification",
+      "text": "<task-notification>\n<task-id>bsli5vp2x</task-id>\n<tool-use-id>toolu_01NL...</tool-use-id>\n<output-file>/private/tmp/...</output-file>\n<status>completed</status>\n</task-notification>\nFix the preview.",
+      "expected": "Fix the preview.",
+      "provenance": "derived, wrapper spans adjacent Claude text blocks"
+    }
+  ]
+}

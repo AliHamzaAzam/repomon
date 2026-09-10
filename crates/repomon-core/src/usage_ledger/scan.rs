@@ -740,13 +740,16 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
 }
 
 /// Tags the CLIs wrap around text they injected into a turn. Whatever sits between an opening tag
-/// and its closing tag is the tool talking to the agent, never the operator, so a headline is read
-/// from what is left once these are gone.
+/// and its closing tag is harness context. Headlines and conversation user prose share this filter.
 const INJECTED_TAGS: &[&str] = &[
     "local-command-caveat",
     "system-reminder",
     "USER_REQUEST",
     "task-notification",
+    "task-id",
+    "tool-use",
+    "tool-use-id",
+    "output-file",
     "agent-message",
 ];
 
@@ -764,7 +767,7 @@ const INJECTED_PREAMBLES: &[(&str, &[&str])] = &[(
 /// Bump this whenever the extraction rules change. A session digest's stored
 /// `headline_version` (see `UsageSessionMeta`) lags behind after a bump, and ingest re-digests it
 /// from its source, a bounded batch per tick, until every session reflects the current rules.
-pub const HEADLINE_VERSION: u32 = 3;
+pub const HEADLINE_VERSION: u32 = 4;
 
 /// How many characters a headline keeps, ellipsis included.
 const HEADLINE_MAX_CHARS: usize = 80;
@@ -786,20 +789,41 @@ pub const UNKNOWN_MODEL: &str = "unknown";
 
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
-fn strip_injected_blocks(raw: &str) -> String {
+pub(super) fn strip_injected_blocks(raw: &str) -> String {
     let mut text = raw.to_string();
     loop {
         let mut cut: Option<(usize, usize)> = None;
         for tag in INJECTED_TAGS {
             let open = format!("<{tag}");
-            let Some(start) = text.find(&open) else {
+            // Match a whole tag name: <tool-use-id> must not be treated as an unclosed
+            // <tool-use>, and ordinary names such as <output-file-format> must survive.
+            let Some(start) = text.match_indices(&open).find_map(|(start, _)| {
+                text[start + open.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || matches!(c, '>' | '/'))
+                    .then_some(start)
+            }) else {
                 continue;
             };
             let close = format!("</{tag}>");
-            let end = match text[start..].find(&close) {
-                Some(rel) => start + rel + close.len(),
-                None => text.len(),
+            let opening_end = text[start..].find('>').map(|rel| start + rel + 1);
+            let end = if let Some(end) = opening_end.filter(|end| text[start..*end].ends_with("/>"))
+            {
+                end
+            } else {
+                text[start..]
+                    .find(&close)
+                    .map_or(text.len(), |rel| start + rel + close.len())
             };
+            if cut.is_none_or(|(previous, _)| start < previous) {
+                cut = Some((start, end));
+            }
+        }
+        if let Some(start) = text.find("[Image: source:") {
+            let end = text[start..]
+                .find(']')
+                .map_or(text.len(), |rel| start + rel + 1);
             if cut.is_none_or(|(previous, _)| start < previous) {
                 cut = Some((start, end));
             }
