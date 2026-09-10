@@ -98,7 +98,7 @@ fn parse_at(v: &Value, key: &str) -> Option<DateTime<Utc>> {
 
 /// Read `path` from `from_offset`, handing each line and its byte offset to `on_line`. Returns
 /// the offset just past the last complete line, so a partially written tail is re-read next time.
-fn for_each_line_until<F>(
+pub(crate) fn for_each_line_until<F>(
     path: &Path,
     from_offset: u64,
     before: Option<u64>,

@@ -240,6 +240,26 @@ struct CacheEntry {
     key: (SystemTime, u64),
     seq: u64,
     summary: TranscriptSummary,
+    state: SummaryState,
+    offset: u64,
+    identity: FileIdentity,
+}
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = Option<SystemTime>;
+
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.created().ok()
+    }
 }
 
 /// Process-global memo for [`parse_transcript`], keyed by path and invalidated by file mtime+len.
@@ -260,78 +280,78 @@ fn cache_seq() -> u64 {
 /// re-parse the whole set on every refresh.
 const CACHE_CAP: usize = 1024;
 
-/// Parses a transcript, caching by path, mtime, and length so same-timestamp appends invalidate the
-/// summary.
+/// Summarize complete JSONL records once, then fold appends from the saved offset.
+/// Replacement, truncation, and same-length rewrites reset the aggregate.
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
-    let key = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-    if let Some(key) = key {
-        if let Ok(mut c) = cache().lock() {
-            if let Some(entry) = c.get_mut(path) {
-                if entry.key == key {
-                    entry.seq = cache_seq();
-                    let mut s = entry.summary.clone();
-                    // Reapply time-based idle decay even when unchanged transcript metadata keeps
-                    // the cached content valid.
-                    if Utc::now() - s.last_activity > IDLE_AFTER {
-                        s.status = AgentStatus::Idle;
-                    }
-                    return Some(s);
-                }
+    let metadata = std::fs::metadata(path).ok()?;
+    let key = (metadata.modified().ok()?, metadata.len());
+    let identity = file_identity(&metadata);
+    // Serialize updates so concurrent overlays cannot both reread the same append. The cache
+    // holds only summary state, never the transcript body.
+    let mut c = cache().lock().ok()?;
+    if let Some(entry) = c.get_mut(path) {
+        if entry.key == key && entry.identity == identity {
+            entry.seq = cache_seq();
+            let mut summary = entry.summary.clone();
+            if Utc::now() - summary.last_activity > IDLE_AFTER {
+                summary.status = AgentStatus::Idle;
             }
+            return Some(summary);
         }
     }
-    let summary = parse_transcript_inner(path)?;
-    if let Some(key) = key {
-        if let Ok(mut c) = cache().lock() {
-            // Bound memory: transcript paths accumulate as sessions end. Past the cap, evict the
-            // single least-recently-used entry rather than clearing the whole map - a full clear
-            // makes a fleet of >CACHE_CAP transcripts re-parse everything on every refresh.
-            if c.len() >= CACHE_CAP && !c.contains_key(path) {
-                if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.seq).map(|(p, _)| p.clone()) {
-                    c.remove(&oldest);
-                }
-            }
-            c.insert(
-                path.to_path_buf(),
-                CacheEntry {
-                    key,
-                    seq: cache_seq(),
-                    summary: summary.clone(),
-                },
-            );
+    let prior = c
+        .get(path)
+        .filter(|e| e.identity == identity && key.1 > e.key.1);
+    let (mut state, offset) = prior
+        .map(|e| (e.state.clone(), e.offset))
+        .unwrap_or_default();
+    let offset =
+        crate::usage_ledger::scan::for_each_line_until(path, offset, Some(key.1), |v, _| {
+            state.observe(v);
+        })
+        .ok()?;
+    let summary = state.summary(path, key.0.into());
+    if c.len() >= CACHE_CAP && !c.contains_key(path) {
+        if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.seq).map(|(p, _)| p.clone()) {
+            c.remove(&oldest);
         }
     }
+    c.insert(
+        path.into(),
+        CacheEntry {
+            key,
+            seq: cache_seq(),
+            summary: summary.clone(),
+            state,
+            offset,
+            identity,
+        },
+    );
     Some(summary)
 }
 
-/// Parse a transcript into a summary (uncached - see [`parse_transcript`]).
-fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
-    let text = std::fs::read_to_string(path).ok()?;
-    // Prefer message timestamps because metadata-only rewrites advance file mtime without real
-    // agent activity.
-    let mtime: DateTime<Utc> = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(|_| Utc::now());
+/// Last timestamped conversation activity, excluding filesystem-only edits and trailers.
+pub fn transcript_activity(path: &Path) -> Option<DateTime<Utc>> {
+    parse_transcript(path)?;
+    cache().lock().ok()?.get(path)?.state.last_msg_activity
+}
 
-    let mut tool_call_count = 0u32;
-    let mut last_type: Option<&str> = None;
-    let mut last_assistant_has_tool = false;
-    let mut title: Option<String> = None;
-    let mut last_message: Option<String> = None;
-    let mut cwd: Option<PathBuf> = None;
-    let mut last_msg_activity: Option<DateTime<Utc>> = None;
+#[derive(Clone, Default)]
+struct SummaryState {
+    tool_call_count: u32,
+    last_type: Option<&'static str>,
+    last_assistant_has_tool: bool,
+    title: Option<String>,
+    last_message: Option<String>,
+    cwd: Option<PathBuf>,
+    last_msg_activity: Option<DateTime<Utc>>,
+}
 
-    for line in text.lines() {
-        let v: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if cwd.is_none() {
+impl SummaryState {
+    fn observe(&mut self, v: &Value) {
+        if self.cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(Value::as_str) {
-                cwd = Some(PathBuf::from(c));
+                self.cwd = Some(PathBuf::from(c));
             }
         }
         let entry_type = v.get("type").and_then(Value::as_str);
@@ -344,7 +364,7 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc))
             {
-                last_msg_activity = Some(last_msg_activity.map_or(ts, |p| p.max(ts)));
+                self.last_msg_activity = Some(self.last_msg_activity.map_or(ts, |p| p.max(ts)));
             }
         }
         match entry_type {
@@ -358,14 +378,14 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
                     for block in arr {
                         match block.get("type").and_then(Value::as_str) {
                             Some("tool_use") => {
-                                tool_call_count += 1;
+                                self.tool_call_count += 1;
                                 has_tool = true;
                             }
                             Some("text") => {
                                 if let Some(t) = block.get("text").and_then(Value::as_str) {
                                     let t = t.trim();
                                     if !t.is_empty() {
-                                        last_message = Some(truncate(t, 200));
+                                        self.last_message = Some(truncate(t, 200));
                                     }
                                 }
                             }
@@ -373,58 +393,59 @@ fn parse_transcript_inner(path: &Path) -> Option<TranscriptSummary> {
                         }
                     }
                 }
-                last_type = Some("assistant");
-                last_assistant_has_tool = has_tool;
+                self.last_type = Some("assistant");
+                self.last_assistant_has_tool = has_tool;
             }
             Some("user") => {
-                last_type = Some("user");
+                self.last_type = Some("user");
                 // Title from the first *real* prompt - skip Claude Code's injected scaffolding
                 // (the local-command caveat, slash-command invocations, local-command stdout),
                 // which would otherwise show up as "<local-command-caveat>Caveat: …".
-                if title.is_none() {
-                    if let Some(t) = user_text(&v) {
+                if self.title.is_none() {
+                    if let Some(t) = user_text(v) {
                         let t = t.trim();
                         if !t.is_empty() && !is_synthetic_user_text(t) {
-                            title = Some(truncate(t, 60));
+                            self.title = Some(truncate(t, 60));
                         }
                     }
                 }
             }
             Some("summary") => {
                 if let Some(s) = v.get("summary").and_then(Value::as_str) {
-                    title = Some(truncate(s, 60));
+                    self.title = Some(truncate(s, 60));
                 }
             }
             _ => {}
         }
     }
+    fn summary(&self, path: &Path, mtime: DateTime<Utc>) -> TranscriptSummary {
+        let last_activity = self.last_msg_activity.unwrap_or(mtime);
+        let status = if Utc::now() - last_activity > IDLE_AFTER {
+            AgentStatus::Idle
+        } else if self.last_type == Some("assistant") && !self.last_assistant_has_tool {
+            // The agent spoke and issued no tool call - it's waiting on you.
+            AgentStatus::Waiting
+        } else {
+            AgentStatus::Running
+        };
 
-    let last_activity = last_msg_activity.unwrap_or(mtime);
-    let status = if Utc::now() - last_activity > IDLE_AFTER {
-        AgentStatus::Idle
-    } else if last_type == Some("assistant") && !last_assistant_has_tool {
-        // The agent spoke and issued no tool call - it's waiting on you.
-        AgentStatus::Waiting
-    } else {
-        AgentStatus::Running
-    };
-
-    Some(TranscriptSummary {
-        kind: AgentKind::ClaudeCode,
-        manifest_path: path.to_path_buf(),
-        cwd,
-        last_activity,
-        tool_call_count,
-        status,
-        title,
-        last_message,
-        config_dir: None, // set by the caller based on which config dir it came from
-        session_id: path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string()),
-        ended_turn: last_type == Some("assistant") && !last_assistant_has_tool,
-    })
+        TranscriptSummary {
+            kind: AgentKind::ClaudeCode,
+            manifest_path: path.to_path_buf(),
+            cwd: self.cwd.clone(),
+            last_activity,
+            tool_call_count: self.tool_call_count,
+            status,
+            title: self.title.clone(),
+            last_message: self.last_message.clone(),
+            config_dir: None, // set by the caller based on which config dir it came from
+            session_id: path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string()),
+            ended_turn: self.last_type == Some("assistant") && !self.last_assistant_has_tool,
+        }
+    }
 }
 
 /// Find and summarize the Claude session for `cwd` under `root`.
@@ -930,11 +951,24 @@ mod tests {
         path
     }
 
+    fn write_complete_transcript(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
+        let path = write_transcript(dir, name, lines);
+        // Incremental summaries commit only newline-terminated records, like the ledger scanner.
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        path
+    }
+
     #[test]
     fn parse_transcript_memoises_by_mtime() {
         let root = tempfile::tempdir().unwrap();
         let line = r#"{"type":"user","cwd":"/code/x","message":{"content":"hello"}}"#;
-        let path = write_transcript(root.path(), "sess.jsonl", &[line]);
+        let path = write_complete_transcript(root.path(), "sess.jsonl", &[line]);
 
         let s1 = parse_transcript(&path).expect("parses");
 
@@ -970,7 +1004,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // An assistant turn with no tool call → Waiting (needs you); freshly written → not idle.
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
-        let path = write_transcript(root.path(), "idle.jsonl", &[line]);
+        let path = write_complete_transcript(root.path(), "idle.jsonl", &[line]);
         assert_eq!(
             parse_transcript(&path).unwrap().status,
             AgentStatus::Waiting
@@ -1008,7 +1042,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let caveat = r#"{"type":"user","message":{"content":"<local-command-caveat>Caveat: generated while running local commands"}}"#;
         let real = r#"{"type":"user","message":{"content":"Refactor the parser to stream"}}"#;
-        let path = write_transcript(root.path(), "caveat.jsonl", &[caveat, real]);
+        let path = write_complete_transcript(root.path(), "caveat.jsonl", &[caveat, real]);
         assert_eq!(
             parse_transcript(&path).unwrap().title.as_deref(),
             Some("Refactor the parser to stream")
@@ -1022,7 +1056,7 @@ mod tests {
         let dir = root.path().join(encode_project_dir(cwd));
         let line = r#"{"type":"user","cwd":"/code/multi","message":{"content":"hi"}}"#;
         for id in ["aaaa1111", "bbbb2222", "cccc3333"] {
-            write_transcript(&dir, &format!("{id}.jsonl"), &[line]);
+            write_complete_transcript(&dir, &format!("{id}.jsonl"), &[line]);
         }
 
         // SAFETY: single-threaded test; nothing else reads the environment here.
@@ -1054,9 +1088,9 @@ mod tests {
         // Write the "pinned" session first (older mtime), then an unrelated one that touches its
         // transcript later (newer mtime) - the scenario that misattributes under a
         // newest-transcript heuristic but must not under a direct id lookup.
-        write_transcript(&dir, "pinned-session-id.jsonl", &[line]);
+        write_complete_transcript(&dir, "pinned-session-id.jsonl", &[line]);
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_transcript(&dir, "unrelated-newer.jsonl", &[line]);
+        write_complete_transcript(&dir, "unrelated-newer.jsonl", &[line]);
 
         // SAFETY: single-threaded test; nothing else reads the environment here.
         unsafe { std::env::set_var("REPOMON_CLAUDE_PROJECTS", root.path()) };
@@ -1092,7 +1126,7 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done — want me to also..."}]}}"#,
         ];
-        let path = write_transcript(dir.path(), "s.jsonl", &lines);
+        let path = write_complete_transcript(dir.path(), "s.jsonl", &lines);
         let s = parse_transcript(&path).unwrap();
         assert_eq!(s.tool_call_count, 1);
         assert_eq!(s.status, AgentStatus::Waiting);
@@ -1112,7 +1146,7 @@ mod tests {
             r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"Done — need you."}]}}"#,
         ];
         // write_transcript creates the file now, so its mtime is fresh (the "metadata touch").
-        let path = write_transcript(dir.path(), "s.jsonl", &lines);
+        let path = write_complete_transcript(dir.path(), "s.jsonl", &lines);
         let s = parse_transcript(&path).unwrap();
         assert_eq!(
             s.status,
@@ -1240,7 +1274,7 @@ mod tests {
                 .to_string(),
         ];
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let path = write_transcript(dir.path(), "s.jsonl", &refs);
+        let path = write_complete_transcript(dir.path(), "s.jsonl", &refs);
         let s = parse_transcript(&path).unwrap();
         let msg = s.last_message.unwrap();
         assert_eq!(msg.chars().count(), 201);
@@ -1254,7 +1288,7 @@ mod tests {
             r#"{"type":"user","cwd":"/code/proj","message":{"content":"go"}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
         ];
-        let path = write_transcript(dir.path(), "s.jsonl", &lines);
+        let path = write_complete_transcript(dir.path(), "s.jsonl", &lines);
         let s = parse_transcript(&path).unwrap();
         assert_eq!(s.status, AgentStatus::Running);
         assert!(!s.status.needs_you());
@@ -1272,7 +1306,8 @@ mod tests {
             r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
             r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"All done."}]}}"#,
         ];
-        let s = parse_transcript(&write_transcript(dir.path(), "a.jsonl", &ended)).unwrap();
+        let s =
+            parse_transcript(&write_complete_transcript(dir.path(), "a.jsonl", &ended)).unwrap();
         assert_eq!(s.status, AgentStatus::Idle);
         assert!(s.ended_turn, "a finished turn must survive the Idle decay");
 
@@ -1281,7 +1316,8 @@ mod tests {
             r#"{"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"go"}}"#,
             r#"{"type":"assistant","timestamp":"2020-01-01T00:00:05Z","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
         ];
-        let s = parse_transcript(&write_transcript(dir.path(), "b.jsonl", &frozen)).unwrap();
+        let s =
+            parse_transcript(&write_complete_transcript(dir.path(), "b.jsonl", &frozen)).unwrap();
         assert_eq!(s.status, AgentStatus::Idle);
         assert!(!s.ended_turn, "frozen mid-tool is not a finished turn");
 
@@ -1289,7 +1325,8 @@ mod tests {
             r#"{"type":"user","message":{"content":"go"}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#,
         ];
-        let s = parse_transcript(&write_transcript(dir.path(), "c.jsonl", &fresh)).unwrap();
+        let s =
+            parse_transcript(&write_complete_transcript(dir.path(), "c.jsonl", &fresh)).unwrap();
         assert_eq!(s.status, AgentStatus::Waiting);
         assert!(s.ended_turn);
     }
@@ -1299,7 +1336,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cwd = Path::new("/code/pos-saas");
         let enc = root.path().join(encode_project_dir(cwd));
-        write_transcript(
+        write_complete_transcript(
             &enc,
             "sess.jsonl",
             &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#],
@@ -1312,7 +1349,7 @@ mod tests {
     fn summary_for_root_falls_back_to_cwd_match() {
         let root = tempfile::tempdir().unwrap();
         // A dir name that does NOT match our encoding, but whose transcript records the cwd.
-        write_transcript(
+        write_complete_transcript(
             &root.path().join("weird-legacy-name"),
             "sess.jsonl",
             &[r#"{"type":"user","cwd":"/code/montage","message":{"content":"x"}}"#],
@@ -1322,5 +1359,52 @@ mod tests {
             s.is_some(),
             "should match by recorded cwd when the dir name differs"
         );
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn append_resumes_after_complete_prefix_and_defers_partial_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let first = "{\"type\":\"assistant\",\"timestamp\":\"2026-09-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\"}]}}\n";
+        std::fs::write(&path, first).unwrap();
+        assert_eq!(parse_transcript(&path).unwrap().tool_call_count, 1);
+        // Poison the aggregate rather than modifying the file: a full reread would restore 1.
+        cache()
+            .lock()
+            .unwrap()
+            .get_mut(&path)
+            .unwrap()
+            .state
+            .tool_call_count = 100;
+        let partial =
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\"}]}}";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(partial.as_bytes()).unwrap();
+        assert_eq!(parse_transcript(&path).unwrap().tool_call_count, 100);
+        assert_eq!(
+            cache().lock().unwrap().get(&path).unwrap().offset,
+            first.len() as u64
+        );
+        file.write_all(b"\n").unwrap();
+        assert_eq!(parse_transcript(&path).unwrap().tool_call_count, 101);
+        assert_eq!(
+            transcript_activity(&path).unwrap().to_rfc3339(),
+            "2026-09-01T00:00:00+00:00"
+        );
+        std::fs::write(&path, first).unwrap();
+        assert_eq!(parse_transcript(&path).unwrap().tool_call_count, 1);
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, format!("{first}{first}")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(parse_transcript(&path).unwrap().tool_call_count, 2);
     }
 }
