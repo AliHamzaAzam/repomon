@@ -12,6 +12,9 @@ export default function AttachmentPreview(props: { file: ChatAttachment; number:
   createEffect(() => { props.file.path; setLoaded(false); setFailed(false); });
   return <span class="attachment-preview" title={props.file.path}>
     <Show when={!loaded() || failed()}><AttachmentChip file={props.file} /></Show>
-    <Show when={!failed() && source()}>{(url) => <img class="rounded" src={url()} alt={`Image #${props.number}: ${props.file.name}`} style={{ display:loaded() ? "block" : "none" }} onLoad={() => { setLoaded(true); props.onResize?.(); }} onError={() => { setFailed(true); props.onResize?.(); }} />}</Show>
+    <Show when={!failed() && source()}>{(url) => <>
+      <img class="rounded" src={url()} alt={`Image #${props.number}: ${props.file.name}`} style={{ display:loaded() ? "block" : "none" }} onLoad={() => { setLoaded(true); props.onResize?.(); }} onError={() => { setFailed(true); props.onResize?.(); }} />
+      <Show when={loaded()}><span class="attachment-preview-number" aria-hidden="true">{props.number}</span></Show>
+    </>}</Show>
   </span>;
 }

@@ -14,7 +14,7 @@ describe("chat attachments", () => {
     fireEvent.input(screen.getByRole("textbox"), { target:{value:"Review this"} });
     fireEvent.click(screen.getByRole("button", {name:"Attach images or files"}));
     await screen.findByText("layout reference.png");
-    expect(screen.getByRole("textbox")).toHaveValue("Review this");
+    expect(screen.getByRole("textbox")).toHaveValue("Review this\n\n[Image #1]");
     fireEvent.click(screen.getByRole("button", {name:"Remove notes.md"}));
     fireEvent.click(screen.getByRole("button", {name:"Send reply"}));
     await waitFor(() => expect(send).toHaveBeenCalledWith('Review this\n\nAttached file: "/Users/me/layout reference.png"'));
@@ -45,6 +45,29 @@ describe("chat attachments", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Disk full");
     expect(screen.getByRole("textbox")).toHaveValue("Keep this draft");
     expect(screen.getByRole("button", {name:"Attach images or files"})).toBeEnabled();
+  });
+});
+
+describe("inline image markers, positioned like Claude TUI", () => {
+  it("drops the marker where the caret was, not appended at the end", async () => {
+    vi.mocked(open).mockResolvedValue(["/Users/me/shot.png"]);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target:{value:"Check the layout please"} });
+    field.setSelectionRange(10, 10); // right after "Check the "
+    fireEvent.click(screen.getByRole("button", {name:"Attach images or files"}));
+    await screen.findByText("shot.png");
+    expect(field.value).toBe("Check the\n\n[Image #1]\n\nlayout please");
+  });
+  it("renumbers remaining markers in the draft after an earlier image is removed", async () => {
+    vi.mocked(open).mockResolvedValue(["/Users/me/one.png", "/Users/me/two.png"]);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.click(screen.getByRole("button", {name:"Attach images or files"}));
+    await screen.findByText("two.png");
+    expect(field.value).toBe("[Image #1]\n\n[Image #2]");
+    fireEvent.click(screen.getByRole("button", {name:"Remove one.png"}));
+    expect(field.value).toBe("[Image #1]");
   });
 });
 

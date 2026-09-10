@@ -14,9 +14,11 @@ it("loads a real asset-protocol image after granting its file and falls back on 
   fireEvent.load(img);
   expect(screen.getByRole("img", {name:"Image #1: image.png"})).toBeVisible();
   expect(screen.queryByText("image.png")).not.toBeInTheDocument();
+  expect(result.container.querySelector(".attachment-preview-number")).toHaveTextContent("1");
   fireEvent.error(img);
   expect(screen.getByText("image.png")).toBeInTheDocument();
   expect(result.container.textContent).not.toContain("/stable");
+  expect(result.container.querySelector(".attachment-preview-number")).not.toBeInTheDocument();
 });
 it("shows a file chip when native access fails", async () => {
   vi.mocked(invoke).mockRejectedValue(new Error("missing"));

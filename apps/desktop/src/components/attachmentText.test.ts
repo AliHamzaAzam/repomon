@@ -12,6 +12,13 @@ describe("attachment delivery display", () => {
     const text = '```text\nAttached file: "/tmp/example.png"\n```\nAttached file: not JSON\nAn Attached file: "/tmp/example.png"';
     expect(attachmentTextParts(text)).toEqual([{text}]);
   });
+  it("keeps an image sandwiched between its own prose, at the marker's position rather than appended", () => {
+    const path = "/Users/me/shot.png";
+    const sent = attachmentPrompt("Check the\n\n[Image #1]\n\nlayout please", [{ path, name:"shot.png" }]);
+    expect(attachmentTextParts(sent)).toEqual([
+      { text:"Check the\n" }, { attachment:{ path, name:"shot.png" } }, { text:"\nlayout please" },
+    ]);
+  });
   it("recognizes Windows paths but never web URLs", () => {
     const path = 'C:\\Users\\me\\photo.png';
     expect(attachmentTextParts(`Attached file: ${JSON.stringify(path)}`)).toEqual([{attachment:{path,name:"photo.png"}}]);
