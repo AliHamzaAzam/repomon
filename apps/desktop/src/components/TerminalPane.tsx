@@ -962,7 +962,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
              shown (chat is the displayed view right now) gates cosmetic, display-only work, so
              switching back to Chat repaints already-loaded rows instantly instead of re-paging. */}
           <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: windowSessionId(), kind: agentKind() }}
-            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} detail={detail()} visible={props.visible !== false} shown={view() === "conversation"} onTerminal={() => setView("terminal")} />
+            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} onFocusAgent={(window) => props.workspace?.setActiveWindow(window)} detail={detail()} visible={props.visible !== false} shown={view() === "conversation"} onTerminal={() => setView("terminal")} />
         </div>
       </Show>
       <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-10 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">

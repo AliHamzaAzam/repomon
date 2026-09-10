@@ -965,6 +965,12 @@ summary:focus-visible,
 .context-agent { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; }
 .context-agent p { margin: 0; overflow-wrap: anywhere; }
 .context-agent span { font-size: 11px; color: var(--muted); }
+.context-agent-dot { flex: none; width: 0.4rem; height: 0.4rem; margin-top: 0.4rem; border-radius: 999px; }
+/* The whole row is the control, matching the Home strip convention: inset so its own padding
+   does not shift the row's text out of alignment with the non-interactive rows around it. */
+.context-agent-interactive { width: 100%; text-align: left; margin: 16px -6px 0; padding: 6px; border-radius: 0.4rem; }
+.context-agent-interactive:hover { background: var(--raised); }
+.context-agent-interactive:active { background: var(--surface); }
 .context-pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 10px 0; text-align: left; line-height: 1.6; font-size: 12px; border-bottom: 1px solid var(--line); }
 .context-pr svg { flex-shrink: 0; }
 .home-context { display: none; }

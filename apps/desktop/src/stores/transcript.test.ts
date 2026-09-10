@@ -1,10 +1,13 @@
 import { createRoot } from "solid-js";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
+import { getCachedTranscriptPage, resetTranscriptCacheForTests } from "./transcriptCache";
 import { createTranscript, orderRows, transcriptRow, type ConversationRow } from "./transcript";
 
 vi.mock("../ipc/rpc", () => ({ daemonCall: vi.fn(), subscribeDaemon: vi.fn() }));
+
+beforeEach(() => resetTranscriptCacheForTests());
 
 const row = (id: string): ConversationRow => transcriptRow({ id, kind: "assistant", role: "assistant", text: id, at: null }, id);
 
@@ -101,5 +104,53 @@ describe("createTranscript, end to end", () => {
     expect(transcript.activity()?.elapsed_seconds).toBe(2);
     expect(transcript.revision()).toBe(before);
     dispose();
+  });
+
+  it("caches the loaded page under its watch identity and paints a later mount of the exact same identity from it", async () => {
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => (method === "agent.transcript_watch" && (args[0] as { on: boolean }).on
+      ? { items: [{ id: "a1", kind: "assistant", role: "assistant", text: "Answer", at: null }], next_before: 40, older_message_count: 12 }
+      : null));
+    const first = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(first.transcript.rows().map((r) => r.key)).toEqual(["a1"]);
+    const cached = getCachedTranscriptPage(JSON.stringify({ lane_id: 1, window: "lane-1" }));
+    expect(cached?.rows.map((r) => r.key)).toEqual(["a1"]);
+    expect(cached?.nextBefore).toBe(40);
+    first.dispose();
+    // A never-resolving watch on the fresh instance proves the paint came from the cache, not
+    // from this mount's own (still pending) network round trip.
+    vi.mocked(daemonCall).mockImplementation(() => new Promise(() => {}));
+    const second = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    expect(second.transcript.rows().map((r) => r.key)).toEqual(["a1"]);
+    expect(second.transcript.nextBefore()).toBe(40);
+    second.dispose();
+  });
+
+  it("never seeds a different identity's cached history, and a window whose identity the daemon cannot resolve falls back to its own live pane excerpt with no history and no hard error", async () => {
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") {
+        const params = args[0] as { on: boolean; window: string };
+        if (!params.on) return null;
+        if (params.window === "lane-2/1") return { items: [{ id: "other", kind: "assistant", role: "assistant", text: "Other agent's reply", at: null }], next_before: null };
+        throw new Error("session_id does not belong to window lane-2/2; omit session_id to address this window");
+      }
+      if (method === "agent.capture") return { content: "$ codex\nWaiting for input.\n› " };
+      return null;
+    });
+    const other = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 2, window: "lane-2/1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(other.transcript.rows().map((r) => r.key)).toEqual(["other"]);
+    other.dispose();
+    const unresolved = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 2, window: "lane-2/2", session_id: "stale-session" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(unresolved.transcript.error()).toBeNull();
+    expect(unresolved.transcript.rows().map((r) => r.item.text)).toEqual(["$ codex\nWaiting for input.\n› "]);
+    expect(unresolved.transcript.rows().every((r) => r.paneExcerpt)).toBe(true);
+    unresolved.dispose();
   });
 });

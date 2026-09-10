@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
+import { resetTranscriptCacheForTests } from "../stores/transcriptCache";
 import ConversationPane, { activityLabel, dialogSummary, groupTurnWork } from "./ConversationPane";
 vi.mock("../ipc/rpc", () => ({ daemonCall:vi.fn(), subscribeDaemon:vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl:vi.fn() }));
@@ -15,6 +16,7 @@ function update(incoming: TranscriptItem[], removed_ids: string[] = [], override
   emit({ jsonrpc:"2.0", method:"event.agent.transcript", params:{ lane_id:7, window:"lane-7/1", subscription_id:91, items:incoming, removed_ids, next_before:120, ...overrides } });
 }
 beforeEach(() => {
+  resetTranscriptCacheForTests();
   items = [row("live:1", "Still writing", true)];
   vi.mocked(subscribeDaemon).mockImplementation(async (callback) => { emit = callback; return vi.fn(); });
   vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
@@ -381,5 +383,115 @@ describe("earlier-message pagination affordance", () => {
     await screen.findByText("Message 0");
     expect(result.container.querySelectorAll("article")).toHaveLength(260);
     expect(daemonCall).not.toHaveBeenCalledWith("agent.transcript_page", expect.anything());
+  });
+});
+
+function stubScrollMetrics(el: HTMLElement, metrics: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+  Object.defineProperty(el, "scrollHeight", { value: metrics.scrollHeight, configurable: true });
+  Object.defineProperty(el, "clientHeight", { value: metrics.clientHeight, configurable: true });
+  el.scrollTop = metrics.scrollTop;
+}
+
+describe("cached first paint and the skeleton loading state (round 6 item 2)", () => {
+  it("shows skeleton rows, not a hard-coded loading paragraph, while a never-before-seen window is still loading", async () => {
+    vi.mocked(daemonCall).mockImplementation(() => new Promise(() => {}));
+    const result = mount();
+    expect(screen.getByRole("status", { name: "Opening conversation" })).toBeInTheDocument();
+    expect(screen.queryByText("Opening conversation…")).not.toBeInTheDocument();
+    expect(result.container.querySelectorAll(".conversation-skeleton-row")).toHaveLength(3);
+  });
+
+  it("paints the previously loaded page instantly on a fresh mount of the exact same window, with no skeleton", async () => {
+    items = [row("a1", "First answer")];
+    const first = mount();
+    await screen.findByText("First answer");
+    first.unmount();
+    cleanup();
+    // A never-resolving watch on the fresh mount proves the paint came from the cache, not from
+    // this mount's own (still pending) round trip.
+    vi.mocked(daemonCall).mockImplementation((method) => (method === "agent.transcript_watch" ? new Promise(() => {}) : Promise.resolve(null)));
+    mount();
+    expect(screen.queryByRole("status", { name: "Opening conversation" })).not.toBeInTheDocument();
+    expect(screen.getByText("First answer")).toBeInTheDocument();
+  });
+});
+
+describe("adaptive dialog polling (round 6 item 3)", () => {
+  it("stops polling agent.prompt once the pane is no longer the displayed chat view, though it stays visible", async () => {
+    const [shown, setShown] = createSignal(true);
+    render(() => <ConversationPane target={target} kind="codex" visible shown={shown()} onTerminal={vi.fn()} />);
+    await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.prompt", { lane_id: 7, window: "lane-7/1" }));
+    vi.mocked(daemonCall).mockClear();
+    setShown(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(daemonCall).not.toHaveBeenCalledWith("agent.prompt", expect.anything());
+  });
+
+  it("latches a dialog straight from the transcript's own dialog item, even while agent.prompt never resolves", async () => {
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation((method, ...args) => (method === "agent.prompt" ? new Promise(() => {}) : original(method, ...args)));
+    items = [{ id: "d1", kind: "dialog", role: "tools", text: "Allow Bash: bun run build?", at: null, dialog: { title: null, question: "Allow Bash: bun run build?", body: [], options: [{ number: 1, text: "Yes" }, { number: 2, text: "No" }], selected: 0 } }];
+    mount();
+    // A unique query: the ledger also renders the raw dialog item's own question text, so this
+    // asserts on the footer's answer control rather than risking a multi-match on the text alone.
+    expect(await screen.findByRole("button", { name: "No" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Reply to codex" })).toBeDisabled();
+  });
+});
+
+describe("Latest output pill: right-edge anchoring, unread count, and auto-paging (round 6 items 4 and 5)", () => {
+  it("auto-loads exactly one page per near-top scroll gesture, preserving the scroll anchor, and never fires again mid-gesture", async () => {
+    items = Array.from({ length: 5 }, (_, i) => row(`m${i}`, `Message ${i}`));
+    const result = mount();
+    await screen.findByText("Message 4");
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600 });
+    fireEvent.scroll(scrollEl);
+    expect(screen.queryByRole("button", { name: /Latest output/ })).not.toBeInTheDocument();
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 10 });
+    fireEvent.scroll(scrollEl);
+    await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.transcript_page", { ...target, before: 120 }));
+    // Simulate the page landing and the ledger growing before the anchor-restoring frame runs.
+    stubScrollMetrics(scrollEl, { scrollHeight: 2300, clientHeight: 400, scrollTop: 10 });
+    await screen.findByText("Earlier history");
+    await waitFor(() => expect(scrollEl.scrollTop).toBe(310));
+    // Still sitting at the top after the restore (a short loaded page): a second near-top scroll
+    // event must not fire a second fetch until the gesture actually ends.
+    fireEvent.scroll(scrollEl);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(daemonCall).mock.calls.filter(([method]) => method === "agent.transcript_page")).toHaveLength(1);
+  });
+
+  it("shows an unread count on the pill while scrolled up and clears it once the operator returns to the latest output", async () => {
+    items = [row("a1", "First answer")];
+    const result = mount();
+    await screen.findByText("First answer");
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    // Mid-scroll, deliberately not near the top: isolates the unread badge from auto-paging
+    // (covered separately above), since older() explicitly excludes its own loaded rows from
+    // this count and a real scroll gesture would rarely land both at once regardless.
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 800 });
+    fireEvent.scroll(scrollEl);
+    const pill = await screen.findByRole("button", { name: /Latest output/ });
+    expect(result.container.querySelector(".conversation-latest-count")).toBeNull();
+    update([row("a2", "Second answer")]);
+    await screen.findByText("Second answer");
+    expect(result.container.querySelector(".conversation-latest-count")).toHaveTextContent("1");
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600 });
+    fireEvent.click(pill);
+    expect(result.container.querySelector(".conversation-latest-count")).toBeNull();
+  });
+
+  it("anchors the pill to the ledger's own right edge, not the pane's outer edge", async () => {
+    items = [row("a1", "First answer")];
+    const result = mount();
+    await screen.findByText("First answer");
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 10 });
+    fireEvent.scroll(scrollEl);
+    await screen.findByRole("button", { name: /Latest output/ });
+    const anchor = result.container.querySelector(".conversation-latest-anchor");
+    expect(anchor?.parentElement).toHaveClass("conversation-scroll-area");
+    expect(anchor?.parentElement).not.toHaveClass("conversation-main");
   });
 });

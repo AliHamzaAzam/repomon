@@ -1,7 +1,22 @@
 .conversation { height:100%; min-height:0; background:var(--background); position:relative; container-type:inline-size; }
 .conversation-layout { height:100%; }
 .conversation-main { height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; }
+/* Bounds the scroll viewport's own box, distinct from conversation-main's box (which also
+   includes the pending queue and footer below it) - the Latest output pill anchors to this
+   element's bottom edge so it tracks the scroll area regardless of how tall the footer or an
+   active pending queue currently is, instead of a fixed pixel guess. */
+.conversation-scroll-area { flex:1; min-height:0; position:relative; display:flex; flex-direction:column; }
 .conversation-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; }
+/* Same max-width/padding computation as conversation-pending-inner, so the pill's right edge
+   lines up with the ledger's own right edge rather than the pane's outer edge. */
+.conversation-latest-anchor { position:absolute; left:0; right:0; bottom:16px; max-width:900px; margin-inline:auto; padding-inline:28px; display:flex; justify-content:flex-end; pointer-events:none; }
+.conversation-latest { pointer-events:auto; display:inline-flex; align-items:center; gap:6px; border-radius:999px; background:var(--surface); border:1px solid var(--line); padding:6px 14px; font-size:11px; box-shadow:0 4px 14px var(--shadow); }
+.conversation-latest:hover { background:var(--raised); }
+.conversation-latest-count { display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--signal); color:var(--background); font:10px var(--font-mono); }
+.conversation-skeleton { padding:20px 0 48px 96px; display:flex; flex-direction:column; gap:22px; }
+.conversation-skeleton-row { display:flex; flex-direction:column; gap:8px; }
+.conversation-skeleton-line { height:10px; border-radius:.25rem; background:var(--raised); animation:conversation-skeleton-pulse 1.4s ease-in-out infinite; }
+@keyframes conversation-skeleton-pulse { 50% { opacity:.5; } }
 .conversation-ledger { max-width:900px; padding:28px 28px 40px; margin-inline:auto; user-select:text; }
 .conversation-row { display:grid; grid-template-columns:76px minmax(0,1fr); gap:20px; margin-bottom:28px; }
 .conversation-gutter { display:flex; flex-direction:column; gap:3px; align-content:start; font:10px/1.5 var(--font-mono); color:var(--muted); padding-top:3px; min-width:0; }
@@ -78,7 +93,6 @@
 .attachment-chip > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .attachment-chip button { display:grid; place-items:center; padding:3px; min-width:20px; min-height:20px; color:var(--muted); }
 .attachment-chip svg { flex-shrink:0; }
-.conversation-latest { position:absolute; bottom:160px; right:28px; background:var(--surface); border:1px solid var(--line); padding:6px 12px; font-size:11px; }
 /* Mirrors the TUI's own split: a message the agent has not read yet is not seated in the
    transcript as though delivered - it stays pinned here, above the composer, until consumption
    moves it into the ordinary ledger. */
@@ -104,8 +118,10 @@
   .conversation-work { margin-left:64px; }
   .conversation-footer { padding:0 20px 16px; }
   .conversation-empty { padding-left:64px; }
+  .conversation-skeleton { padding-left:64px; }
   .composer-trailing { max-width:45%; }
   .conversation-pending-inner { padding:6px 20px 10px; }
+  .conversation-latest-anchor { padding-inline:20px; }
 }
 
 .conversation-images { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin-bottom:8px; }

@@ -1,9 +1,10 @@
 import { For, Show, createSignal, onMount } from "solid-js";
 
 import type { AgentChoice, Lane } from "../bindings";
-import { fetchAgentChoices, pickDefaultAgent } from "../ipc/agentChoices";
+import { pickDefaultAgent } from "../ipc/agentChoices";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall } from "../ipc/rpc";
+import { cachedAgentChoices, loadAgentChoices, refreshAgentChoices } from "../stores/agentChoices";
 import { AgentIcon } from "./icons";
 import Modal from "./Modal";
 
@@ -13,22 +14,40 @@ export default function SpawnModal(props: {
   onDone: () => Promise<void>;
   onOpenSettingsTab?: (tab: import("./SettingsModal").SettingsTab) => void;
 }) {
-  const [choices, setChoices] = createSignal<AgentChoice[]>([]);
-  const [agent, setAgent] = createSignal("");
+  const initialChoices = cachedAgentChoices();
+  const [choices, setChoices] = createSignal<AgentChoice[]>(initialChoices ?? []);
+  const [agent, setAgent] = createSignal(initialChoices ? pickDefaultAgent(initialChoices) : "");
+  const [choicesLoading, setChoicesLoading] = createSignal(!initialChoices);
+  const [choicesError, setChoicesError] = createSignal<TranslatedError | null>(null);
   const [task, setTask] = createSignal("");
   const [warnings, setWarnings] = createSignal<string[]>([]);
   const [spawned, setSpawned] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
 
-  onMount(() => {
-    void fetchAgentChoices()
+  // A cache hit paints instantly with no loading flash; only a genuinely uncached (or forced)
+  // load shows the skeleton. A background refresh from a warm cache never surfaces its own
+  // failure - the operator keeps looking at the choices that already worked.
+  function loadChoices(force = false) {
+    setChoicesError(null);
+    if (force || !cachedAgentChoices()) setChoicesLoading(true);
+    const request = force ? refreshAgentChoices() : loadAgentChoices();
+    void request
       .then((detected) => {
         setChoices(detected);
-        setAgent(pickDefaultAgent(detected));
+        setAgent((current) => {
+          if (!detected.length) return "";
+          return current && detected.some((choice) => choice.name === current) ? current : pickDefaultAgent(detected);
+        });
+        setChoicesLoading(false);
       })
-      .catch((cause: unknown) => setError(translateError(cause)));
-  });
+      .catch((cause: unknown) => {
+        setChoicesLoading(false);
+        setChoicesError(translateError(cause));
+      });
+  }
+
+  onMount(() => loadChoices());
 
   async function spawn() {
     if (!agent() || busy() || spawned()) return;
@@ -75,7 +94,31 @@ export default function SpawnModal(props: {
       <div class="space-y-4">
         <div>
           <span class="section-label mb-2 block">Select Runtime</span>
-          <div class="grid gap-2 sm:grid-cols-2">
+          <Show when={choicesLoading()}>
+            <div class="grid gap-2 sm:grid-cols-2" role="status" aria-label="Detecting agent runtimes">
+              <For each={[0, 1, 2, 3]}>{() => <div class="h-[52px] animate-pulse rounded-xl border border-line bg-surface" />}</For>
+            </div>
+          </Show>
+          <Show when={choicesError()}>
+            {(err) => (
+              <div role="alert" class="break-words rounded-xl border border-fault/30 bg-fault/8 p-3 text-xs text-fault space-y-2">
+                <p class="font-medium leading-snug">{err().friendly}</p>
+                <button
+                  type="button"
+                  class="focus-ring rounded bg-fault/10 hover:bg-fault/20 border border-fault/30 px-2 py-1 font-mono text-[10px] uppercase font-semibold text-fault transition-colors cursor-pointer"
+                  onClick={() => loadChoices(true)}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </Show>
+          <Show when={!choicesLoading() && !choicesError()}>
+            <Show
+              when={choices().length}
+              fallback={<p class="text-xs text-muted">No agent runtimes detected on PATH.</p>}
+            >
+              <div class="grid gap-2 sm:grid-cols-2">
             <For each={choices()}>
               {(choice) => (
                 <div
@@ -129,7 +172,9 @@ export default function SpawnModal(props: {
                 </div>
               )}
             </For>
-          </div>
+              </div>
+            </Show>
+          </Show>
         </div>
         <label class="block">
           <span class="section-label">Initial Task Description (Optional)</span>
