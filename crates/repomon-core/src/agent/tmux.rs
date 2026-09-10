@@ -1325,8 +1325,12 @@ pub(super) fn process_start_time(pid: u32) -> Option<chrono::DateTime<chrono::Ut
             .nth(19)?
             .parse()
             .ok()?;
-        let hz = 100u64;
-        let boot = std::fs::read_to_string("/proc/stat")?
+        // Linux exposes process start ticks in USER_HZ; query it instead of assuming the
+        // kernel's common 100 Hz default.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        let hz = u64::try_from(hz).ok().filter(|hz| *hz > 0)?;
+        let boot = std::fs::read_to_string("/proc/stat")
+            .ok()?
             .lines()
             .find_map(|line| line.strip_prefix("btime ")?.trim().parse::<i64>().ok())?;
         return chrono::DateTime::from_timestamp(boot, 0).and_then(|at| {
@@ -2339,6 +2343,13 @@ while True:
         assert!(started.is_some(), "the live pane pid supplies the boundary");
         assert!(started.unwrap() <= chrono::Utc::now());
         rt.kill_named(&window).unwrap();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn process_start_time_reads_host_process_on_macos() {
+        let started = process_start_time(std::process::id()).expect("host process start time");
+        assert!(started <= chrono::Utc::now());
     }
 
     #[test]
