@@ -7,6 +7,8 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use chrono::{Local, NaiveDateTime, TimeZone};
+
 use crate::error::{Error, Result};
 use crate::model::LaneId;
 
@@ -1310,6 +1312,47 @@ pub(super) fn process_fingerprint(pid: u32) -> Option<String> {
     }
 }
 
+/// Return the OS process start time used as a conservative lower bound for window age.
+/// A pane replacement produces a new PID and therefore a new boundary.
+pub(super) fn process_start_time(pid: u32) -> Option<chrono::DateTime<chrono::Utc>> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let ticks: u64 = stat
+            .rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()?;
+        let hz = 100u64;
+        let boot = std::fs::read_to_string("/proc/stat")?
+            .lines()
+            .find_map(|line| line.strip_prefix("btime ")?.trim().parse::<i64>().ok())?;
+        return chrono::DateTime::from_timestamp(boot, 0).and_then(|at| {
+            at.checked_add_signed(chrono::Duration::milliseconds((ticks * 1000 / hz) as i64))
+        });
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .ok()?;
+        let raw = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let naive = NaiveDateTime::parse_from_str(&raw, "%a %b %e %H:%M:%S %Y").ok()?;
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .map(|at| at.with_timezone(&chrono::Utc))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 impl SessionBackend for TmuxRuntime {
     fn maintain_socket(&self) -> Result<()> {
         self.socket_state
@@ -1362,9 +1405,16 @@ impl SessionBackend for TmuxRuntime {
                 "#{@repomon_started_at}",
             ])
             .ok()?;
-        chrono::DateTime::parse_from_rfc3339(raw.trim())
-            .ok()
-            .map(|at| at.with_timezone(&chrono::Utc))
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+            return Some(at.with_timezone(&chrono::Utc));
+        }
+        let pid = self
+            .run_allow_absent(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        process_start_time(pid)
     }
 
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
@@ -2267,6 +2317,28 @@ while True:
         assert_eq!(rt.capture(lane, None).unwrap(), "");
         rt.kill_named("lane-1-2").unwrap();
         assert!(!rt.has_window(lane));
+    }
+
+    #[test]
+    fn window_started_at_uses_live_pane_pid_when_stamp_is_absent() {
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let rt = TmuxRuntime::isolated(format!("repomon-pane-age-{}", std::process::id()));
+        let window = rt.spawn(1, &std::env::temp_dir(), "sleep 30").unwrap();
+        rt.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-u",
+            "-t",
+            &rt.exact_target(&window),
+            "@repomon_started_at",
+        ])
+        .unwrap();
+        let started = SessionBackend::window_started_at(&rt, &window);
+        assert!(started.is_some(), "the live pane pid supplies the boundary");
+        assert!(started.unwrap() <= chrono::Utc::now());
+        rt.kill_named(&window).unwrap();
     }
 
     #[test]
