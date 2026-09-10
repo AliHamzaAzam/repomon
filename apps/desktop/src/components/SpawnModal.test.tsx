@@ -1,13 +1,16 @@
-import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, within } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentChoice, Lane } from "../bindings";
+import { resetAgentChoicesCacheForTests } from "../stores/agentChoices";
 import SpawnModal from "./SpawnModal";
 
 const state = vi.hoisted(() => ({
   agents: [
     { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
   ] as AgentChoice[],
+  detectError: null as string | null,
+  detectCalls: 0,
   spawnWarnings: [] as string[],
   spawnError: null as string | null,
   spawnCalls: [] as Array<{ lane_id: number; agent: string; task?: string }>,
@@ -15,7 +18,11 @@ const state = vi.hoisted(() => ({
 
 vi.mock("../ipc/rpc", () => ({
   daemonCall: (method: string, params: unknown) => {
-    if (method === "agent.detect") return Promise.resolve(state.agents);
+    if (method === "agent.detect") {
+      state.detectCalls += 1;
+      if (state.detectError) return Promise.reject(new Error(state.detectError));
+      return Promise.resolve(state.agents);
+    }
     if (method === "agent.spawn") {
       state.spawnCalls.push(params as { lane_id: number; agent: string; task?: string });
       if (state.spawnError) return Promise.reject(new Error(state.spawnError));
@@ -23,13 +30,17 @@ vi.mock("../ipc/rpc", () => ({
     }
     return Promise.resolve(null);
   },
+  subscribeDaemon: () => Promise.resolve(() => undefined),
 }));
 
 afterEach(() => {
   cleanup();
+  resetAgentChoicesCacheForTests();
   state.agents = [
     { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
   ];
+  state.detectError = null;
+  state.detectCalls = 0;
   state.spawnError = null;
   state.spawnWarnings = [];
   state.spawnCalls = [];
@@ -144,5 +155,56 @@ describe("SpawnModal error rendering", () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
+  });
+});
+
+describe("SpawnModal runtime detection: loading, error, retry, cache", () => {
+  const dummyLane: Lane = {
+    id: 1,
+    pinned: false,
+    role: null,
+    last_activity_at: "2026-08-01T00:00:00Z",
+    repo: { id: 1, name: "repomon", path: "/tmp/repo", added_at: "2026-08-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
+    worktree: { id: 1, repo_id: 1, name: "main", branch: "main", path: "/tmp/repo", head: "abc", is_main: true },
+    state: { worktree_id: 1, head: "abc", branch: "main", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
+    agent_sessions: [],
+  };
+
+  it("shows a loading skeleton while agent.detect is pending, then paints the detected choices", async () => {
+    render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByRole("status", { name: "Detecting agent runtimes" })).toBeInTheDocument();
+    expect(screen.queryByText("claude-code")).not.toBeInTheDocument();
+    await screen.findByText("claude-code");
+    expect(screen.queryByRole("status", { name: "Detecting agent runtimes" })).not.toBeInTheDocument();
+  });
+
+  it("shows a retry-able error when agent.detect fails, and recovers on retry", async () => {
+    state.detectError = "daemon unreachable";
+    render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    const alert = await screen.findByRole("alert");
+    expect(screen.queryByText("claude-code")).not.toBeInTheDocument();
+    state.detectError = null;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await screen.findByText("claude-code");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("paints cached choices instantly on a second open, with no loading flash and no second daemon call", async () => {
+    const first = render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText("claude-code");
+    expect(state.detectCalls).toBe(1);
+    first.unmount();
+    cleanup();
+    render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.queryByRole("status", { name: "Detecting agent runtimes" })).not.toBeInTheDocument();
+    expect(screen.getByText("claude-code")).toBeInTheDocument();
+    expect(state.detectCalls).toBe(1);
+  });
+
+  it("shows an explicit empty state when detection succeeds with no runtimes", async () => {
+    state.agents = [];
+    render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(await screen.findByText("No agent runtimes detected on PATH.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Spawn Agent" })).toBeDisabled();
   });
 });
