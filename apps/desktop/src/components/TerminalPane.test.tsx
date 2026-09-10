@@ -25,6 +25,7 @@ vi.mock("../ipc/rpc", async () => {
   return {
     ...actual,
     daemonCall: (...args: unknown[]) => daemonCallMock(...args),
+    subscribeDaemon: vi.fn().mockResolvedValue(() => undefined),
   };
 });
 
@@ -399,7 +400,7 @@ describe("TerminalPane header containment (bug 5: header can disappear under hig
     // just at the section's full-pane bounds - so an oversized/mis-sized xterm canvas during a
     // burst of live output can't paint upward over the header strip.
     expect(host!.classList.contains("overflow-hidden")).toBe(true);
-    expect(host!.classList.contains("top-7")).toBe(true);
+    expect(host!.classList.contains("top-10")).toBe(true);
   });
 });
 
@@ -424,6 +425,9 @@ describe("TerminalPane clickable path links", () => {
     const mockFleet = {
       lanes: () => [{
         id: 1,
+        repo: { name: "repo", label: null },
+        state: { dirty: { staged: 0, unstaged: 0, untracked: 0 }, ahead: 0, behind: 0 },
+        agent_sessions: [],
         worktree: { path: "/tmp/worktree", name: "worktree", branch: "main", is_main: true, id: 1, repo_id: 1 },
       }],
     } as any;
@@ -489,5 +493,31 @@ describe("TerminalPane clickable path links", () => {
     providedLinks![0].activate(modifierClickEvent, "src/foo.rs:12:4");
     expect(onEnsureEditorOpen).toHaveBeenCalledTimes(1);
     expect(openAt).toHaveBeenCalledWith("src/foo.rs", 12, 4);
+  });
+});
+
+
+describe("Terminal / Chat", () => {
+  it("switches a transcript-less pane without restarting its terminal watch or emulator", async () => {
+    watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "agent.capture") return { content: "Waiting at the prompt" };
+      if (method === "agent.prompt") return { dialog: null };
+      if (method === "agent.transcript_watch") return { items: [{ id: "pane:lane-7", role: "tools", kind: "terminal_block", text: "Waiting at the prompt", at: null }], next_before: null };
+      return null;
+    });
+    render(() => <TerminalPane laneId={7} window="lane-7" label="opencode" renderer="dom" visible focused />);
+    await flushMicrotasks();
+    const terminal = terminalInstances[terminalInstances.length - 1];
+    const count = terminalInstances.length;
+    const watchCount = watchTerminalMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await flushMicrotasks();
+    expect(terminalInstances).toHaveLength(count);
+    expect(terminalInstances[terminalInstances.length - 1]).toBe(terminal);
+    expect(watchTerminalMock).toHaveBeenCalledTimes(watchCount);
   });
 });

@@ -24,7 +24,7 @@ const HEADLINE_REFRESH_MS = 20_000;
 const PR_REFRESH_MS = 30_000;
 
 // Preserve the strip board, but make the ordinary repo/branch pair its first-class identity.
-// Related information stays in a bounded reading column even on a very wide window.
+// Wide windows show more lanes beside repository context, without stretching each strip.
 const STATUS_TONE = { attention: "text-attention", signal: "text-signal", fault: "text-fault", muted: "text-muted" };
 
 function StripStatusMark(props: { status: ReturnType<typeof stripStatus>; title?: string }) {
@@ -209,7 +209,7 @@ export default function HomeScreen(props: { fleet: FleetStore }) {
 
   return (
     <div class="home-screen h-full min-h-0 overflow-y-auto bg-background">
-      <div class="home-board">
+      <div class="home-layout"><div class="home-board">
         <form
           class="flex flex-none flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-4"
           onSubmit={(event) => void submit(event)}
@@ -280,12 +280,20 @@ export default function HomeScreen(props: { fleet: FleetStore }) {
           }
         >
           <div class="home-strips" onKeyDown={(event) => {
-            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-            const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(".home-strip"));
-            const index = rows.indexOf(document.activeElement as HTMLButtonElement);
-            if (index < 0) return;
+            if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+            const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(".home-strip"))
+              .filter((row) => row.getClientRects().length > 0);
+            const current = rows.find((row) => row === document.activeElement);
+            if (!current) return;
+            const from = current.getBoundingClientRect();
+            const down = event.key === "ArrowDown", up = event.key === "ArrowUp";
+            const vertical = down || up;
+            const direction = down || event.key === "ArrowRight" ? 1 : -1;
+            const candidates = rows.filter((row) => row !== current).map((row) => ({row, rect:row.getBoundingClientRect()}))
+              .filter(({rect}) => vertical ? (rect.top - from.top) * direction > 1 : Math.abs(rect.top - from.top) < 2 && (rect.left - from.left) * direction > 1)
+              .sort((a, b) => vertical ? Math.abs(a.rect.top - from.top) - Math.abs(b.rect.top - from.top) || Math.abs(a.rect.left - from.left) - Math.abs(b.rect.left - from.left) : Math.abs(a.rect.left - from.left) - Math.abs(b.rect.left - from.left));
             event.preventDefault();
-            rows[(index + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length]?.focus();
+            candidates[0]?.row.focus();
           }}>
             <Show when={props.fleet.synced() && needsInput().length === 0 && props.fleet.fleetLanes().length > 0}>
               <div class="home-quiet">
@@ -309,7 +317,7 @@ export default function HomeScreen(props: { fleet: FleetStore }) {
             <Show when={props.fleet.fleetLanes().length > 0}>
               <div class="home-attention-rule" role="separator" aria-label="End of attention strip" />
             </Show>
-            <For each={recent()}>
+            <div class="home-lane-grid"><For each={recent()}>
               {(lane) => (
                 <LaneStrip
                   lane={lane}
@@ -319,10 +327,18 @@ export default function HomeScreen(props: { fleet: FleetStore }) {
                 />
               )}
             </For>
-            <For each={prs()}>{(pr) => <PrStrip pr={pr} />}</For>
+            </div><div class="home-inline-prs"><For each={prs()}>{(pr) => <PrStrip pr={pr} />}</For></div>
           </div>
         </Show>
       </div>
+      <aside class="context-rail home-context" aria-label="Fleet context">
+        <section><h2>Repositories <span>{props.fleet.visibleRepos().length}</span></h2><For each={props.fleet.visibleRepos()}>{(repo) => {
+          const lanes = () => props.fleet.fleetLanes().filter((lane) => lane.repo.id === repo.id);
+          const changed = () => lanes().filter((lane) => lane.state.dirty.staged + lane.state.dirty.unstaged + lane.state.dirty.untracked > 0);
+          return <div class="context-repository"><p class="context-repo">{repo.label ?? repo.name}</p><p class="text-xs text-muted">{lanes().length} lanes · {changed().length} with changes</p><For each={changed()}>{(lane) => <button class="context-link focus-ring" onClick={() => props.fleet.setSelectedLaneId(lane.id)}><span class="truncate">{lane.worktree.branch ?? lane.worktree.name}</span><IconChevronRight size={12} /></button>}</For></div>;
+        }}</For></section>
+        <section><h2>Pull requests <span>{prs().length}</span></h2><Show when={prs().length} fallback={<p class="text-xs text-muted">No open pull requests available.</p>}><For each={prs()}>{(pr) => <button class="context-pr focus-ring" onClick={() => void openUrl(pr.url)}><span><span class="text-muted">{pr.repo_name} · #{pr.number}</span><br />{pr.title}</span><IconChevronRight size={12} /></button>}</For></Show></section>
+      </aside></div>
     </div>
   );
 }

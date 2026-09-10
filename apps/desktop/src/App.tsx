@@ -1,3 +1,4 @@
+import { setAgentStatusRows, setAgentViewDefaults } from "./stores/agentViews";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import ActionModals from "./components/ActionModals";
@@ -176,6 +177,8 @@ function App(props: AppProps) {
             applyTheme(config.theme as Theme);
           }
           applyAccent(config.accent);
+          setAgentViewDefaults(config.agent_views ?? {});
+          setAgentStatusRows(config.agent_status_rows ?? {});
           if (config.agent_icons) setAgentIconOverrides(config.agent_icons);
         })
         .catch(() => undefined);
@@ -380,6 +383,7 @@ function App(props: AppProps) {
       case "fleet.hideRepo": if (lane) void actions.setRepoHidden(lane.repo, true); break;
       case "fleet.repoNotes": if (lane) actions.openRepoNotes(lane.repo); break;
       case "lane.spawn": if (lane) actions.spawn(lane); break;
+      case "lane.toggleView": workspace.toggleView(actions.reportError); break;
       case "lane.terminal": void workspace.openShell(actions.reportError); break;
       case "lane.pin": if (lane) void actions.pinLane(lane); break;
       case "lane.delete": if (lane) actions.deleteLane(lane); break;

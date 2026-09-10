@@ -32,6 +32,7 @@ function tauriFixtureRedirect(): Plugin {
 }
 
 export default defineConfig({
+  server: { fs: { allow: [fileURLToPath(new URL("../../", import.meta.url))] } },
   plugins: [tauriFixtureRedirect(), solid(), tailwindcss()],
   resolve: {
     alias: [{ find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],

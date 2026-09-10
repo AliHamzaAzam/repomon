@@ -292,6 +292,7 @@ These need a selected lane. With nothing selected they do nothing.
 | Chord | Action |
 |---|---|
 | `mod+e` | Spawn agent |
+| `mod+shift+j` | Switch Terminal / Chat |
 | `mod+t` | Open terminal |
 | `mod+shift+p` | Pin or unpin lane |
 | `mod+d` | Delete lane (asks first) |

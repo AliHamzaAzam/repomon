@@ -2,6 +2,7 @@ import { createMemo, createRenderEffect, createSignal } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
 import type { TerminalRenderer } from "../ipc/term";
+import { agentViewDefaults, resolveAgentView, type AgentView } from "./agentViews";
 import { agentLabel } from "../components/agentLabel";
 import {
   dedupe,
@@ -70,6 +71,33 @@ function readRenderer(): TerminalRenderer {
 /// active tab, and the derived pane target lists. Created once in App.tsx and handed down so the
 /// keyboard shortcut handlers (layout and tab cycling) have something to call.
 export function createWorkspaceStore(fleet: FleetStore) {
+  const [viewOverrides, setViewOverrides] = createSignal<Record<number, AgentView | null>>({});
+  const viewWrites = new Map<number, Promise<unknown>>();
+  const confirmedViews = new Map<number, AgentView | null>();
+  function viewFor(target: Pick<PaneTarget, "laneId" | "agent" | "shell">): AgentView {
+    if (target.shell) return "terminal";
+    const overrides = viewOverrides();
+    const override = Object.prototype.hasOwnProperty.call(overrides, target.laneId) ? overrides[target.laneId] : fleet.lanes().find((lane) => lane.id === target.laneId)?.view_mode;
+    return resolveAgentView(override, target.agent, agentViewDefaults());
+  }
+  async function setView(laneId: number, view: AgentView | null) {
+    if (!confirmedViews.has(laneId)) {
+      const saved = fleet.lanes().find((lane) => lane.id === laneId)?.view_mode;
+      confirmedViews.set(laneId, saved === "conversation" || saved === "terminal" ? saved : null);
+    }
+    setViewOverrides((previous) => ({ ...previous, [laneId]: view }));
+    const write = (viewWrites.get(laneId) ?? Promise.resolve()).catch(() => undefined).then(() => daemonCall("lane.set_view", { lane_id: laneId, view_mode: view }));
+    viewWrites.set(laneId, write);
+    try { await write; confirmedViews.set(laneId, view); } catch (cause) {
+      if (viewWrites.get(laneId) === write) setViewOverrides((previous) => ({ ...previous, [laneId]: confirmedViews.get(laneId) ?? null }));
+      throw cause;
+    }
+  }
+  function toggleView(onError?: (message: string) => void) {
+    const target = targets().find((item) => item.window === activeWindow());
+    if (!target || target.shell) return;
+    void setView(target.laneId, viewFor(target) === "terminal" ? "conversation" : "terminal").catch((error) => onError?.(String(error)));
+  }
   const [layout, setLayout] = createSignal<WorkspaceLayout>(readLayout());
   const [renderer, setRenderer] = createSignal<TerminalRenderer>(readRenderer());
   const [activeWindow, setActiveWindowSignal] = createSignal<string | null>(null);
@@ -321,6 +349,7 @@ export function createWorkspaceStore(fleet: FleetStore) {
   });
 
   return {
+    viewFor, setView, toggleView,
     layout,
     chooseLayout,
     renderer,
