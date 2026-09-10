@@ -47,7 +47,7 @@ fn remote_method_allowed(method: &str) -> bool {
 
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
-        | "agent.capture" | "agent.transcript" | "agent.transcript_page"
+        | "agent.capture" | "agent.transcript" | "agent.transcript_page" | "agent.transcript_watch" | "lane.set_view"
         | "usage.get" | "daemon.status"
         // Allow remote usage reads while keeping host mutations and probes local.
         | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"
@@ -257,7 +257,7 @@ async fn handle_conn(
                     let deliver = {
                         let watched = sess.watched_bytes.lock().unwrap();
                         let out = sess.output_filter.lock().unwrap();
-                        crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
+                        crate::transcript::deliver_to(&value, sess.id) && crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
                     };
                     if forwarding && deliver {
                         send_json(&mut sink, &value).await?;
@@ -563,6 +563,8 @@ mod tests {
             "agent.capture",
             "agent.transcript",
             "agent.transcript_page",
+            "agent.transcript_watch",
+            "lane.set_view",
             "agent.prompt",
             "agent.answer",
             "agent.watch_bytes",

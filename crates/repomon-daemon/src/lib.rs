@@ -21,6 +21,7 @@ pub mod socket;
 mod spawn_input;
 pub mod standing;
 pub mod supervision;
+pub mod transcript;
 pub mod usage_ingest;
 pub mod usage_query;
 pub mod usage_rates;
@@ -568,9 +569,10 @@ impl Ctx {
     /// Remove a connection's session when it disconnects, so its viewport no longer contributes to
     /// the streamed union and its focus no longer arbitrates fits.
     pub async fn close_session(&self, id: u64) {
-        if self.sessions.lock().await.remove(&id).is_none() {
+        let Some(sess) = self.sessions.lock().await.remove(&id) else {
             return;
-        }
+        };
+        crate::transcript::unwatch_all(self, &sess).await;
         // Remove watches by session ID regardless of source so stale connection sets cannot retain
         // them.
         crate::bytes_stream::unwatch_all(&self.backend, &self.bytes_watches, id).await;

@@ -182,7 +182,8 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
                         let deliver = {
                             let watched = sess.watched_bytes.lock().unwrap();
                             let out = sess.output_filter.lock().unwrap();
-                            crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
+                            crate::transcript::deliver_to(&value, sess.id)
+                                && crate::pubsub::deliver_to(&value, &watched, &out.0, &out.1)
                         };
                         if deliver {
                             if let Ok(bytes) = serde_json::to_vec::<Value>(&value) {

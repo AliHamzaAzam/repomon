@@ -156,6 +156,11 @@ pub trait SessionBackend: Send + Sync {
         Ok(None)
     }
 
+    /// Earliest eligible transcript start for an unbound live window.
+    fn window_started_at(&self, _window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+
     /// Provides durable window identity for stable transcript routing, falling back to names when
     /// metadata is unavailable.
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {

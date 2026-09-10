@@ -11,4 +11,8 @@ agent_kind: string | null,
 /**
  * The lane's role. See [`Lane::role`].
  */
-role: string | null, };
+role: string | null, 
+/**
+ * Null inherits the configured default for the agent kind.
+ */
+view_mode: string | null, };

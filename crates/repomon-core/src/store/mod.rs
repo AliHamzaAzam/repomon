@@ -82,6 +82,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         30,
         include_str!("../../migrations/0030_message_push_attempts.sql"),
     ),
+    (31, include_str!("../../migrations/0031_lane_view.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
@@ -543,11 +544,22 @@ impl Store {
     pub async fn list_lane_meta(&self) -> Result<Vec<LaneMeta>> {
         self.call(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, repo_id, worktree_path, pinned, tmux_window, agent_kind, role \
+                "SELECT id, repo_id, worktree_path, pinned, tmux_window, agent_kind, role, view_mode \
                  FROM lanes",
             )?;
             let rows = stmt.query_map([], lane_meta_from_row)?;
             collect(rows)
+        })
+        .await
+    }
+
+    pub async fn set_lane_view(&self, lane_id: LaneId, view: Option<String>) -> Result<()> {
+        self.call(move |c| {
+            c.execute(
+                "UPDATE lanes SET view_mode = ?2 WHERE id = ?1",
+                params![lane_id, view],
+            )?;
+            Ok(())
         })
         .await
     }
@@ -1497,6 +1509,30 @@ impl Store {
     }
 
     /// Last transcript observed for a lane and backend, including sessions whose process exited.
+    /// Reuse the ledger's lane attribution rather than guessing a source from its filename.
+    pub async fn conversation_source(
+        &self,
+        lane: LaneId,
+        kind: String,
+        session: Option<String>,
+        started_after: Option<DateTime<Utc>>,
+    ) -> Result<Option<String>> {
+        self.call(move |c| {
+            Ok(c.query_row("SELECT source_path FROM usage_sessions WHERE lane_id = ?1 AND agent_kind = ?2 AND (?3 IS NULL OR session_id = ?3) AND (?4 IS NULL OR julianday(started_at) >= julianday(?4)) AND source_path IS NOT NULL ORDER BY started_at DESC LIMIT 1", params![lane, kind, session, started_after.as_ref().map(to_iso)], |r| r.get(0)).optional()?)
+        }).await
+    }
+
+    pub async fn conversation_cost_events(
+        &self,
+        path: String,
+    ) -> Result<Vec<crate::usage_ledger::UsageEvent>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!("SELECT {USAGE_EVENT_COLS} FROM usage_events WHERE source_path = ?1 AND subagent = 0 ORDER BY source_offset"))?;
+            let rows = stmt.query_map(params![path], usage_event_from_row)?;
+            collect(rows)
+        }).await
+    }
+
     pub async fn latest_lane_session(
         &self,
         lane_id: LaneId,
@@ -2757,6 +2793,7 @@ fn lane_meta_from_row(r: &Row) -> rusqlite::Result<LaneMeta> {
         tmux_window: r.get(4)?,
         agent_kind: r.get(5)?,
         role: r.get(6)?,
+        view_mode: r.get(7)?,
     })
 }
 

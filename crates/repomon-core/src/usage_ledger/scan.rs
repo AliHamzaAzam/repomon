@@ -7,6 +7,7 @@ use std::path::Path;
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
+pub use super::transcript::TranscriptEntry;
 use crate::error::Result;
 use crate::pricing::TokenCounts;
 
@@ -61,6 +62,8 @@ pub struct ScannedSession {
 /// The result of reading one source from an offset.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceScan {
+    /// Conversation rows decoded by the same pass as ledger usage.
+    pub transcript: Vec<TranscriptEntry>,
     pub events: Vec<ScannedEvent>,
     pub sessions: Vec<ScannedSession>,
     /// Where a later scan of the same source should resume.
@@ -103,8 +106,12 @@ where
         };
         let line = &text[at..end];
         if !line.trim().is_empty() {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                on_line(&v, at as i64);
+            match serde_json::from_str::<Value>(line) {
+                Ok(v) => on_line(&v, at as i64),
+                Err(_) => on_line(
+                    &serde_json::json!({"type":"unparsed", "raw":line}),
+                    at as i64,
+                ),
             }
         }
         at = end + 1;
@@ -159,7 +166,9 @@ pub fn scan_claude_transcript(
     let mut session_id: Option<String> = None;
     let mut pick = HeadlinePick::default();
 
+    let mut transcript = super::transcript::Mapper::default();
     let consumed = for_each_line(path, from_offset, |v, offset| {
+        transcript.claude(v, offset);
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "user" {
             if let Some(text) = v.get("message").and_then(message_text) {
@@ -331,6 +340,7 @@ pub fn scan_claude_transcript(
         }
     }
     Ok(SourceScan {
+        transcript: transcript.rows,
         events,
         sessions: session.into_iter().collect(),
         next_offset: match open {
@@ -355,13 +365,16 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut last_at: Option<DateTime<Utc>> = None;
 
+    let mut transcript = super::transcript::Mapper::default();
     let next_offset = for_each_line(path, from_offset, |v, offset| {
+        transcript.codex(v, offset);
         let payload = v.get("payload");
         let at = parse_at(v, "timestamp");
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "session_meta" => {
                 if let Some(p) = payload {
-                    session_id = str_at(p, "session_id");
+                    session_id = str_at(p, "session_id").or_else(|| str_at(p, "id"));
+                    first_at = first_at.or(at);
                     cwd = str_at(p, "cwd");
                     if meta_model.is_none() {
                         meta_model = str_at(p, "model");
@@ -480,6 +493,7 @@ pub fn scan_codex_rollout(path: &Path, from_offset: u64) -> Result<SourceScan> {
         .into_iter()
         .collect();
     Ok(SourceScan {
+        transcript: transcript.rows,
         events,
         sessions,
         next_offset,
@@ -578,6 +592,7 @@ pub fn scan_antigravity_transcript(
         .into_iter()
         .collect();
     Ok(SourceScan {
+        transcript: Vec::new(),
         events,
         sessions,
         next_offset,
@@ -681,6 +696,7 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
         });
     }
     Ok(SourceScan {
+        transcript: Vec::new(),
         events,
         sessions: sessions.into_values().collect(),
         next_offset: watermark,

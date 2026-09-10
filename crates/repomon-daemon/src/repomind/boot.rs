@@ -886,6 +886,7 @@ mod tests {
             agent_sessions: sessions,
             last_activity_at: chrono::Utc::now(),
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }

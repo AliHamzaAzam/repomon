@@ -1276,6 +1276,14 @@ impl SessionBackend for TmuxRuntime {
         TmuxRuntime::window_process_fingerprint(self, window)
     }
 
+    fn window_started_at(&self, window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        let target = self.exact_target(window);
+        let raw = self
+            .run_allow_absent(&["display-message", "-p", "-t", &target, "#{window_created}"])
+            .ok()?;
+        chrono::DateTime::from_timestamp(raw.trim().parse().ok()?, 0)
+    }
+
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
         TmuxRuntime::list_windows_meta(self)
     }

@@ -17,4 +17,4 @@ agent_sessions: Array<AgentSession>, last_activity_at: string, pinned: boolean,
  * repomind home lane, whose agents get the full fleet catalog and which cannot be deleted
  * or merged.
  */
-role: string | null, };
+role: string | null, view_mode?: string | null, };

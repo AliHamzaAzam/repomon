@@ -675,6 +675,7 @@ mod tests {
             agent_sessions: vec![],
             last_activity_at: Utc::now(),
             pinned: false,
+            view_mode: None,
             role: None,
         }
     }

@@ -6,6 +6,7 @@ pub mod approval;
 pub mod attention;
 pub mod backend;
 pub mod claude;
+pub mod conversation;
 pub mod gate;
 pub mod limit;
 pub mod opencode;

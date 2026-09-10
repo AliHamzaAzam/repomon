@@ -11,6 +11,7 @@ use crate::model::{LaneId, RepoId};
 use crate::pricing::{PriceTable, TokenCounts};
 
 pub mod scan;
+mod transcript;
 
 pub use scan::{HEADLINE_VERSION, UNTITLED_SESSION};
 

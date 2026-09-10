@@ -40,6 +40,7 @@ pub struct ConnSession {
     /// Plain-terminal windows (`term-{lane}-{n}`) this connection has visible as Grid tiles.
     pub viewport_windows: Mutex<Vec<String>>,
     /// Tracks byte watches behind a synchronous mutex for event-forward filtering.
+    pub transcript_watches: Mutex<std::collections::HashMap<String, crate::transcript::Watch>>,
     pub watched_bytes: std::sync::Mutex<HashSet<String>>,
     /// Mirrors viewport filters behind a synchronous mutex for forwarding without await;
     /// viewport.set updates both this snapshot and the async state.
@@ -62,6 +63,7 @@ impl ConnSession {
             viewport_fit_windows: Mutex::new(Vec::new()),
             viewport_focus_at: Mutex::new(None),
             viewport_windows: Mutex::new(Vec::new()),
+            transcript_watches: Mutex::new(std::collections::HashMap::new()),
             watched_bytes: std::sync::Mutex::new(HashSet::new()),
             output_filter: std::sync::Mutex::new((HashSet::new(), HashSet::new())),
             last_interaction: Mutex::new(None),
