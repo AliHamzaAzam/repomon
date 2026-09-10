@@ -767,7 +767,7 @@ const INJECTED_PREAMBLES: &[(&str, &[&str])] = &[(
 /// Bump this whenever the extraction rules change. A session digest's stored
 /// `headline_version` (see `UsageSessionMeta`) lags behind after a bump, and ingest re-digests it
 /// from its source, a bounded batch per tick, until every session reflects the current rules.
-pub const HEADLINE_VERSION: u32 = 4;
+pub const HEADLINE_VERSION: u32 = 5;
 
 /// How many characters a headline keeps, ellipsis included.
 const HEADLINE_MAX_CHARS: usize = 80;
@@ -786,6 +786,45 @@ pub const UNTITLED_SESSION: &str = "untitled session";
 /// last known model forward and backfill from later context before ever reaching for this, so it
 /// only shows up for a session with no model information anywhere in its source.
 pub const UNKNOWN_MODEL: &str = "unknown";
+
+/// Recognize the complete harness dimension/coordinate note, without treating other image
+/// descriptions as injections. Whitespace may wrap, and dimensions/scales are not fixed values.
+fn is_image_dimension_note(note: &str) -> bool {
+    fn digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    fn dimensions(s: &str) -> bool {
+        s.split_once('x')
+            .is_some_and(|(width, height)| digits(width) && digits(height))
+    }
+    let words: Vec<_> = note.split_whitespace().collect();
+    let [
+        "[Image:",
+        "original",
+        original,
+        "displayed",
+        "at",
+        displayed,
+        "Multiply",
+        "coordinates",
+        "by",
+        scale,
+        "to",
+        "map",
+        "to",
+        "original",
+        "image.]",
+    ] = words.as_slice()
+    else {
+        return false;
+    };
+    original.strip_suffix(',').is_some_and(dimensions)
+        && displayed.strip_suffix('.').is_some_and(dimensions)
+        && scale.split_once('.').map_or_else(
+            || digits(scale),
+            |(whole, fraction)| digits(whole) && digits(fraction),
+        )
+}
 
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
@@ -825,6 +864,17 @@ pub(super) fn strip_injected_blocks(raw: &str) -> String {
                 .find(']')
                 .map_or(text.len(), |rel| start + rel + 1);
             if cut.is_none_or(|(previous, _)| start < previous) {
+                cut = Some((start, end));
+            }
+        }
+        for (start, _) in text.match_indices("[Image:") {
+            let Some(relative_end) = text[start..].find(']') else {
+                continue;
+            };
+            let end = start + relative_end + 1;
+            if is_image_dimension_note(&text[start..end])
+                && cut.is_none_or(|(previous, _)| start < previous)
+            {
                 cut = Some((start, end));
             }
         }

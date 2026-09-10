@@ -120,6 +120,96 @@
       "text": "<task-notification>\n<task-id>bsli5vp2x</task-id>\n<tool-use-id>toolu_01NL...</tool-use-id>\n<output-file>/private/tmp/...</output-file>\n<status>completed</status>\n</task-notification>\nFix the preview.",
       "expected": "Fix the preview.",
       "provenance": "derived, wrapper spans adjacent Claude text blocks"
+    },
+    {
+      "name": "reported_image_dimensions",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]",
+      "expected": null,
+      "provenance": "operator evidence, Round 4 defects item 3 and defect-attachment-paths-raw.png"
+    },
+    {
+      "name": "image_dimensions_other_numbers",
+      "text": "[Image: original 8192x4096, displayed at 1024x512. Multiply coordinates by 8 to map to original image.]",
+      "expected": null,
+      "provenance": "derived, changed dimensions and integer scale"
+    },
+    {
+      "name": "image_dimensions_fractional_scale",
+      "text": "[Image: original 640x480, displayed at 1280x960. Multiply coordinates by 0.5 to map to original image.]",
+      "expected": null,
+      "provenance": "derived, fractional scale"
+    },
+    {
+      "name": "image_dimensions_wrapped",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299.\nMultiply coordinates by 1.80 to map to\noriginal image.]",
+      "expected": null,
+      "provenance": "derived, wrapped whitespace and adjacent Claude text blocks"
+    },
+    {
+      "name": "attached_files_only",
+      "text": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"",
+      "expected": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"",
+      "provenance": "preservation control, quoted paths including spaces"
+    },
+    {
+      "name": "image_dimensions_before_attachment",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "expected": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "provenance": "derived, keep attachment after dimension note"
+    },
+    {
+      "name": "image_dimensions_after_attachments",
+      "text": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"\n[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]",
+      "expected": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"",
+      "provenance": "derived, keep both attachments before dimension note"
+    },
+    {
+      "name": "image_dimensions_between_attachments",
+      "text": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\n[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"",
+      "expected": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"\n \nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-20uTIW-image.png\"",
+      "provenance": "derived, both attachment lines unchanged around removed note"
+    },
+    {
+      "name": "image_frames_then_attachment",
+      "text": "[Image: source: /private/tmp/reference.png]\n[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "expected": "Attached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "provenance": "derived, both image forms stripped together"
+    },
+    {
+      "name": "image_dimensions_multiple_notes",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]\n[Image: original 8192x4096, displayed at 1024x512. Multiply coordinates by 8 to map to original image.]",
+      "expected": null,
+      "provenance": "derived, repeated dimension notes"
+    },
+    {
+      "name": "image_description_is_prose",
+      "text": "[Image: original sketch of the login page]",
+      "expected": "[Image: original sketch of the login page]",
+      "provenance": "preservation control, image description is not dimension metadata"
+    },
+    {
+      "name": "image_dimensions_are_prose",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Keep the labels readable.]",
+      "expected": "[Image: original 3600x2338, displayed at 2000x1299. Keep the labels readable.]",
+      "provenance": "preservation control, dimensions alone do not establish harness note"
+    },
+    {
+      "name": "image_dimensions_invalid_numbers",
+      "text": "[Image: original wide x tall, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]",
+      "expected": "[Image: original wide x tall, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.]",
+      "provenance": "preservation control, invalid dimension shape"
+    },
+    {
+      "name": "image_dimensions_invalid_scale",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by many to map to original image.]",
+      "expected": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by many to map to original image.]",
+      "provenance": "preservation control, nonnumeric scale"
+    },
+    {
+      "name": "image_dimensions_unclosed_with_attachment",
+      "text": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "expected": "[Image: original 3600x2338, displayed at 2000x1299. Multiply coordinates by 1.80 to map to original image.\nAttached file: \"/Users/azaleas/Library/Application Support/com.repomon.desktop/attachments/attachment-f5gU6c-image.png\"",
+      "provenance": "preservation control, unclosed ambiguous note must not swallow attachment"
     }
   ]
 }
