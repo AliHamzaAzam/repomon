@@ -75,4 +75,31 @@ describe("createTranscript, end to end", () => {
     expect(transcript.rows().find((r) => r.key === "u1")?.item.partial).toBe(false);
     dispose();
   });
+
+  it("does not bump revision for a metadata-only push (round 6 item 1, candidate 4)", async () => {
+    // ConversationPane's follow-scroll effect depends on revision alone; a push that only ticks
+    // activity or input_states, with no row content and no order change, must not fire it -
+    // that is exactly "runs the follow-scroll on every single update, including ones that
+    // changed nothing visible."
+    let emit!: (event: DaemonEvent) => void;
+    vi.mocked(subscribeDaemon).mockImplementation(async (callback) => { emit = callback; return vi.fn(); });
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on
+        ? { items: [{ id: "a1", kind: "assistant", role: "assistant", text: "Answer", at: null, partial: true }], next_before: null, order: ["a1"], activity: { verb: "Whisking", elapsed_seconds: 1, token_count: null, thought_seconds: null, model: null, effort: null } }
+        : null;
+      return null;
+    });
+    const { transcript, dispose } = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const before = transcript.revision();
+    emit({
+      jsonrpc: "2.0", method: "event.agent.transcript",
+      params: { lane_id: 1, window: "lane-1", subscription_id: 1, items: [], removed_ids: [], next_before: null, order: ["a1"], activity: { verb: "Whisking", elapsed_seconds: 2, token_count: null, thought_seconds: null, model: null, effort: null } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transcript.activity()?.elapsed_seconds).toBe(2);
+    expect(transcript.revision()).toBe(before);
+    dispose();
+  });
 });
