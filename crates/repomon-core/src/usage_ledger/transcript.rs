@@ -203,6 +203,81 @@ impl Mapper {
             }
         }
     }
+    pub fn antigravity(&mut self, v: &Value, offset: i64, model: &str) {
+        if v["type"] == "unparsed" {
+            self.push(
+                offset,
+                TranscriptItem::new("terminal_block", text(&v["raw"]), None),
+            );
+            return;
+        }
+        let stamp = serde_json::json!({"timestamp":v["created_at"]});
+        self.model = Some(model.into());
+        let role = if v["source"] == "MODEL" {
+            "assistant"
+        } else {
+            "user"
+        };
+        if let Some(content) = v["content"].as_str().filter(|s| !s.trim().is_empty()) {
+            self.message(offset, &stamp, role, content.into(), None);
+        }
+        if let Some(calls) = v["tool_calls"].as_array() {
+            for (index, call) in calls.iter().enumerate() {
+                let id = string(call, "id").unwrap_or_else(|| format!("agy:{offset}:{index}"));
+                let block = serde_json::json!({"id":id,"name":call["name"],"input":call.get("args").or_else(|| call.get("arguments"))});
+                self.tool(offset, &stamp, &block);
+            }
+        }
+    }
+
+    pub fn opencode(&mut self, message: &Value, part: &Value, id: &str, created_ms: i64) {
+        let at = DateTime::<Utc>::from_timestamp_millis(created_ms);
+        let stamp = serde_json::json!({"timestamp":at});
+        self.model = string(message, "modelID");
+        let start = self.rows.len();
+        match part["type"].as_str().unwrap_or("") {
+            "text" => {
+                let role = message["role"].as_str().unwrap_or("assistant");
+                self.message(
+                    created_ms,
+                    &stamp,
+                    role,
+                    part["text"].as_str().unwrap_or("").into(),
+                    None,
+                );
+            }
+            "tool" => {
+                let state = &part["state"];
+                let block = serde_json::json!({"id":id,"name":part["tool"],"input":state["input"]});
+                self.tool(created_ms, &stamp, &block);
+                if matches!(state["status"].as_str(), Some("completed" | "error")) {
+                    let output = state
+                        .get("output")
+                        .or_else(|| state.get("error"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    self.result(
+                        created_ms,
+                        &stamp,
+                        Some(id.into()),
+                        &output,
+                        state["status"] == "error",
+                    );
+                }
+            }
+            "step-start" => self.status(created_ms, &stamp, "turn_started", "Turn started"),
+            "step-finish" => self.status(created_ms, &stamp, "turn_finished", "Turn finished"),
+            "reasoning" => {}
+            _ => self.push(
+                created_ms,
+                TranscriptItem::new("terminal_block", part.to_string(), at),
+            ),
+        }
+        for row in &mut self.rows[start..] {
+            row.item.id = Some(format!("part:{id}"));
+        }
+    }
+
     pub fn codex(&mut self, v: &Value, offset: i64) {
         let p = &v["payload"];
         if let Some(m) = string(p, "model") {
@@ -294,7 +369,16 @@ impl Mapper {
             }
             self.messages.insert(key, source.into());
         }
-        let mut item = TranscriptItem::new(role, value, at(v));
+        let mut item = if role == "assistant" && source.is_some() {
+            crate::agent::codex_content::tool_item(&value)
+                .map(|mut item| {
+                    item.at = at(v);
+                    item
+                })
+                .unwrap_or_else(|| TranscriptItem::new(role, value, at(v)))
+        } else {
+            TranscriptItem::new(role, value, at(v))
+        };
         if role == "assistant" {
             item.model = self.model.clone();
         }
@@ -310,12 +394,50 @@ mod tests {
     };
     const CONVERSATION: ScanOptions = ScanOptions {
         collect_transcript: true,
+        before_offset: None,
     };
     fn fixture(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/usage_ledger/fixtures")
             .join(name)
     }
+    #[test]
+    fn other_provider_conversation_collection_is_opt_in_and_preserves_ledger_results() {
+        use crate::usage_ledger::scan::{
+            scan_antigravity_transcript, scan_antigravity_transcript_with_options,
+            scan_opencode_db, scan_opencode_db_with_options,
+        };
+        let path = fixture("antigravity_usage_v0.jsonl");
+        let legacy = scan_antigravity_transcript(&path, 0, "gemini-3", None).unwrap();
+        let mut conversation =
+            scan_antigravity_transcript_with_options(&path, 0, "gemini-3", None, CONVERSATION)
+                .unwrap();
+        assert!(
+            conversation
+                .transcript
+                .iter()
+                .any(|r| r.item.kind.as_deref() == Some("tool_call"))
+        );
+        conversation.transcript.clear();
+        assert_eq!(legacy, conversation);
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(include_str!("fixtures/opencode_conversation_v0.sql"))
+            .unwrap();
+        let legacy = scan_opencode_db(&db, 0).unwrap();
+        let mut conversation = scan_opencode_db_with_options(&db, 0, None, CONVERSATION).unwrap();
+        assert!(
+            conversation
+                .transcript
+                .iter()
+                .any(|r| r.item.result_summary.as_deref() == Some("file content"))
+        );
+        conversation.transcript.clear();
+        assert_eq!(legacy, conversation);
+    }
+
     #[test]
     fn ledger_fixtures_map_both_providers() {
         let claude = scan_claude_transcript_with_options(
@@ -513,5 +635,45 @@ mod tests {
             let item: TranscriptItem = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(item).unwrap(), value);
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_machine_content_tests {
+    use super::*;
+    #[test]
+    fn codex_rollups_and_numbered_diffs_use_existing_tool_rows_but_user_code_stays_user() {
+        for content in [
+            "Ran 1 shell command",
+            "Searched for 1 pattern, ran 2 shell commands",
+            "Searched for 2 patterns, ran 7 shell commands",
+            "205 + await screen.findByText(\"Ready\");\n206 + expect(button).toBeEnabled();",
+        ] {
+            let mut mapper = Mapper::default();
+            mapper.codex(&serde_json::json!({"type":"event_msg","payload":{"type":"agent_message","message":content}}), 0);
+            assert_eq!(mapper.rows[0].item.kind.as_deref(), Some("tool_call"));
+            assert_eq!(mapper.rows[0].item.status, Some(ToolCallStatus::Ok));
+            // Provider mirror still deduplicates after machine content classification.
+            mapper.codex(&serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":content}]}}), 100);
+            assert_eq!(mapper.rows.len(), 1);
+            mapper.codex(&serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":content}}), 200);
+            assert_eq!(mapper.rows[1].item.kind.as_deref(), Some("user"));
+            assert_eq!(mapper.rows[1].item.text, content);
+            if content.contains("205 +") {
+                assert_eq!(mapper.rows[0].item.diff.as_deref(), Some(content));
+            }
+        }
+    }
+    #[test]
+    fn actual_codex_tool_output_already_routes_to_result_not_assistant_fallthrough() {
+        let mut mapper = Mapper::default();
+        let output =
+            "205 + await screen.findByText(\"Ready\");\n206 + expect(button).toBeEnabled();";
+        mapper.codex(&serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"test","name":"exec_command","arguments":"{}"}}), 0);
+        mapper.codex(&serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"test","output":output}}), 100);
+        assert_eq!(mapper.rows.len(), 1);
+        assert_eq!(mapper.rows[0].item.kind.as_deref(), Some("tool_call"));
+        assert_eq!(mapper.rows[0].item.result_summary.as_deref(), Some(output));
+        assert!(mapper.rows.iter().all(|r| r.item.role != "assistant"));
     }
 }

@@ -1516,19 +1516,22 @@ impl Store {
         kind: String,
         session: Option<String>,
         started_after: Option<DateTime<Utc>>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<(String, String)>> {
         self.call(move |c| {
-            Ok(c.query_row("SELECT source_path FROM usage_sessions WHERE lane_id = ?1 AND agent_kind = ?2 AND (?3 IS NULL OR session_id = ?3) AND (?4 IS NULL OR julianday(started_at) >= julianday(?4)) AND source_path IS NOT NULL ORDER BY started_at DESC LIMIT 1", params![lane, kind, session, started_after.as_ref().map(to_iso)], |r| r.get(0)).optional()?)
+            Ok(c.query_row("SELECT source_path, session_id FROM usage_sessions WHERE lane_id = ?1 AND agent_kind = ?2 AND (?3 IS NULL OR session_id = ?3) AND (?4 IS NULL OR julianday(started_at) >= julianday(?4)) AND source_path IS NOT NULL ORDER BY started_at DESC LIMIT 1", params![lane, kind, session, started_after.as_ref().map(to_iso)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
         }).await
     }
 
     pub async fn conversation_cost_events(
         &self,
         path: String,
+        session: Option<String>,
+        from: u64,
+        before: u64,
     ) -> Result<Vec<crate::usage_ledger::UsageEvent>> {
         self.call(move |c| {
-            let mut stmt = c.prepare(&format!("SELECT {USAGE_EVENT_COLS} FROM usage_events WHERE source_path = ?1 AND subagent = 0 ORDER BY source_offset"))?;
-            let rows = stmt.query_map(params![path], usage_event_from_row)?;
+            let mut stmt = c.prepare(&format!("SELECT {USAGE_EVENT_COLS} FROM usage_events WHERE source_path = ?1 AND subagent = 0 AND (?2 IS NULL OR session_id = ?2) AND source_offset >= ?3 AND source_offset < ?4 ORDER BY source_offset"))?;
+            let rows = stmt.query_map(params![path, session, from.min(i64::MAX as u64) as i64, before.min(i64::MAX as u64) as i64], usage_event_from_row)?;
             collect(rows)
         }).await
     }

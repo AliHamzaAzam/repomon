@@ -1,18 +1,60 @@
 //! Pane previews and stable reconciliation between live output and durable transcript rows.
-use super::{prompt, text::strip_ansi};
+use super::{conversation_activity, prompt, text::strip_ansi};
 use crate::model::{ToolCallStatus, TranscriptItem};
 use std::collections::{HashMap, HashSet};
+
+/// Codex's footer is a set of dot-separated fields, including a model/effort and a working
+/// directory. Neither model names nor project paths are fixed. Its composer animation consists
+/// solely of dots/braille cells; those lines carry no prose.
+fn codex_chrome(line: &str) -> bool {
+    let animation = line
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if !animation.is_empty()
+        && animation
+            .iter()
+            .all(|c| matches!(c, '.' | '·' | '•' | '\u{2800}'..='\u{28ff}'))
+        && (animation.len() >= 4
+            || animation
+                .iter()
+                .any(|c| matches!(c, '\u{2800}'..='\u{28ff}')))
+    {
+        return true;
+    }
+    conversation_activity::model_line(line).is_some()
+}
+
+/// Preserve excerpt content while removing the same structured status decorations as prose.
+pub fn pane_content(kind: &str, pane: &str) -> String {
+    strip_ansi(pane)
+        .lines()
+        .filter(|line| {
+            !conversation_activity::queue_indicator(kind, line)
+                && conversation_activity::timed_line(kind, line).is_none()
+                && !(kind == "codex" && codex_chrome(line.trim()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Strip only recognized CLI decorations. Unknown kinds preserve the raw plain pane tail.
 pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
     let plain = strip_ansi(pane);
     let supported = matches!(kind, "claude-code" | "codex");
     let mut prose = Vec::new();
-    let mut tools = Vec::new();
+    let mut tools: Vec<TranscriptItem> = Vec::new();
+    let mut codex_tool_output = false;
     let mut in_box = false;
     for raw in plain.lines() {
         let line = raw.trim();
         if supported {
+            if conversation_activity::queue_indicator(kind, line)
+                || conversation_activity::timed_line(kind, line).is_some()
+                || (kind == "codex" && codex_chrome(line))
+            {
+                continue;
+            }
             if line.starts_with('╭') {
                 in_box = true;
                 continue;
@@ -26,7 +68,12 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
                 continue;
             }
             if line.starts_with('❯') || line.starts_with('›') {
-                if line.chars().skip(1).any(|c| !c.is_whitespace()) {
+                let input = line.chars().skip(1).collect::<String>();
+                let placeholder = kind == "codex"
+                    && (input.trim().starts_with("Ask Codex ")
+                        || input.trim().starts_with("Use /")
+                        || input.trim().starts_with("Try \""));
+                if !placeholder && !input.trim().is_empty() {
                     prose.clear();
                     tools.clear();
                 }
@@ -45,7 +92,34 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
             {
                 continue;
             }
+            if kind == "codex"
+                && codex_tool_output
+                && !line.is_empty()
+                && (raw.starts_with("  ") || line.starts_with(['└', '│']))
+            {
+                if let Some(tool) = tools.last_mut() {
+                    let output = tool.result_summary.get_or_insert_with(String::new);
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(raw.trim_end());
+                    if super::codex_content::numbered_diff(output) {
+                        tool.diff = Some(output.clone());
+                    }
+                }
+                continue;
+            }
+            if !line.is_empty() {
+                codex_tool_output = false;
+            }
             let body = line.trim_start_matches(['⏺', '●', '•']).trim();
+            if kind == "codex" {
+                if let Some(item) = super::codex_content::tool_item(body) {
+                    tools.push(item);
+                    codex_tool_output = true;
+                    continue;
+                }
+            }
             if let Some((name, input)) = body.split_once('(') {
                 if matches!(
                     name,
@@ -71,8 +145,13 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
                 let mut item = TranscriptItem::new("tool_call", body, None);
                 item.name = Some("exec_command".into());
                 item.input_summary = Some(body.split_once(' ').map(|s| s.1).unwrap_or("").into());
-                item.status = Some(ToolCallStatus::Running);
+                item.status = Some(if body.starts_with("Ran ") {
+                    ToolCallStatus::Ok
+                } else {
+                    ToolCallStatus::Running
+                });
                 tools.push(item);
+                codex_tool_output = true;
                 continue;
             }
             if line.starts_with('⎿') {
@@ -90,15 +169,22 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
     let text = prose.join("\n").trim().to_string();
     let mut items = Vec::new();
     if !text.is_empty() {
-        let mut item = TranscriptItem::new(
-            if supported {
-                "assistant"
-            } else {
-                "terminal_block"
-            },
-            text,
-            None,
-        );
+        let mut item = if kind == "codex" {
+            super::codex_content::tool_item(&text)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            TranscriptItem::new(
+                if supported {
+                    "assistant"
+                } else {
+                    "terminal_block"
+                },
+                text,
+                None,
+            )
+        });
         item.partial = Some(true);
         items.push(item);
     }
@@ -158,6 +244,8 @@ fn same_tool_name(a: Option<&str>, b: Option<&str>) -> bool {
 pub struct Update {
     pub items: Vec<TranscriptItem>,
     pub removed_ids: Vec<String>,
+    /// Complete order of the current window, including unchanged upsert identities.
+    pub order: Vec<String>,
 }
 
 #[derive(Default)]
@@ -173,6 +261,17 @@ pub struct ConversationStream {
     settled_tools: HashSet<(Option<String>, Option<String>)>,
 }
 impl ConversationStream {
+    /// A fast CLI may persist a user row before the verified send acknowledges it. Remove the
+    /// earlier source identity once when the shared input registry resolves its submission id.
+    pub fn forget_replaced_user(&mut self, id: &str) -> bool {
+        if self.previous.get(id).is_some_and(|r| r.role == "user") {
+            self.previous.remove(id);
+            self.durable.remove(id);
+            true
+        } else {
+            false
+        }
+    }
     pub fn update(
         &mut self,
         final_rows: Vec<TranscriptItem>,
@@ -312,6 +411,7 @@ impl ConversationStream {
             .filter_map(|i| i.id.clone().map(|id| (id, i.clone())))
             .collect();
         let update = Update {
+            order: rows.iter().filter_map(|i| i.id.clone()).collect(),
             items: rows
                 .into_iter()
                 .filter(|item| {
@@ -352,6 +452,49 @@ mod tests {
         assert!(prose.text.contains("The models are two-tone now"));
         assert!(!prose.text.contains("auto mode on"));
         assert!(!prose.text.contains("Crunched for"));
+    }
+    #[test]
+    fn real_codex_fixture_strips_footer_and_preserves_prose_and_tools() {
+        // Captured from this worker's own verified pane %355, lane-48357719, 2026-09-10.
+        let pane = include_str!("fixtures/codex_working_footer_2026_09_10.ansi");
+        for pane in [
+            pane.to_string(),
+            pane.replace("gpt-6-astra high", "o9-example medium")
+                .replace(
+                    "~/code/repomon-wt/feat-conversation-view-daemon",
+                    "/different/project",
+                )
+                .replace("/different/project", "/different/project · Work [default]"),
+        ] {
+            let items = pane_items("codex", &pane);
+            let prose = items
+                .iter()
+                .find(|i| i.kind.as_deref() == Some("assistant"))
+                .unwrap();
+            assert!(prose.text.starts_with("Bounded paging brought warm"));
+            assert!(!prose.text.contains("esc to interrupt"));
+            assert!(!prose.text.contains("Ask Codex"));
+            assert!(
+                !prose
+                    .text
+                    .chars()
+                    .any(|c| matches!(c, '\u{2800}'..='\u{28ff}'))
+            );
+            assert!(!prose.text.contains("[default]"));
+            assert!(items.iter().any(|i| i.kind.as_deref() == Some("tool_call")));
+        }
+        assert!(
+            pane_items(
+                "codex",
+                ". . . . . . . . · model-z high · /project · Work [default]"
+            )
+            .is_empty()
+        );
+        assert!(pane_items("codex", ". . . . . . . .").is_empty());
+        assert_eq!(
+            pane_items("codex", "Use model-z high in /project for this task.")[0].text,
+            "Use model-z high in /project for this task."
+        );
     }
     #[test]
     fn real_codex_fixture_strips_ansi_boxes_and_cli_banner() {
@@ -492,5 +635,80 @@ mod history_tests {
             .find(|i| i.partial == Some(true))
             .unwrap();
         assert_eq!(partial.text, "New answer");
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    #[test]
+    fn delayed_user_ingestion_reproduces_arrival_order_bug_without_any_queue() {
+        let mut stream = ConversationStream::default();
+        stream.update(Vec::new(), Vec::new(), false);
+        let partial = stream.update(
+            Vec::new(),
+            pane_items("claude-code", "⏺ The answer is forty two."),
+            true,
+        );
+        let answer_id = partial
+            .items
+            .iter()
+            .find(|i| i.partial == Some(true))
+            .unwrap()
+            .id
+            .clone()
+            .unwrap();
+        let mut user = TranscriptItem::new("user", "What is the answer?", None);
+        user.id = Some("source:0:user".into());
+        let mut answer = TranscriptItem::new("assistant", "The answer is forty two.", None);
+        answer.id = Some("source:100:assistant".into());
+        let final_update = stream.update(vec![user, answer], Vec::new(), false);
+        assert_eq!(final_update.items[0].role, "user");
+        assert_eq!(
+            final_update.items[1].id.as_deref(),
+            Some(answer_id.as_str())
+        );
+        // Existing UI keeps the old id in place and appends the newly observed user id.
+        let mut arrival = vec![answer_id.clone()];
+        for row in &final_update.items {
+            let id = row.id.clone().unwrap();
+            if !arrival.contains(&id) {
+                arrival.push(id);
+            }
+        }
+        assert_eq!(arrival[0], answer_id);
+        assert_eq!(arrival[1], "source:0:user");
+        // New explicit order repairs this even when the user has no timestamp at all.
+        assert_eq!(
+            &final_update.order[..2],
+            &["source:0:user".to_string(), answer_id]
+        );
+    }
+}
+
+#[cfg(test)]
+mod codex_output_tests {
+    use super::*;
+    #[test]
+    fn codex_rollup_and_indented_tool_result_are_not_assistant_prose() {
+        let pane = "• Searched for 2 patterns, ran 7 shell commands\n  └ Test diff\n    205 + await screen.findByText(\"Ready\");\n    206 + expect(button).toBeEnabled();\n\n• The fix is ready for review.";
+        let rows = pane_items("codex", pane);
+        let prose = rows
+            .iter()
+            .find(|r| r.kind.as_deref() == Some("assistant"))
+            .unwrap();
+        assert_eq!(prose.text, "The fix is ready for review.");
+        let tool = rows
+            .iter()
+            .find(|r| r.kind.as_deref() == Some("tool_call"))
+            .unwrap();
+        assert_eq!(tool.name.as_deref(), Some("tool_summary"));
+        assert!(
+            tool.result_summary
+                .as_deref()
+                .unwrap()
+                .contains("screen.findByText")
+        );
+        assert!(tool.diff.as_deref().unwrap().contains("206 +"));
     }
 }

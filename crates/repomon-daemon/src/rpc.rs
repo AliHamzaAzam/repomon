@@ -3583,6 +3583,7 @@ pub async fn dispatch(
                 ctx.wake_mail_delivery();
             }
             if usage_prices_changed {
+                ctx.transcript_cache.prices_changed();
                 // Cost is computed at query time from the config's overrides, never stored, so a
                 // correction re-prices history the moment a live Usage view re-reads it.
                 ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, json!({}));
@@ -4164,6 +4165,11 @@ pub async fn dispatch(
             let tmux = ctx.backend.clone();
             let (lane, text, enter) = (p.lane_id, p.text, p.enter);
             let window = p.window.unwrap_or_else(|| TmuxRuntime::window_name(lane));
+            let pending = if enter {
+                crate::transcript::prepare_input(ctx, lane, &window, &text).await
+            } else {
+                None
+            };
             let win = window.clone();
             tokio::task::spawn_blocking(move || {
                 if enter {
@@ -4175,6 +4181,9 @@ pub async fn dispatch(
             .await
             .map_err(internal)?
             .map_err(internal)?;
+            if let Some(ticket) = pending {
+                ctx.transcript_inputs.sent(ctx, &window, ticket);
+            }
             mark_input(ctx, lane, &window).await;
             Ok(Value::Null)
         }

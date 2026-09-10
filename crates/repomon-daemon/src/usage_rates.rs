@@ -229,6 +229,8 @@ pub async fn run_refresh(ctx: &Arc<Ctx>) {
             match repomon_core::pricing::parse_litellm_snapshot(&body, now) {
                 Ok(_) => match write_snapshot(&body) {
                     Ok(()) => {
+                        ctx.transcript_cache.prices_changed();
+                        ctx.broadcast(crate::pubsub::topic::USAGE_CHANGED, serde_json::json!({}));
                         meta.fetched_at = Some(now);
                         meta.last_error = None;
                         meta.etag = etag;

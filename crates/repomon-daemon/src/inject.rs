@@ -265,6 +265,12 @@ pub async fn verified_send_with_timeout(
         }
     }
 
+    let pending = match &payload {
+        Payload::Line(text) | Payload::VerifiedLine { text, .. } => {
+            crate::transcript::prepare_input(ctx, seed.lane_id, &seed.window, text).await
+        }
+        Payload::Keys(_) => None,
+    };
     let recorded_keys = match &payload {
         Payload::Keys(keys) => {
             let send_keys = keys.clone();
@@ -329,6 +335,9 @@ pub async fn verified_send_with_timeout(
         }
     };
 
+    if let Some(ticket) = pending {
+        ctx.transcript_inputs.sent(ctx, &seed.window, ticket);
+    }
     crate::rpc::mark_input(ctx, seed.lane_id, &seed.window).await;
     ctx.invalidate_overlay().await;
 

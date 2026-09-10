@@ -487,7 +487,7 @@ fn fingerprint(path: &Path) -> i64 {
 }
 
 /// Read one source from `offset`.
-fn scan_source(source: &Source, offset: u64) -> repomon_core::Result<SourceScan> {
+pub(crate) fn scan_source(source: &Source, offset: u64) -> repomon_core::Result<SourceScan> {
     match source.kind {
         SourceKind::Claude => scan_claude_transcript(&source.path, offset, Some(&source.account)),
         SourceKind::Codex => scan_codex_rollout(&source.path, offset),
@@ -505,6 +505,10 @@ fn scan_source(source: &Source, offset: u64) -> repomon_core::Result<SourceScan>
 /// the operator's overrides, which always win.
 pub async fn price_table(ctx: &Arc<Ctx>) -> PriceTable {
     let config = ctx.config.read().await.usage.clone();
+    build_price_table(config)
+}
+
+pub(crate) fn build_price_table(config: repomon_core::config::UsageConfig) -> PriceTable {
     let mut table = PriceTable::builtin();
     if config.refresh_prices {
         if let Ok(text) = std::fs::read_to_string(price_cache_path()) {
@@ -724,11 +728,11 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                 }
             })
             .collect();
-        report.events += ctx
+        let changed = ctx
             .store
             .commit_usage_source(
                 repomon_core::usage_ledger::UsageCursor {
-                    source_path: path,
+                    source_path: path.clone(),
                     offset: scan.next_offset,
                     mtime: print,
                     scanned_at: chrono::Utc::now(),
@@ -740,6 +744,10 @@ pub async fn ingest_once(ctx: &Arc<Ctx>) -> repomon_core::Result<IngestReport> {
                 sessions,
             )
             .await?;
+        report.events += changed;
+        if changed > 0 || stale {
+            ctx.transcript_cache.usage_changed(&path);
+        }
         if stale {
             reingested += 1;
         }

@@ -226,6 +226,8 @@ pub struct Ctx {
     /// shared backend stream; the entry refcounts its watching connections (see [`bytes_stream`]).
     /// `Arc<Mutex<…>>` lets the forwarder clean up when the backend detects target closure.
     pub bytes_watches: bytes_stream::Watches,
+    pub transcript_cache: transcript::Cache,
+    pub transcript_inputs: transcript::Inputs,
     /// Wake parked capture loops when their subscriptions change.
     pub capture_wake: Notify,
     pub orchestrator_capture_wake: Notify,
@@ -445,6 +447,8 @@ impl Ctx {
             pane_seen: Mutex::new(HashMap::new()),
             gate_cache: Mutex::new(HashMap::new()),
             bytes_watches: Arc::new(Mutex::new(HashMap::new())),
+            transcript_cache: transcript::Cache::default(),
+            transcript_inputs: transcript::Inputs::default(),
             capture_wake: Notify::new(),
             orchestrator_capture_wake: Notify::new(),
             rate_limits: Mutex::new(HashMap::new()),

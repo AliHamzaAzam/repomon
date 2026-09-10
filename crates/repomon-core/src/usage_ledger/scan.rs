@@ -64,6 +64,8 @@ pub struct ScannedSession {
 pub struct ScanOptions {
     /// Allocate and map conversation rows. Ledger-only scans leave this disabled.
     pub collect_transcript: bool,
+    /// Exclusive JSONL byte boundary, or OpenCode message timestamp, for bounded history reads.
+    pub before_offset: Option<u64>,
 }
 
 /// The result of reading one source from an offset.
@@ -96,35 +98,94 @@ fn parse_at(v: &Value, key: &str) -> Option<DateTime<Utc>> {
 
 /// Read `path` from `from_offset`, handing each line and its byte offset to `on_line`. Returns
 /// the offset just past the last complete line, so a partially written tail is re-read next time.
-fn for_each_line<F>(path: &Path, from_offset: u64, mut on_line: F) -> Result<u64>
+fn for_each_line_until<F>(
+    path: &Path,
+    from_offset: u64,
+    before: Option<u64>,
+    mut on_line: F,
+) -> Result<u64>
 where
     F: FnMut(&Value, i64),
 {
-    let text = std::fs::read_to_string(path)?;
-    let bytes = text.as_bytes();
-    let start = (from_offset as usize).min(bytes.len());
-    let mut at = start;
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let end = before.unwrap_or(u64::MAX).min(file.metadata()?.len());
+    let start = from_offset.min(end);
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file.take(end - start));
+    let mut line = String::new();
     let mut consumed = start;
-    while at < bytes.len() {
-        let end = match bytes[at..].iter().position(|b| *b == b'\n') {
-            Some(rel) => at + rel,
-            // A line without a trailing newline is still being written; stop before it.
-            None => break,
-        };
-        let line = &text[at..end];
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 || !line.ends_with('\n') {
+            break;
+        }
         if !line.trim().is_empty() {
-            match serde_json::from_str::<Value>(line) {
-                Ok(v) => on_line(&v, at as i64),
+            match serde_json::from_str::<Value>(&line) {
+                Ok(v) => on_line(&v, consumed as i64),
                 Err(_) => on_line(
-                    &serde_json::json!({"type":"unparsed", "raw":line}),
-                    at as i64,
+                    &serde_json::json!({"type":"unparsed", "raw":line.trim_end_matches('\n')}),
+                    consumed as i64,
                 ),
             }
         }
-        at = end + 1;
-        consumed = at;
+        consumed += read as u64;
     }
-    Ok(consumed as u64)
+    Ok(consumed)
+}
+
+/// Locate a bounded JSONL page by seeking backward to a complete record boundary. A single
+/// oversized record may exceed the window; the caller must still be able to page past it.
+pub fn jsonl_page_start(path: &Path, before: u64, bytes: u64) -> Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let end = before.min(file.metadata()?.len());
+    let mut start = end.saturating_sub(bytes);
+    loop {
+        if start == 0 {
+            return Ok(0);
+        }
+        file.seek(SeekFrom::Start(start - 1))?;
+        let mut block = vec![0; (end - start + 1) as usize];
+        file.read_exact(&mut block)?;
+        if let Some(newline) = block.iter().position(|b| *b == b'\n') {
+            let aligned = start + newline as u64;
+            if aligned < end {
+                return Ok(aligned);
+            }
+        }
+        start = start.saturating_sub(bytes);
+    }
+}
+
+/// Select a bounded OpenCode page in the same message table read by its scanner. Timestamp ties
+/// stay together, so the exclusive numeric cursor never skips messages written in one millisecond.
+pub fn opencode_page_bounds(
+    path: &Path,
+    session: &str,
+    before: u64,
+    limit: u64,
+) -> Result<(u64, u64)> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let start: Option<i64> = conn.query_row(
+        "SELECT min(time_created) FROM (SELECT time_created FROM message WHERE session_id=?1
+         AND time_created < ?2 ORDER BY time_created DESC LIMIT ?3)",
+        rusqlite::params![
+            session,
+            before.min(i64::MAX as u64) as i64,
+            limit.min(i64::MAX as u64) as i64
+        ],
+        |r| r.get(0),
+    )?;
+    let start = start.unwrap_or(0).max(0) as u64;
+    let older: i64 = conn.query_row(
+        "SELECT count(*) FROM message WHERE session_id=?1 AND time_created < ?2",
+        rusqlite::params![session, start as i64],
+        |r| r.get(0),
+    )?;
+    Ok((start, older.max(0) as u64))
 }
 
 /// Where a Claude Code subagent's transcripts live, one directory below the session file.
@@ -187,7 +248,7 @@ pub fn scan_claude_transcript_with_options(
     let mut transcript = options
         .collect_transcript
         .then(super::transcript::Mapper::default);
-    let consumed = for_each_line(path, from_offset, |v, offset| {
+    let consumed = for_each_line_until(path, from_offset, options.before_offset, |v, offset| {
         if let Some(transcript) = &mut transcript {
             transcript.claude(v, offset);
         }
@@ -400,104 +461,105 @@ pub fn scan_codex_rollout_with_options(
     let mut transcript = options
         .collect_transcript
         .then(super::transcript::Mapper::default);
-    let next_offset = for_each_line(path, from_offset, |v, offset| {
-        if let Some(transcript) = &mut transcript {
-            transcript.codex(v, offset);
-        }
-        let payload = v.get("payload");
-        let at = parse_at(v, "timestamp");
-        match v.get("type").and_then(Value::as_str).unwrap_or("") {
-            "session_meta" => {
-                if let Some(p) = payload {
-                    session_id = str_at(p, "session_id").or_else(|| str_at(p, "id"));
-                    first_at = first_at.or(at);
-                    cwd = str_at(p, "cwd");
-                    if meta_model.is_none() {
-                        meta_model = str_at(p, "model");
+    let next_offset =
+        for_each_line_until(path, from_offset, options.before_offset, |v, offset| {
+            if let Some(transcript) = &mut transcript {
+                transcript.codex(v, offset);
+            }
+            let payload = v.get("payload");
+            let at = parse_at(v, "timestamp");
+            match v.get("type").and_then(Value::as_str).unwrap_or("") {
+                "session_meta" => {
+                    if let Some(p) = payload {
+                        session_id = str_at(p, "session_id").or_else(|| str_at(p, "id"));
+                        first_at = first_at.or(at);
+                        cwd = str_at(p, "cwd");
+                        if meta_model.is_none() {
+                            meta_model = str_at(p, "model");
+                        }
                     }
                 }
-            }
-            "turn_context" => {
-                if let Some(p) = payload {
-                    if let Some(m) = p.get("model").and_then(Value::as_str) {
-                        model = m.to_string();
-                        // The first real model this scan finds backfills any token_count rows
-                        // already queued from before the session's first turn_context.
-                        for idx in pending_model_backfill.drain(..) {
-                            events[idx].model = model.clone();
+                "turn_context" => {
+                    if let Some(p) = payload {
+                        if let Some(m) = p.get("model").and_then(Value::as_str) {
+                            model = m.to_string();
+                            // The first real model this scan finds backfills any token_count rows
+                            // already queued from before the session's first turn_context.
+                            for idx in pending_model_backfill.drain(..) {
+                                events[idx].model = model.clone();
+                            }
                         }
-                    }
-                    if let Some(c) = str_at(p, "cwd") {
-                        cwd = Some(c);
+                        if let Some(c) = str_at(p, "cwd") {
+                            cwd = Some(c);
+                        }
                     }
                 }
-            }
-            "event_msg" => {
-                let p = match payload {
-                    Some(p) => p,
-                    None => return,
-                };
-                match p.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "user_message" => {
-                        if let Some(text) = p.get("message").and_then(Value::as_str) {
-                            pick.offer_user(text);
+                "event_msg" => {
+                    let p = match payload {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    match p.get("type").and_then(Value::as_str).unwrap_or("") {
+                        "user_message" => {
+                            if let Some(text) = p.get("message").and_then(Value::as_str) {
+                                pick.offer_user(text);
+                            }
                         }
+                        "agent_message" => {
+                            if let Some(text) = p.get("message").and_then(Value::as_str) {
+                                pick.offer_assistant(text);
+                            }
+                        }
+                        "token_count" => {
+                            let last = match p.get("info").and_then(|i| i.get("last_token_usage")) {
+                                Some(l) => l,
+                                None => return,
+                            };
+                            let at = match at {
+                                Some(at) => at,
+                                None => return,
+                            };
+                            let cached = u64_at(Some(last), "cached_input_tokens");
+                            let input = u64_at(Some(last), "input_tokens").saturating_sub(cached);
+                            let output = u64_at(Some(last), "output_tokens");
+                            if input == 0 && output == 0 && cached == 0 {
+                                return;
+                            }
+                            turns += 1;
+                            if first_at.is_none() {
+                                first_at = Some(at);
+                            }
+                            last_at = Some(at);
+                            let index = events.len();
+                            events.push(ScannedEvent {
+                                at,
+                                agent_kind: "codex".to_string(),
+                                subagent: false,
+                                model: model.clone(),
+                                account: "codex".to_string(),
+                                session_id: session_id.clone(),
+                                cwd: cwd.clone(),
+                                tokens: TokenCounts {
+                                    input,
+                                    output,
+                                    cache_read: cached,
+                                    cache_write: u64_at(Some(last), "cache_write_input_tokens"),
+                                },
+                                thinking_tokens: u64_at(Some(last), "reasoning_output_tokens"),
+                                estimated: false,
+                                source_path: source_path.clone(),
+                                source_offset: offset,
+                            });
+                            if model.is_empty() {
+                                pending_model_backfill.push(index);
+                            }
+                        }
+                        _ => {}
                     }
-                    "agent_message" => {
-                        if let Some(text) = p.get("message").and_then(Value::as_str) {
-                            pick.offer_assistant(text);
-                        }
-                    }
-                    "token_count" => {
-                        let last = match p.get("info").and_then(|i| i.get("last_token_usage")) {
-                            Some(l) => l,
-                            None => return,
-                        };
-                        let at = match at {
-                            Some(at) => at,
-                            None => return,
-                        };
-                        let cached = u64_at(Some(last), "cached_input_tokens");
-                        let input = u64_at(Some(last), "input_tokens").saturating_sub(cached);
-                        let output = u64_at(Some(last), "output_tokens");
-                        if input == 0 && output == 0 && cached == 0 {
-                            return;
-                        }
-                        turns += 1;
-                        if first_at.is_none() {
-                            first_at = Some(at);
-                        }
-                        last_at = Some(at);
-                        let index = events.len();
-                        events.push(ScannedEvent {
-                            at,
-                            agent_kind: "codex".to_string(),
-                            subagent: false,
-                            model: model.clone(),
-                            account: "codex".to_string(),
-                            session_id: session_id.clone(),
-                            cwd: cwd.clone(),
-                            tokens: TokenCounts {
-                                input,
-                                output,
-                                cache_read: cached,
-                                cache_write: u64_at(Some(last), "cache_write_input_tokens"),
-                            },
-                            thinking_tokens: u64_at(Some(last), "reasoning_output_tokens"),
-                            estimated: false,
-                            source_path: source_path.clone(),
-                            source_offset: offset,
-                        });
-                        if model.is_empty() {
-                            pending_model_backfill.push(index);
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
-            _ => {}
-        }
-    })?;
+        })?;
 
     // No turn_context ever surfaced a model in this scan: fall back to the session_meta model
     // when the payload carries one, or an explicit placeholder, so nothing lands blank.
@@ -543,6 +605,16 @@ pub fn scan_antigravity_transcript(
     model: &str,
     cwd: Option<&str>,
 ) -> Result<SourceScan> {
+    scan_antigravity_transcript_with_options(path, from_offset, model, cwd, ScanOptions::default())
+}
+
+pub fn scan_antigravity_transcript_with_options(
+    path: &Path,
+    from_offset: u64,
+    model: &str,
+    cwd: Option<&str>,
+    options: ScanOptions,
+) -> Result<SourceScan> {
     let source_path = path.to_string_lossy().to_string();
     let session_id = path
         .parent()
@@ -557,58 +629,65 @@ pub fn scan_antigravity_transcript(
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut last_at: Option<DateTime<Utc>> = None;
 
-    let next_offset = for_each_line(path, from_offset, |v, offset| {
-        let at = match parse_at(v, "created_at") {
-            Some(at) => at,
-            None => return,
-        };
-        let content = v.get("content").and_then(Value::as_str).unwrap_or("");
-        let thinking = v.get("thinking").and_then(Value::as_str).unwrap_or("");
-        let tools = v
-            .get("tool_calls")
-            .map(|t| serde_json::to_string(t).unwrap_or_default())
-            .unwrap_or_default();
-        if let Some(list) = v.get("tool_calls").and_then(Value::as_array) {
-            tool_calls += list.len() as u32;
-        }
-        let from_model = v.get("source").and_then(Value::as_str) == Some("MODEL");
-        let chars = (content.len() + thinking.len() + tools.len()) as u64;
-        if chars == 0 {
-            return;
-        }
-        let estimate = chars / CHARS_PER_TOKEN;
-        if from_model {
-            pick.offer_assistant(content);
-        } else {
-            pick.offer_user(content);
-        }
-        if from_model {
-            turns += 1;
-        }
-        if first_at.is_none() {
-            first_at = Some(at);
-        }
-        last_at = Some(at);
-        events.push(ScannedEvent {
-            at,
-            agent_kind: "antigravity".to_string(),
-            model: model.to_string(),
-            account: "antigravity".to_string(),
-            session_id: session_id.clone(),
-            cwd: cwd.map(str::to_string),
-            tokens: TokenCounts {
-                input: if from_model { 0 } else { estimate },
-                output: if from_model { estimate } else { 0 },
-                cache_read: 0,
-                cache_write: 0,
-            },
-            thinking_tokens: thinking.len() as u64 / CHARS_PER_TOKEN,
-            estimated: true,
-            subagent: false,
-            source_path: source_path.clone(),
-            source_offset: offset,
-        });
-    })?;
+    let mut transcript = options
+        .collect_transcript
+        .then(super::transcript::Mapper::default);
+    let next_offset =
+        for_each_line_until(path, from_offset, options.before_offset, |v, offset| {
+            if let Some(mapper) = &mut transcript {
+                mapper.antigravity(v, offset, model);
+            }
+            let at = match parse_at(v, "created_at") {
+                Some(at) => at,
+                None => return,
+            };
+            let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+            let thinking = v.get("thinking").and_then(Value::as_str).unwrap_or("");
+            let tools = v
+                .get("tool_calls")
+                .map(|t| serde_json::to_string(t).unwrap_or_default())
+                .unwrap_or_default();
+            if let Some(list) = v.get("tool_calls").and_then(Value::as_array) {
+                tool_calls += list.len() as u32;
+            }
+            let from_model = v.get("source").and_then(Value::as_str) == Some("MODEL");
+            let chars = (content.len() + thinking.len() + tools.len()) as u64;
+            if chars == 0 {
+                return;
+            }
+            let estimate = chars / CHARS_PER_TOKEN;
+            if from_model {
+                pick.offer_assistant(content);
+            } else {
+                pick.offer_user(content);
+            }
+            if from_model {
+                turns += 1;
+            }
+            if first_at.is_none() {
+                first_at = Some(at);
+            }
+            last_at = Some(at);
+            events.push(ScannedEvent {
+                at,
+                agent_kind: "antigravity".to_string(),
+                model: model.to_string(),
+                account: "antigravity".to_string(),
+                session_id: session_id.clone(),
+                cwd: cwd.map(str::to_string),
+                tokens: TokenCounts {
+                    input: if from_model { 0 } else { estimate },
+                    output: if from_model { estimate } else { 0 },
+                    cache_read: 0,
+                    cache_write: 0,
+                },
+                thinking_tokens: thinking.len() as u64 / CHARS_PER_TOKEN,
+                estimated: true,
+                subagent: false,
+                source_path: source_path.clone(),
+                source_offset: offset,
+            });
+        })?;
 
     let (headline, headline_raw) = pick.resolve();
     let sessions = session_id
@@ -628,7 +707,7 @@ pub fn scan_antigravity_transcript(
         .into_iter()
         .collect();
     Ok(SourceScan {
-        transcript: Vec::new(),
+        transcript: transcript.map(|m| m.rows).unwrap_or_default(),
         events,
         sessions,
         next_offset,
@@ -638,45 +717,83 @@ pub fn scan_antigravity_transcript(
 /// Read OpenCode's SQLite store for assistant messages created after `after_ms`, a millisecond
 /// epoch watermark that doubles as this source's ingest offset.
 pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
+    scan_opencode_db_with_options(path, after_ms, None, ScanOptions::default())
+}
+
+pub fn scan_opencode_db_with_options(
+    path: &Path,
+    after_ms: u64,
+    session: Option<&str>,
+    options: ScanOptions,
+) -> Result<SourceScan> {
     use rusqlite::OpenFlags;
     let source_path = path.to_string_lossy().to_string();
     let conn = rusqlite::Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    let mut stmt = conn.prepare(
-        "SELECT m.time_created, m.data, m.session_id, s.directory, s.title
+    // A direct equality lets SQLite use its session/time index for bounded conversation reads.
+    let session_filter = if session.is_some() {
+        "m.session_id = ?2"
+    } else {
+        "?2 IS NULL"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.time_created, m.data, m.session_id, s.directory, s.title, m.id
          FROM message m LEFT JOIN session s ON s.id = m.session_id
-         WHERE m.time_created > ?1
-         ORDER BY m.time_created ASC",
+         WHERE m.time_created > ?1 AND {session_filter} AND m.time_created < ?3
+         ORDER BY m.time_created ASC, m.id ASC"
+    ))?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            after_ms as i64,
+            session,
+            options.before_offset.unwrap_or(i64::MAX as u64) as i64
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        },
     )?;
-    let rows = stmt.query_map([after_ms as i64], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
 
     let mut events = Vec::new();
     let mut sessions: std::collections::BTreeMap<String, ScannedSession> = Default::default();
     let mut watermark = after_ms;
+    let mut transcript = options
+        .collect_transcript
+        .then(super::transcript::Mapper::default);
+    let mut parts =
+        if options.collect_transcript {
+            Some(conn.prepare(
+                "SELECT id, data FROM part WHERE message_id = ?1 ORDER BY time_created, id",
+            )?)
+        } else {
+            None
+        };
     for row in rows {
-        let (created_ms, data, session_id, directory, title) = row?;
+        let (created_ms, data, session_id, directory, title, message_id) = row?;
         watermark = watermark.max(created_ms.max(0) as u64);
         let v: Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if v.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
+        if let (Some(mapper), Some(parts)) = (&mut transcript, &mut parts) {
+            let blocks = parts.query_map([&message_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for block in blocks {
+                let (id, raw) = block?;
+                if let Ok(part) = serde_json::from_str::<Value>(&raw) {
+                    mapper.opencode(&v, &part, &id, created_ms);
+                }
+            }
         }
-        let tokens = match v.get("tokens") {
-            Some(t) => t,
-            None => continue,
-        };
         let at = match Utc.timestamp_millis_opt(created_ms).single() {
             Some(at) => at,
             None => continue,
@@ -703,9 +820,16 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
                     first_at: Some(at),
                     last_at: Some(at),
                 });
-            s.turns += 1;
+            s.turns += u32::from(v["role"] == "assistant");
             s.last_at = Some(at);
         }
+        if v.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let tokens = match v.get("tokens") {
+            Some(t) => t,
+            None => continue,
+        };
         let cache = tokens.get("cache");
         events.push(ScannedEvent {
             at,
@@ -732,7 +856,7 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
         });
     }
     Ok(SourceScan {
-        transcript: Vec::new(),
+        transcript: transcript.map(|m| m.rows).unwrap_or_default(),
         events,
         sessions: sessions.into_values().collect(),
         next_offset: watermark,
@@ -828,7 +952,7 @@ fn is_image_dimension_note(note: &str) -> bool {
 
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
-pub(super) fn strip_injected_blocks(raw: &str) -> String {
+pub fn strip_injected_blocks(raw: &str) -> String {
     let mut text = raw.to_string();
     loop {
         let mut cut: Option<(usize, usize)> = None;
@@ -1548,6 +1672,7 @@ mod tests {
             for offset in offsets {
                 let options = ScanOptions {
                     collect_transcript: true,
+                    before_offset: None,
                 };
                 let (ledger, mut conversation) = if claude {
                     (
