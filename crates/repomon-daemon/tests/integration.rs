@@ -82,6 +82,74 @@ async fn call(
 }
 
 #[tokio::test]
+async fn config_set_status_rows_persists_partial_map_and_rejects_unknown_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let fixture = common::Fixture::with_paths(
+        Store::open_in_memory().unwrap(),
+        isolated_config(dir.path()),
+        None,
+        Some(config_path.clone()),
+        None,
+    );
+    let sock = dir.path().join("status.sock");
+    let server = {
+        let ctx = fixture.ctx.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move { serve(ctx, &sock).await })
+    };
+    let mut stream = connect_retry(&sock).await;
+    let initial = call(&mut stream, 1, "config.get", None).await;
+    assert_eq!(initial.result.unwrap()["agent_status_rows"], json!({}));
+    let rows = json!({"codex": ["turn_finished", "turn_cost"], "custom": []});
+    let set = call(
+        &mut stream,
+        2,
+        "config.set",
+        Some(json!({"agent_status_rows": rows})),
+    )
+    .await;
+    assert!(set.error.is_none(), "{:?}", set.error);
+    let get = call(&mut stream, 3, "config.get", None).await;
+    assert_eq!(get.result.unwrap()["agent_status_rows"], rows);
+    let saved = Config::load_from(&config_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved.agent_status_rows).unwrap(),
+        rows
+    );
+    assert!(repomon_core::config::agent_status_row_visible(
+        &saved,
+        "claude-code",
+        "rate_limit"
+    ));
+    assert!(!repomon_core::config::agent_status_row_visible(
+        &saved,
+        "claude-code",
+        "turn_started"
+    ));
+    let invalid = call(
+        &mut stream,
+        4,
+        "config.set",
+        Some(json!({
+            "agent_status_rows": {"codex": ["invalid"]}, "agent_views": {"codex": "conversation"}
+        })),
+    )
+    .await;
+    assert!(invalid.error.is_some());
+    let get = call(&mut stream, 5, "config.get", None).await;
+    let value = get.result.unwrap();
+    assert_eq!(value["agent_status_rows"], rows);
+    assert_eq!(value["agent_views"], json!({}));
+    let saved = Config::load_from(&config_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved.agent_status_rows).unwrap(),
+        rows
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn config_set_persists_every_sound_preference() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");

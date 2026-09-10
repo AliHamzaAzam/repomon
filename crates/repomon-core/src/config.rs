@@ -61,6 +61,10 @@ pub struct Config {
     /// Per-kind conversation defaults; an absent kind uses the terminal.
     #[serde(default)]
     pub agent_views: HashMap<String, String>,
+    /// Per-kind visible conversation status kinds. An absent kind shows only rate_limit and
+    /// usage_limit; an explicit empty list hides all status rows.
+    #[serde(default)]
+    pub agent_status_rows: HashMap<String, Vec<String>>,
     /// Auto-continue managed agents that pause on a usage limit (resume at the reset time).
     /// On by default; a per-lane key (`C`) can disable it for a single lane this session.
     pub auto_continue: bool,
@@ -186,6 +190,7 @@ impl Default for Config {
             agents: HashMap::new(),
             agent_icons: HashMap::new(),
             agent_views: HashMap::new(),
+            agent_status_rows: HashMap::new(),
             auto_continue: true,
             auto_continue_message: "continue".to_string(),
             spawn_prompt: true,
@@ -648,6 +653,14 @@ fn default_socket_path() -> PathBuf {
 #[cfg(not(windows))]
 fn default_socket_path() -> PathBuf {
     runtime_dir().join("repomon.sock")
+}
+
+/// An absent kind shows actionable limits only; a present list is the complete selection.
+pub fn agent_status_row_visible(config: &Config, kind: &str, status_kind: &str) -> bool {
+    config.agent_status_rows.get(kind).map_or_else(
+        || matches!(status_kind, "rate_limit" | "usage_limit"),
+        |rows| rows.iter().any(|row| row == status_kind),
+    )
 }
 
 /// Lane override, then kind preference, then the terminal. Invalid persisted values fall through.
@@ -1203,6 +1216,51 @@ output_per_mtok = 7.5
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+    #[test]
+    fn status_rows_absent_defaults_and_partial_map_round_trip() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.agent_status_rows.is_empty());
+        let cfg: Config = toml::from_str(
+            r#"[agent_status_rows]
+codex = ["turn_finished", "turn_cost"]
+custom = []
+"#,
+        )
+        .unwrap();
+        let round: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        let json_round: Config =
+            serde_json::from_value(serde_json::to_value(&round).unwrap()).unwrap();
+        assert_eq!(round.agent_status_rows, cfg.agent_status_rows);
+        assert_eq!(json_round.agent_status_rows, cfg.agent_status_rows);
+        for status in [
+            "turn_started",
+            "turn_finished",
+            "turn_cost",
+            "rate_limit",
+            "usage_limit",
+        ] {
+            let actionable = matches!(status, "rate_limit" | "usage_limit");
+            assert_eq!(
+                agent_status_row_visible(&empty, "codex", status),
+                actionable
+            );
+            assert_eq!(
+                agent_status_row_visible(&round, "claude-code", status),
+                actionable
+            );
+            assert_eq!(
+                agent_status_row_visible(&round, "codex", status),
+                matches!(status, "turn_finished" | "turn_cost")
+            );
+            assert!(!agent_status_row_visible(&round, "custom", status));
+        }
+        assert!(!agent_status_row_visible(
+            &round,
+            "claude-code",
+            "future_status"
+        ));
+    }
+
     #[test]
     fn partial_defaults_round_trip_and_resolution() {
         let cfg: Config = toml::from_str(

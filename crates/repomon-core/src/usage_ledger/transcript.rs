@@ -1,4 +1,5 @@
 //! Maps records already decoded by the ledger scanners into the conversation contract.
+use super::scan::strip_injected_blocks;
 use crate::model::{ToolCallStatus, TranscriptItem};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -138,24 +139,29 @@ impl Mapper {
         if matches!(kind, "user" | "assistant") {
             let content = &v["message"]["content"];
             if let Some(s) = content.as_str() {
-                let mut item = TranscriptItem::new(kind, s, at(v));
-                if kind == "assistant" {
-                    item.model = self.model.clone();
-                }
-                self.push(offset, item);
+                self.message(offset, v, kind, s.into(), None);
             } else if let Some(blocks) = content.as_array() {
+                // Adjacent user text blocks form one prose segment. Clean them together so a
+                // wrapper split across blocks cannot leak its body as another user item.
+                let mut user_text = Vec::new();
                 for block in blocks {
+                    if kind == "user" && block["type"] == "text" {
+                        user_text.push(block["text"].as_str().unwrap_or(""));
+                        continue;
+                    }
+                    if !user_text.is_empty() {
+                        self.message(offset, v, kind, user_text.join("\n"), None);
+                        user_text.clear();
+                    }
                     match block["type"].as_str().unwrap_or("") {
                         "text" => {
-                            let mut item = TranscriptItem::new(
+                            self.message(
+                                offset,
+                                v,
                                 kind,
-                                block["text"].as_str().unwrap_or(""),
-                                at(v),
+                                block["text"].as_str().unwrap_or("").into(),
+                                None,
                             );
-                            if kind == "assistant" {
-                                item.model = self.model.clone();
-                            }
-                            self.push(offset, item);
                         }
                         "tool_use" => self.tool(offset, v, block),
                         "tool_result" => self.result(
@@ -171,6 +177,9 @@ impl Mapper {
                             TranscriptItem::new("terminal_block", block.to_string(), at(v)),
                         ),
                     }
+                }
+                if !user_text.is_empty() {
+                    self.message(offset, v, kind, user_text.join("\n"), None);
                 }
             }
             if v["message"]["stop_reason"] == "end_turn" {
@@ -208,7 +217,7 @@ impl Mapper {
                 "message" => {
                     let role = p["role"].as_str().unwrap_or("");
                     if matches!(role, "user" | "assistant") {
-                        self.message(offset, v, role, text(&p["content"]), "response_item");
+                        self.message(offset, v, role, text(&p["content"]), Some("response_item"));
                     }
                 }
                 "function_call" | "custom_tool_call" => self.tool(offset, v, p),
@@ -235,10 +244,16 @@ impl Mapper {
                 ),
             },
             "event_msg" => match p["type"].as_str().unwrap_or("") {
-                "user_message" => self.message(offset, v, "user", text(&p["message"]), "event_msg"),
-                "agent_message" => {
-                    self.message(offset, v, "assistant", text(&p["message"]), "event_msg")
+                "user_message" => {
+                    self.message(offset, v, "user", text(&p["message"]), Some("event_msg"))
                 }
+                "agent_message" => self.message(
+                    offset,
+                    v,
+                    "assistant",
+                    text(&p["message"]),
+                    Some("event_msg"),
+                ),
                 "task_started" => {
                     self.messages.clear();
                     self.status(offset, v, "turn_started", "Turn started");
@@ -252,13 +267,33 @@ impl Mapper {
             _ => {}
         }
     }
-    fn message(&mut self, offset: i64, v: &Value, role: &str, value: String, source: &str) {
-        let key = format!("{role}:{value}");
-        if self.messages.get(&key).is_some_and(|s| s != source) {
-            self.messages.remove(&key);
-            return;
+    fn message(
+        &mut self,
+        offset: i64,
+        v: &Value,
+        role: &str,
+        mut value: String,
+        source: Option<&str>,
+    ) {
+        if role == "user" {
+            let cleaned = strip_injected_blocks(&value);
+            if cleaned.trim().is_empty() {
+                return;
+            }
+            if cleaned != value {
+                // Keep Markdown whitespace inside the prose; only trim the removed frame edges.
+                value = cleaned.trim().to_string();
+            }
         }
-        self.messages.insert(key, source.into());
+        // Deduplicate provider mirrors after cleaning, including a raw/clean pair of user records.
+        if let Some(source) = source {
+            let key = format!("{role}:{value}");
+            if self.messages.get(&key).is_some_and(|s| s != source) {
+                self.messages.remove(&key);
+                return;
+            }
+            self.messages.insert(key, source.into());
+        }
         let mut item = TranscriptItem::new(role, value, at(v));
         if role == "assistant" {
             item.model = self.model.clone();
@@ -317,7 +352,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            codex
+            !codex
                 .transcript
                 .iter()
                 .any(|r| r.item.kind.as_deref() == Some("user"))
@@ -332,6 +367,101 @@ mod tests {
                 .any(|r| r.item.status_kind.as_deref() == Some("turn_finished"))
         );
     }
+    #[test]
+    fn injected_user_fixtures_are_cleaned_through_both_production_scanners() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("fixtures/injected_user_frames_v0.json")).unwrap();
+        for case in fixtures["cases"].as_array().unwrap() {
+            let raw = case["text"].as_str().unwrap();
+            let expected = case["expected"].as_str();
+            // Exercise Claude string content, a single text block, and wrappers split across
+            // adjacent text blocks, plus both Codex copies (raw then cleaned) of the same turn.
+            for layout in 0..4 {
+                let mut records = Vec::new();
+                if layout < 3 {
+                    let content = match layout {
+                        0 => serde_json::json!(raw),
+                        1 => serde_json::json!([{"type":"text", "text":raw}]),
+                        _ => serde_json::json!(
+                            raw.split('\n')
+                                .map(|part| { serde_json::json!({"type":"text", "text":part}) })
+                                .collect::<Vec<_>>()
+                        ),
+                    };
+                    records.push(serde_json::json!({"type":"user","message":{"content":content}}));
+                } else {
+                    records.push(serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":raw}}));
+                    records.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":expected.unwrap_or(raw)}]}}));
+                }
+                let file = tempfile::NamedTempFile::new().unwrap();
+                let jsonl = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+                std::fs::write(file.path(), jsonl).unwrap();
+                let scan = if layout < 3 {
+                    scan_claude_transcript_with_options(file.path(), 0, None, CONVERSATION).unwrap()
+                } else {
+                    scan_codex_rollout_with_options(file.path(), 0, CONVERSATION).unwrap()
+                };
+                let users: Vec<_> = scan
+                    .transcript
+                    .iter()
+                    .filter(|r| r.item.kind.as_deref() == Some("user"))
+                    .collect();
+                assert_eq!(
+                    users.len(),
+                    usize::from(expected.is_some()),
+                    "{} layout {layout}: {:?}",
+                    case["name"],
+                    scan.transcript
+                );
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        users[0].item.text, expected,
+                        "{} layout {layout}",
+                        case["name"]
+                    );
+                }
+                // No hidden replacement terminal row should render an injection-only record.
+                assert_eq!(
+                    scan.transcript.len(),
+                    users.len(),
+                    "{} layout {layout}",
+                    case["name"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assistant_markup_and_structured_tools_survive_user_frame_cleaning() {
+        let raw = "<output-file>/private/tmp/result</output-file>";
+        let mut mapper = Mapper::default();
+        mapper.claude(&serde_json::json!({"type":"assistant","message":{"model":"claude-sonnet-5","content":[
+            {"type":"text","text":raw},
+            {"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"/private/tmp/result"}}
+        ]}}), 0);
+        mapper.claude(
+            &serde_json::json!({"type":"user","message":{"content":[
+                {"type":"text","text":"<task-notification>done</task-notification>"},
+                {"type":"tool_result","tool_use_id":"read-1","content":raw},
+                {"type":"text","text":"Please fix the preview."},
+                {"type":"text","text":"[Image: source: /private/tmp/preview.png]"}
+            ]}}),
+            10,
+        );
+        assert_eq!(mapper.rows.len(), 3);
+        assert_eq!(mapper.rows[0].item.text, raw);
+        assert_eq!(
+            mapper.rows[0].item.model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(mapper.rows[1].item.result_summary.as_deref(), Some(raw));
+        assert_eq!(mapper.rows[1].item.status, Some(ToolCallStatus::Ok));
+        assert_eq!(mapper.rows[2].item.text, "Please fix the preview.");
+        let mut codex = Mapper::default();
+        codex.codex(&serde_json::json!({"type":"event_msg","payload":{"type":"agent_message","message":raw}}), 0);
+        assert_eq!(codex.rows[0].item.text, raw);
+    }
+
     #[test]
     fn tools_resolve_diffs_and_codex_message_mirrors_are_not_duplicated() {
         let mut mapper = Mapper::default();

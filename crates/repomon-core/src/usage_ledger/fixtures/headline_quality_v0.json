@@ -1,0 +1,386 @@
+[
+  {
+    "kind": "live session review",
+    "text": "Reviewed Codex session id: 01a07869-e392-7601-8020-11d9b1a66816",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "live session review",
+    "text": "Reviewed Codex session id: 01a02e77-3f96-76f3-ae8a-9ad63cde5576",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "live session review",
+    "text": "Reviewed Codex session id: 01a08a8c-c41f-7c42-a50d-9037db875036",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "live session review",
+    "text": "Reviewed Codex session id: 01a08a92-2f29-7c31-b9b9-29e073599a24",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "live mail frame",
+    "text": "[REPOMAIL id=729f61afaff89056f8297aa087aa8f75 from=lane-81/4...",
+    "headline": null,
+    "rejection": "mail_frame"
+  },
+  {
+    "kind": "live continuation",
+    "text": "Effect logic is correct: no fire on mount, fires once on the true-to-false...",
+    "headline": null,
+    "rejection": "correctness_commentary"
+  },
+  {
+    "kind": "live project opening",
+    "text": "I am working on the Avenith website found in the Avenith folder in this...",
+    "headline": "I am working on the Avenith website found in the Avenith folder in this...",
+    "rejection": null
+  },
+  {
+    "kind": "controller task pointer",
+    "text": "Read /Users/azaleas/repomind/plans/active/2026-09-10-c1-design-completion.md in full and do PART A.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "controller kickoff",
+    "text": "Phase 2A of brief C1 in repomon: the DAEMON half of the conversation view, from Repomind (lane-48355624/1). Your full task is the file /Users/azaleas/repomind/plans/active/2026-09-10-c1-phase2-daemon-task.md. Read it completely, then follow it exactly.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "controller generic pointer",
+    "text": "Please follow the task file in plans/active/assignment.md and report when done.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "controller assignment",
+    "text": "You own crates/ and the generated bindings; a worker owns components in parallel.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "mail variant",
+    "text": "[REPOMAIL id=abcdef1234567890 from=lane-902/3] Fix the checkout bug. [END REPOMAIL]",
+    "headline": null,
+    "rejection": "mail_frame"
+  },
+  {
+    "kind": "mail multiline",
+    "text": "[REPOMAIL id=abcdef1234567890 from=lane-902/3]\nImplement streaming previews\n[END REPOMAIL]",
+    "headline": null,
+    "rejection": "mail_frame"
+  },
+  {
+    "kind": "identifier dominance",
+    "text": "Review 7E294AAF-BA21-416A-8FDB-7734A177B918 for correctness",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "hex session identifier",
+    "text": "Session id: f1e2d3c4b5a697887766554433221100",
+    "headline": null,
+    "rejection": "opaque_identifier"
+  },
+  {
+    "kind": "review boilerplate",
+    "text": "Assess the following agent history and its pending tool invocation.",
+    "headline": null,
+    "rejection": "session_review"
+  },
+  {
+    "kind": "assistant plan",
+    "text": "I will investigate the parser and report back.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "assistant progress",
+    "text": "The tests now pass and the implementation is ready.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "acknowledgment",
+    "text": "That is correct, proceed with the next step.",
+    "headline": null,
+    "rejection": "acknowledgment"
+  },
+  {
+    "kind": "rejected opening followed by request",
+    "text": "The implementation is correct.\nFix the checkout flow.",
+    "headline": null,
+    "rejection": "correctness_commentary"
+  },
+  {
+    "kind": "imperative request",
+    "text": "Fix the checkout flow so discounts apply once.",
+    "headline": "Fix the checkout flow so discounts apply once",
+    "rejection": null
+  },
+  {
+    "kind": "polite request",
+    "text": "Could you please add keyboard navigation to the lane picker?",
+    "headline": "Could you please add keyboard navigation to the lane picker",
+    "rejection": null
+  },
+  {
+    "kind": "task from controller",
+    "text": "Implement streaming transcripts for Claude and Codex.",
+    "headline": "Implement streaming transcripts for Claude and Codex",
+    "rejection": null
+  },
+  {
+    "kind": "session terminology is work",
+    "text": "Fix session ID parsing in the importer.",
+    "headline": "Fix session ID parsing in the importer",
+    "rejection": null
+  },
+  {
+    "kind": "review actual code",
+    "text": "Review the checkout retry logic for duplicate charges.",
+    "headline": "Review the checkout retry logic for duplicate charges",
+    "rejection": null
+  },
+  {
+    "kind": "mail terminology is work",
+    "text": "Fix REPOMAIL framing in the transcript parser.",
+    "headline": "Fix REPOMAIL framing in the transcript parser",
+    "rejection": null
+  },
+  {
+    "kind": "question",
+    "text": "Why does the preview remain blank until the turn ends?",
+    "headline": "Why does the preview remain blank until the turn ends",
+    "rejection": null
+  },
+  {
+    "kind": "controller implementation pointer",
+    "text": "Implement the task in plans/active/next-step.md exactly as written.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "markdown feature request",
+    "text": "Implement Markdown previews for .md files.",
+    "headline": "Implement Markdown previews for .md files",
+    "rejection": null
+  },
+  {
+    "kind": "indirect controller pointer",
+    "text": "I need you to read the task file in plans/active/work.md before starting.",
+    "headline": null,
+    "rejection": "controller_workflow"
+  },
+  {
+    "kind": "indirect human request",
+    "text": "I want you to fix the checkout discount calculation.",
+    "headline": "I want you to fix the checkout discount calculation",
+    "rejection": null
+  },
+  {
+    "kind": "requested noun phrase",
+    "text": "Portfolio redesign with 3D globe",
+    "headline": "Portfolio redesign with 3D globe",
+    "rejection": null
+  },
+  {
+    "kind": "requested surface title",
+    "text": "Home screen strip board and compose-to-spawn",
+    "headline": "Home screen strip board and compose-to-spawn",
+    "rejection": null
+  },
+  {
+    "kind": "requested problem statement",
+    "text": "The login page is broken after the last deploy",
+    "headline": "The login page is broken after the last deploy",
+    "rejection": null
+  },
+  {
+    "kind": "requested feature title",
+    "text": "Conversation view design, three phases",
+    "headline": "Conversation view design, three phases",
+    "rejection": null
+  },
+  {
+    "kind": "artifact noun phrase",
+    "text": "CSV export with custom columns",
+    "headline": "CSV export with custom columns",
+    "rejection": null
+  },
+  {
+    "kind": "interaction noun phrase",
+    "text": "Keyboard navigation for the lane picker",
+    "headline": "Keyboard navigation for the lane picker",
+    "rejection": null
+  },
+  {
+    "kind": "document noun phrase",
+    "text": "Invoice PDF layout for long addresses",
+    "headline": "Invoice PDF layout for long addresses",
+    "rejection": null
+  },
+  {
+    "kind": "appearance noun phrase",
+    "text": "Dark mode contrast in the account menu",
+    "headline": "Dark mode contrast in the account menu",
+    "rejection": null
+  },
+  {
+    "kind": "integration noun phrase",
+    "text": "Payment webhook retry policy",
+    "headline": "Payment webhook retry policy",
+    "rejection": null
+  },
+  {
+    "kind": "documentation noun phrase",
+    "text": "Spanish README translation",
+    "headline": "Spanish README translation",
+    "rejection": null
+  },
+  {
+    "kind": "feature noun phrase",
+    "text": "Offline sync conflict resolution",
+    "headline": "Offline sync conflict resolution",
+    "rejection": null
+  },
+  {
+    "kind": "defect statement",
+    "text": "Checkout applies the discount twice",
+    "headline": "Checkout applies the discount twice",
+    "rejection": null
+  },
+  {
+    "kind": "defect statement",
+    "text": "Search results disappear when filters change",
+    "headline": "Search results disappear when filters change",
+    "rejection": null
+  },
+  {
+    "kind": "defect statement",
+    "text": "OAuth callback returns 500 for new accounts",
+    "headline": "OAuth callback returns 500 for new accounts",
+    "rejection": null
+  },
+  {
+    "kind": "defect statement",
+    "text": "Settings changes are lost after restarting",
+    "headline": "Settings changes are lost after restarting",
+    "rejection": null
+  },
+  {
+    "kind": "performance problem",
+    "text": "Repository indexing takes ten minutes on startup",
+    "headline": "Repository indexing takes ten minutes on startup",
+    "rejection": null
+  },
+  {
+    "kind": "mixed success and failure",
+    "text": "Tests pass locally but fail in CI",
+    "headline": "Tests pass locally but fail in CI",
+    "rejection": null
+  },
+  {
+    "kind": "defect statement",
+    "text": "Checkout returns an empty receipt",
+    "headline": "Checkout returns an empty receipt",
+    "rejection": null
+  },
+  {
+    "kind": "unfamiliar feature noun phrase",
+    "text": "Shared shopping lists",
+    "headline": "Shared shopping lists",
+    "rejection": null
+  },
+  {
+    "kind": "two-word artifact title",
+    "text": "CSV export",
+    "headline": "CSV export",
+    "rejection": null
+  },
+  {
+    "kind": "noun phrase used as progress",
+    "text": "Portfolio redesign is complete and ready for review.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "surface used as correctness commentary",
+    "text": "Home screen strip board looks correct.",
+    "headline": null,
+    "rejection": "correctness_commentary"
+  },
+  {
+    "kind": "artifact used as progress",
+    "text": "CSV export tests now pass.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "assistant completion",
+    "text": "I have fixed the login page after the last deploy.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "acknowledgment with feature nouns",
+    "text": "Thanks, the conversation view design looks good.",
+    "headline": null,
+    "rejection": "acknowledgment"
+  },
+  {
+    "kind": "assistant implementation update",
+    "text": "Implemented keyboard navigation for the lane picker.",
+    "headline": null,
+    "rejection": "progress_update"
+  },
+  {
+    "kind": "surface used as correctness commentary",
+    "text": "Settings panel is working as expected.",
+    "headline": null,
+    "rejection": "correctness_commentary"
+  },
+  {
+    "kind": "non-hex session review metadata",
+    "text": "Review of session id: run-20260910-worker-17",
+    "headline": null,
+    "rejection": "session_review"
+  },
+  {
+    "kind": "unscoped continuation",
+    "text": "Continue with that",
+    "headline": null,
+    "rejection": "no_task_description"
+  },
+  {
+    "kind": "unscoped problem",
+    "text": "Something is wrong",
+    "headline": null,
+    "rejection": "no_task_description"
+  },
+  {
+    "kind": "negated problem statement",
+    "text": "The sidebar is not opening after login",
+    "headline": "The sidebar is not opening after login",
+    "rejection": null
+  },
+  {
+    "kind": "negated problem statement",
+    "text": "The login page has no error message",
+    "headline": "The login page has no error message",
+    "rejection": null
+  },
+  {
+    "kind": "review progress without a defect",
+    "text": "No findings in the checkout review.",
+    "headline": null,
+    "rejection": "progress_update"
+  }
+]
