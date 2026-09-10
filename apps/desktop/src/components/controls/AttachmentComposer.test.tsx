@@ -47,3 +47,17 @@ describe("chat attachments", () => {
     expect(screen.getByRole("button", {name:"Attach images or files"})).toBeEnabled();
   });
 });
+
+it("shrinks after deleting text and after a successful send", async () => {
+  render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn().mockResolvedValue(true)} />);
+  const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+  Object.defineProperty(field, "scrollHeight", {get:() => field.value.length > 50 ? 200 : 40});
+  fireEvent.input(field, {target:{value:"long draft ".repeat(20)}});
+  expect(field.style.height).toBe("160px");
+  fireEvent.input(field, {target:{value:"One line"}});
+  expect(field.style.height).toBe("40px");
+  fireEvent.input(field, {target:{value:"long draft ".repeat(20)}});
+  fireEvent.click(screen.getByRole("button", {name:"Send reply"}));
+  await waitFor(() => expect(field).toHaveValue(""));
+  expect(field.style.height).toBe("40px");
+});

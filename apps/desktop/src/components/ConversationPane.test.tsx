@@ -49,8 +49,10 @@ describe("ConversationPane", () => {
     items = [row("ok", "Intact message"), { id:"bad", role:"tools", kind:"unknown-future-kind", text:'{"broken":', at:null }];
     const result = mount();
     await screen.findByText("Intact message");
+    fireEvent.click(screen.getByRole("button", { name:/Unformatted entry/ }));
     expect(result.container.querySelector('pre.conversation-raw')).toHaveTextContent('{"broken":');
     expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByText("entry")).toBeInTheDocument();
   });
   it("shows running and failed tools with keyboard-operable disclosure", async () => {
     items = [{ id:"tool", role:"tools", kind:"tool_call", name:"exec_command", input_summary:"bun run build", status:"running", text:"build starting", at:null }];
@@ -138,4 +140,32 @@ it("groups work by turn and renders the daemon cost text only once inside expand
   expect(document.body.textContent?.match(/\$0\.0511/g)).toHaveLength(1);
   const rows = [...items, {...items[1],id:"next-start"}, {...items[2],id:"next-tool"}].map((item) => ({key:item.id!,item,fallback:false}));
   expect([...groupTurnWork(rows).groups.keys()]).toEqual(["start", "next-start"]);
+});
+
+it("collapses a live pane excerpt beside real history and replaces it in place with the final answer", async () => {
+  const pane = "Merge to main, yes or no?\nCogitated for 10m 39s\n› yes merge it\nauto mode on (shift+tab to cycle)";
+  items = [row("history", "A real conversation"), {id:"live:2",kind:"terminal_block",role:"tools",text:pane,at:null,partial:true}];
+  const result = mount();
+  const button = await screen.findByRole("button", {name:/Terminal excerpt/});
+  expect(button).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText(/Cogitated/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Writing/)).not.toBeInTheDocument();
+  const node = result.container.querySelector('[data-transcript-id="live:2"]');
+  fireEvent.click(button);
+  expect(screen.getByText(/Cogitated/)).toBeInTheDocument();
+  update([row("live:2", "The merge is complete.")]);
+  expect(screen.getByText("The merge is complete.")).toBeInTheDocument();
+  expect(result.container.querySelector('[data-transcript-id="live:2"]')).toBe(node);
+  expect(screen.queryByRole("button", {name:/Terminal excerpt/})).not.toBeInTheDocument();
+  expect(screen.getByText("A real conversation")).toBeInTheDocument();
+});
+it("renders delivered paths as image references and typed file chips for user and assistant", async () => {
+  const text = 'Please check this.\n\nAttached file: "/stable/image.png"\n\nAttached file: "/stable/notes.md"';
+  items = [{id:"u",role:"user",kind:"user",text,at:null},row("a",text)];
+  const result = mount();
+  await screen.findAllByText("[Image #1]");
+  expect(result.container.textContent).not.toContain("/stable/");
+  expect(screen.getAllByText("notes.md")).toHaveLength(2);
+  expect(screen.getAllByText("MD")).toHaveLength(2);
+  expect(result.container.querySelector('[title="/stable/image.png"]')).toBeInTheDocument();
 });

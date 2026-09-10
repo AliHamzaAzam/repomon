@@ -3,7 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon, type TranscriptTarget, type TranscriptUpdate } from "../ipc/rpc";
 
-export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean }
+export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean; paneExcerpt?: boolean }
 const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block"]);
 
 export function transcriptRow(value: unknown, fallbackKey: string): ConversationRow {
@@ -17,7 +17,7 @@ export function transcriptRow(value: unknown, fallbackKey: string): Conversation
     || (raw.partial != null && typeof raw.partial !== "boolean")
     || (raw.status != null && !["running", "ok", "error"].includes(String(raw.status)));
   if (malformed) return { key, fallback: true, item: { role: "tools", kind: "terminal_block", text, at: null } };
-  return { key, fallback: kind === "terminal_block", item: { ...(value as TranscriptItem), text, kind: kind as string } };
+  return { key, fallback: kind === "terminal_block", paneExcerpt: raw.kind === "terminal_block" && (raw.partial === true || key.startsWith("pane:")), item: { ...(value as TranscriptItem), text, kind: kind as string } };
 }
 
 export function mergeTranscript(current: ConversationRow[], incoming: ConversationRow[], removed: string[] = [], prepend = false): ConversationRow[] {

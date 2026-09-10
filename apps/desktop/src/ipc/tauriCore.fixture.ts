@@ -13,7 +13,7 @@ import type { AgentSession, Lane, Repo, TranscriptItem, PendingDialog } from "..
 // The native Channel constructor needs window.__TAURI_INTERNALS__. Screenshot callbacks
 // remain local and use the same onmessage interface; no native bridge is installed.
 export class Channel<T> { onmessage: (message: T) => void = () => undefined; }
-export const convertFileSrc = (path: string) => path;
+export const convertFileSrc = (path: string) => path.startsWith("/fixture/attachments/") ? new URLSearchParams(location.search).get("preview") ?? "/src-tauri/icons/128x128.png" : path;
 
 function repo(id: number, name: string, label: string | null = null): Repo {
   return {
@@ -279,8 +279,11 @@ const ordinary = fleetMode === "ordinary";
 const real = fleetMode === "real" || fleetMode === "raw";
 const surface = query.get("surface");
 const scenario = query.get("case") ?? "rich";
-const conversationLane = lane({ id: 10, repo: scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: ["dull", "attachments", "no-source", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenario === "no-source" ? "opencode" : scenario === "operator" ? "claude-code" : "codex", session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" })] });
-const fixtureRepos = fleetMode === "operator" || scenario === "operator" ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
+const defects = scenario.startsWith("defect-");
+if (defects) localStorage.setItem("repomon.workspace.layout", "focused");
+const defectRepo = repo(505, "repomind");
+const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenario === "no-source" ? "opencode" : scenario === "operator" || defects ? "claude-code" : "codex", session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : [])] });
+const fixtureRepos = defects ? [defectRepo] : fleetMode === "operator" || scenario === "operator" || defects ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
 const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
 // TranscriptItem::new keeps legacy roles user|assistant|tools. conversation.rs emits running
@@ -318,7 +321,14 @@ const operatorItems: TranscriptItem[] = [
 let promptAnswered = false;
 const eventChannels = new Set<{ onmessage: (event: unknown) => void }>();
 const watchTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+const defectPane = "Looking at the two that matter most, at your window width.\n\nBoth surfaces now match the reference patterns.\n\nMerge to main, yes or no?\n\nCogitated for 10m 39s\n› yes merge it\nauto mode on (shift+tab to cycle)";
 function transcriptItems(): TranscriptItem[] {
+  if (defects) return [
+    item("real-user", "user", "Check the installed conversation."),
+    item("real-answer", "assistant", "The conversation has a readable reply. The terminal remains available when you need it.", {model:"claude-opus-5"}),
+    item("live:2", "terminal_block", defectPane, {partial:true,at:null}),
+    ...(scenario === "defect-images" ? [item("echo", "assistant", 'Attached file: "/fixture/attachments/screen.png"\n\nI can see the layout in this image.'), item("attached-user", "user", 'It is doing this sometimes. Please check the input too.\n\nAttached file: "/fixture/attachments/screen.png"\n\nAttached file: "/fixture/attachments/notes.md"\n\nAttached file: "/fixture/attachments/missing.png"')] : []),
+  ];
   if (scenario === "operator") return operatorItems;
   if (scenario === "no-source") return [item("pane:lane-10", "terminal_block", "$ opencode\nWaiting for input.\n› ", { at:null })];
   if (scenario === "dull" || scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
@@ -348,7 +358,7 @@ if (scenario === "diff" || scenario === "notices") {
     else document.querySelector<HTMLButtonElement>('button[aria-label="Transcript detail"]')?.click();
   }, 100);
 }
-if (scenario === "attachments") {
+if (scenario === "attachments" || scenario.startsWith("defect-composer")) {
   const timer = setInterval(() => {
     const field = document.querySelector<HTMLTextAreaElement>('textarea[aria-label^="Reply to"]');
     if (!field) return;
@@ -356,7 +366,20 @@ if (scenario === "attachments") {
     data.items.add(new File(["fixture image bytes"], "layout-reference.png", { type:"image/png" }));
     data.items.add(new File(["fixture review notes"], "review-notes.md", { type:"text/markdown" }));
     field.dispatchEvent(new ClipboardEvent("paste", { bubbles:true, clipboardData:data }));
+    if (scenario.startsWith("defect-composer")) {
+      field.value = scenario === "defect-composer-long" ? "Please check this layout.\n".repeat(12) : "it is doing this sometimes?";
+      field.dispatchEvent(new Event("input", {bubbles:true}));
+      if (scenario === "defect-composer-cleared") {
+        setTimeout(() => document.querySelector<HTMLButtonElement>('[aria-label="Send reply"]')?.click(), 200);
+      }
+    }
     field.focus(); clearInterval(timer);
+  }, 100);
+}
+if (scenario === "defect-excerpt-open" || scenario === "broken") {
+  const timer = setInterval(() => {
+    const button = document.querySelector<HTMLButtonElement>(".conversation-excerpt-toggle");
+    if (button) { button.click(); clearInterval(timer); }
   }, 100);
 }
 if (query.has("notices")) {
@@ -413,7 +436,7 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "lane.headline": (params) => {
     const id = (params as { lane_id:number }).lane_id;
     if (surface === "conversation" && scenario === "operator") return "Theme-swap watch for aventhi-voice";
-    if (fleetMode === "operator" || ordinary || (surface === "conversation" && ["dull", "attachments", "no-source"].includes(scenario))) return null;
+    if (defects || fleetMode === "operator" || ordinary || (surface === "conversation" && ["dull", "attachments", "no-source"].includes(scenario))) return null;
     if (real) return fleetMode === "raw" ? REAL_HEADLINES[id - 200] ?? null : id === 206 ? REAL_HEADLINES[6] : null;
     return HEADLINES[id] ?? null;
   },
@@ -432,6 +455,10 @@ const CONNECTED_STATUS = {
 };
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (cmd === "allow_chat_attachment_preview") {
+    if (String(args?.path).includes("missing")) throw new Error("Attachment unavailable");
+    return args?.path as T;
+  }
   if (cmd === "save_chat_attachment") return `/fixture/attachments/${args?.name}` as T;
   if (cmd === "plugin:dialog|open") return ["/fixture/notes.md"] as T;
   if (cmd === "daemon_subscribe") { eventChannels.add(args?.onEvent as { onmessage: (event: unknown) => void }); return null as T; }

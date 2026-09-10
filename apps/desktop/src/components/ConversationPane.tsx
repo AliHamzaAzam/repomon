@@ -8,6 +8,9 @@ import { IconChevronDown, IconChevronRight } from "./icons";
 import type { TranscriptDetail } from "./controls/TranscriptDetailToggle";
 import AttachmentComposer from "./controls/AttachmentComposer";
 import ConversationContext from "./ConversationContext";
+import AttachmentChip, { isImageAttachment } from "./controls/AttachmentChip";
+import AttachmentPreview from "./controls/AttachmentPreview";
+import { attachmentTextParts } from "./attachmentText";
 import { hasTranscriptSource, statusRowsFor } from "../stores/agentViews";
 import "./conversation.css";
 
@@ -25,17 +28,40 @@ function TextBody(props: { text: string; laneId: number }) {
   const parsed = createMemo(() => { try { return parseMarkdown(props.text); } catch { return null; } });
   return <ErrorBoundary fallback={<pre class="conversation-raw">{props.text}</pre>}><Show when={parsed()} fallback={<pre class="conversation-raw">{props.text}</pre>}>{(value) => <MarkdownRenderer ast={value().ast} laneId={props.laneId} />}</Show></ErrorBoundary>;
 }
-function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string }) {
+function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: () => void }) {
+  const [expanded, setExpanded] = createSignal(false);
+  const parts = createMemo(() => attachmentTextParts(props.row.item.text));
+  const pane = () => props.row.paneExcerpt;
+  const images = createMemo(() => parts().flatMap((part) => "attachment" in part && isImageAttachment(part.attachment) ? [part.attachment] : []));
+  return <Show when={props.row.fallback} fallback={
+    <>
+      <Show when={images().length}><div class="conversation-images"><For each={images()}>{(file, index) => <AttachmentPreview file={file} number={index() + 1} onResize={props.onResize} />}</For></div></Show>
+      <div class="conversation-message rounded"><For each={parts()}>{(part) => "attachment" in part
+        ? isImageAttachment(part.attachment)
+          ? <span class="attachment-reference" title={part.attachment.path}>[Image #{images().indexOf(part.attachment) + 1}]</span>
+          : <AttachmentChip file={part.attachment} />
+        : <Show when={part.text.trim()}><TextBody text={part.text} laneId={props.laneId} /></Show>}</For></div>
+    </>
+  }>
+    <button type="button" class="conversation-excerpt-toggle focus-ring" aria-expanded={expanded()} onClick={() => setExpanded(!expanded())}>
+      {expanded() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+      <span>{pane() ? "Terminal excerpt" : "Unformatted entry"}</span>
+      <span class="text-muted">{props.row.item.text.split("\n").length} {props.row.item.text.includes("\n") ? "lines" : "line"}</span>
+    </button>
+    <Show when={expanded()}><pre class="conversation-raw conversation-excerpt focus-ring" tabindex="0" aria-label={pane() ? "Terminal excerpt content" : "Unformatted entry content"}>{props.row.item.text || "No text in this entry."}</pre></Show>
+  </Show>;
+}
+function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string; onResize?: () => void }) {
   const item = () => props.row.item;
   const [expanded, setExpanded] = createSignal<boolean>();
   const open = () => expanded() ?? props.detail === "verbose";
   const tool = () => item().kind === "tool_call";
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
-  const speaker = () => tool() ? "tool" : item().kind === "terminal_block" ? "terminal" : item().role === "user" ? "you" : item().kind === "status" ? "status" : props.kind === "claude-code" ? "claude" : props.kind;
+  const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().role === "user" ? "you" : item().kind === "status" ? "status" : props.kind === "claude-code" ? "claude" : props.kind;
   return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${item().role === "user" ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
     <div class="conversation-gutter"><Show when={!tool()}><time>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></div>
     <div class="conversation-body rounded">
-      <Show when={tool()} fallback={<Show when={!props.row.fallback && item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><TextBody text={item().text} laneId={props.laneId} /></Show>}>
+      <Show when={tool()} fallback={<Show when={item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><MessageBody row={props.row} laneId={props.laneId} onResize={props.onResize} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
           <span class="shrink-0 text-muted">{open() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</span>
           <span class="font-semibold">{item().name ?? "Tool"}</span><span class="min-w-0 flex-1 truncate text-muted" title={item().input_summary}>{item().input_summary ?? item().result_summary ?? item().text}</span>
@@ -47,7 +73,7 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
           </Show>
         </div></Show>
       </Show>
-      <Show when={item().partial}><span class="conversation-streaming" role="status">Writing<span aria-hidden="true">…</span></span></Show>
+      <Show when={item().partial && !props.row.fallback}><span class="conversation-streaming" role="status">Writing<span aria-hidden="true">…</span></span></Show>
     </div>
   </article>;
 }
@@ -117,13 +143,13 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     const interval = setInterval(() => void poll(), 1000);
     onCleanup(() => { disposed = true; clearInterval(interval); refreshPrompt = undefined; });
   });
-  createEffect(() => {
-    transcript.revision();
+  const followLatest = () => {
     if (props.visible && following()) {
       cancelAnimationFrame(pendingScroll);
       pendingScroll = requestAnimationFrame(() => { if (scroll) scroll.scrollTop = scroll.scrollHeight; });
     }
-  });
+  };
+  createEffect(() => { transcript.revision(); followLatest(); });
   onCleanup(() => cancelAnimationFrame(pendingScroll));
   async function older() {
     const height = scroll.scrollHeight;
@@ -154,12 +180,12 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     <div class="conversation-main">
     <div class="conversation-scroll" ref={scroll} onScroll={() => setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48)}>
       <div class="conversation-ledger">
-        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">This agent has no chat transcript. Live terminal output is shown below.</p></Show>
+        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">This agent has no chat transcript. Expand the terminal excerpt below or open the live terminal.</p></Show>
         <Show when={transcript.nextBefore() !== null}><button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>Load earlier messages</button></Show>
         <Show when={transcript.error()}><p class="text-fault text-xs" role="alert">{transcript.error()} <button class="underline focus-ring" onClick={props.onTerminal}>Open terminal</button></p></Show>
         <Show when={!transcript.rows().length}><div class="conversation-empty"><p>{transcript.loading() ? "Opening conversation…" : "No conversation yet"}</p><p class="text-xs text-muted">{transcript.loading() ? "Connecting to this agent's output." : "Replies will appear here as the agent writes. The terminal is available below."}</p></div></Show>
         <For each={transcript.rows().filter((row) => !work().hidden.has(row.key))}>
-          {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
+          {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} onResize={followLatest} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
         </For>
       </div>
     </div>

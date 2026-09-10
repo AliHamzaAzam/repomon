@@ -55,6 +55,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             connection_status,
             attachments::save_chat_attachment,
+            attachments::allow_chat_attachment_preview,
             assets::allow_worktree_assets,
             boot::daemon_boot_check,
             boot::daemon_diagnostics,

@@ -3,17 +3,20 @@
 Run vite.screenshot.config.ts on localhost:4178 first. Screenshots stay ignored in qa/.
 An optional scenario argument captures just that scenario for iteration.
 """
+import os
 import pathlib
+import urllib.parse
 import subprocess
 import sys
 import tempfile
 import time
 
 root = pathlib.Path(__file__).resolve().parents[3]
-output = root / "qa" / "design-round4"
+output = root / "qa" / os.environ.get("REPOMON_SCREENSHOT_OUTPUT", "design-round4")
 output.mkdir(parents=True, exist_ok=True)
 chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 scenarios = {
+    **{name: f"surface=conversation&case={name}" for name in ("defect-thread", "defect-excerpt-open", "defect-images", "defect-composer", "defect-composer-long", "defect-composer-cleared")},
     "home-operator": "home=1&fleet=operator",
     "home-real": "home=1&fleet=real",
     "home-raw": "home=1&fleet=raw",
@@ -36,6 +39,8 @@ scenarios = {
 if len(sys.argv) > 1:
     scenarios = {name: scenarios[name] for name in sys.argv[1:]}
 for name, query in scenarios.items():
+    if os.environ.get("REPOMON_SCREENSHOT_IMAGE"):
+        query += "&preview=" + urllib.parse.quote("/@fs" + os.environ["REPOMON_SCREENSHOT_IMAGE"], safe="")
     for theme in ("light", "dark"):
         for width, height in ((1440, 900), (1040, 680), (2000, 1000)):
             path = output / f"{name}-{theme}-{width}x{height}.png"

@@ -48,6 +48,31 @@ pub async fn save_chat_attachment(
         .map_err(|e| e.to_string())?
 }
 
+fn preview_file(path: &Path) -> Result<std::path::PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|_| "Attachment unavailable")?;
+    let meta = canonical.metadata().map_err(|_| "Attachment unavailable")?;
+    if !meta.is_file() || meta.len() > MAX_BYTES as u64 {
+        return Err("Attachment preview unavailable".into());
+    }
+    Ok(canonical)
+}
+
+/// Grant only the requested file, never its parent directory. The asset protocol
+/// streams image bytes without embedding filesystem paths into transcript prose.
+#[tauri::command]
+pub async fn allow_chat_attachment_preview(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    let path = tauri::async_runtime::spawn_blocking(move || preview_file(Path::new(&path)))
+        .await
+        .map_err(|_| "Attachment unavailable")??;
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|_| "Attachment unavailable")?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +85,23 @@ mod tests {
         assert_eq!(Path::new(&first).parent(), Some(dir.path()));
         assert!(first.ends_with(".png"));
         assert_eq!(std::fs::read(first).unwrap(), b"image bytes");
+    }
+    #[test]
+    fn preview_requires_an_existing_bounded_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = persist(dir.path(), "image.png", b"image bytes").unwrap();
+        assert_eq!(
+            preview_file(Path::new(&file)).unwrap(),
+            Path::new(&file).canonicalize().unwrap()
+        );
+        assert!(preview_file(dir.path()).is_err());
+        assert!(preview_file(&dir.path().join("missing.png")).is_err());
+        let large = dir.path().join("large.png");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_BYTES as u64 + 1)
+            .unwrap();
+        assert!(preview_file(&large).is_err());
     }
     #[test]
     fn rejects_empty_and_oversized_attachments() {
