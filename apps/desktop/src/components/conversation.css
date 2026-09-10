@@ -2,16 +2,20 @@
 .conversation-layout { height:100%; }
 .conversation-main { height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; }
 .conversation-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; }
-.conversation-ledger { max-width:900px; padding:28px 28px 40px; margin-inline:auto; }
+.conversation-ledger { max-width:900px; padding:28px 28px 40px; margin-inline:auto; user-select:text; }
 .conversation-row { display:grid; grid-template-columns:76px minmax(0,1fr); gap:20px; margin-bottom:28px; }
 .conversation-gutter { display:flex; flex-direction:column; gap:3px; align-content:start; font:10px/1.5 var(--font-mono); color:var(--muted); padding-top:3px; min-width:0; }
 .conversation-gutter span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversation-body { min-width:0; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .conversation-body p:first-child { margin-top:0; }
 .conversation-body p:last-child { margin-bottom:0; }
-.conversation-user .conversation-body { justify-self:end; max-width:90%; display:flex; flex-direction:column; align-items:flex-end; }
+/* A right-aligned turn is laid out as one unit: the gutter moves to the trailing grid column,
+   directly beside the bubble it labels, instead of the leading column meant for left-aligned
+   assistant rows. */
+.conversation-user { grid-template-columns:minmax(0,1fr) 76px; }
+.conversation-user .conversation-body { order:1; justify-self:end; max-width:90%; display:flex; flex-direction:column; align-items:flex-end; }
 .conversation-user .conversation-message { background:var(--raised); padding:12px 16px; }
-.conversation-user .conversation-gutter { align-self:center; }
+.conversation-user .conversation-gutter { order:2; align-self:start; align-items:flex-end; text-align:right; }
 .conversation-body blockquote { padding:12px 16px; background:var(--surface); border:1px solid var(--line); }
 .conversation-excerpt-toggle { display:flex; align-items:center; gap:8px; padding:5px 0; color:var(--muted); font-size:12px; text-align:left; }
 .conversation-excerpt-toggle:hover { color:var(--foreground); }
@@ -31,14 +35,16 @@
 .conversation-source-note { margin:0 0 24px 96px; font-size:12px; color:var(--muted); }
 .conversation-empty { padding:20px 0 48px 96px; }
 .conversation-older { font-size:11px; color:var(--muted); margin:0 0 24px 96px; }
+.conversation-history-boundary { font-size:11px; color:var(--muted); margin:0 0 24px 96px; }
 .conversation-footer { flex:none; background:var(--background); padding:0 28px 20px; }
 .conversation-terminal-line { display:flex; align-items:baseline; gap:16px; max-width:844px; margin-inline:auto; padding:8px 0; }
+.conversation-activity { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:10px/1.5 var(--font-mono); color:var(--muted); }
 .conversation-compact-context { display:flex; align-items:baseline; gap:10px; min-width:0; font-size:10px; color:var(--muted); }
 .conversation-compact-context strong { font-weight:500; color:var(--foreground); }
 .conversation-compact-context > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversation-tail { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; font-size:10px; color:var(--muted); }
 .conversation-tail:hover { color:var(--foreground); }
-.conversation-dialog { display:flex; flex-wrap:wrap; align-items:center; gap:10px 24px; padding:12px 16px; max-height:220px; max-width:844px; margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); }
+.conversation-dialog { display:flex; flex-wrap:wrap; align-items:center; gap:10px 24px; padding:12px 16px; max-height:220px; max-width:844px; margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); user-select:text; }
 .conversation-question { font:12px/1.6 var(--font-sans); margin:0; }
 .conversation-dialog > div:first-child { min-width:180px; }
 .conversation-compose { max-width:844px; margin-inline:auto; }
@@ -76,6 +82,7 @@
 @container (max-width:800px) {
   .conversation-ledger { padding:20px 20px 28px; }
   .conversation-row { grid-template-columns:52px minmax(0,1fr); gap:12px; }
+  .conversation-user { grid-template-columns:minmax(0,1fr) 52px; }
   .conversation-work { margin-left:64px; }
   .conversation-footer { padding:0 20px 16px; }
   .conversation-empty { padding-left:64px; }
@@ -83,8 +90,12 @@
 }
 
 .conversation-images { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin-bottom:8px; }
-.conversation-user .conversation-images { justify-content:flex-end; }
-.attachment-preview { display:inline-block; max-width:100%; }
+/* No bottom margin here: touching the bubble directly below reads as one attached unit sharing
+   its right edge (via the parent's align-items:flex-end), instead of an unrelated card floating
+   above it with daylight in between. */
+.conversation-user .conversation-images { justify-content:flex-end; margin-bottom:0; }
+.attachment-preview { display:inline-block; position:relative; max-width:100%; }
 .attachment-preview img { max-width:min(240px, 100%); max-height:160px; width:auto; height:auto; object-fit:contain; border:1px solid var(--line); }
+.attachment-preview-number { position:absolute; top:4px; left:4px; min-width:16px; padding:1px 4px; text-align:center; font:10px/1.5 var(--font-mono); color:var(--background); background:color-mix(in srgb, var(--foreground) 72%, transparent); }
 .attachment-reference { display:inline-block; font-size:12px; margin:4px 6px 0 0; }
 .attachment-type { flex-shrink:0; font-size:10px; }

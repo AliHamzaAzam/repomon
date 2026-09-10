@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
-import ConversationPane, { dialogSummary, groupTurnWork } from "./ConversationPane";
+import ConversationPane, { activityLabel, dialogSummary, groupTurnWork } from "./ConversationPane";
 vi.mock("../ipc/rpc", () => ({ daemonCall:vi.fn(), subscribeDaemon:vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl:vi.fn() }));
 let emit: (event: DaemonEvent) => void;
@@ -168,4 +168,100 @@ it("renders delivered paths as image references and typed file chips for user an
   expect(screen.getAllByText("notes.md")).toHaveLength(2);
   expect(screen.getAllByText("MD")).toHaveLength(2);
   expect(result.container.querySelector('[title="/stable/image.png"]')).toBeInTheDocument();
+});
+
+describe("session activity, pinned above the composer", () => {
+  it("formats elapsed seconds and compact tokens, and drops parts that are absent", () => {
+    expect(activityLabel({ verb:"Whisking", elapsed_secs:33, tokens:1100 })).toBe("Whisking… (33s, 1.1k tokens)");
+    expect(activityLabel({ verb:"Thinking", elapsed_secs:75, tokens:null })).toBe("Thinking… (1m 15s)");
+    expect(activityLabel({ verb:"Idle" })).toBe("Idle…");
+  });
+  it("renders left of Open live terminal when supplied, and leaves no hole when idle", async () => {
+    const withActivity = render(() => <ConversationPane target={target} kind="codex" visible activity={{verb:"Whisking", elapsed_secs:33, tokens:1100}} onTerminal={vi.fn()} />);
+    await screen.findByText("Whisking… (33s, 1.1k tokens)");
+    expect(screen.getByRole("button", {name:"Expand terminal"})).toBeInTheDocument();
+    withActivity.unmount();
+    const idle = render(() => <ConversationPane target={target} kind="codex" visible activity={null} onTerminal={vi.fn()} />);
+    await screen.findByRole("button", {name:"Expand terminal"});
+    expect(idle.container.querySelector(".conversation-activity")).not.toBeInTheDocument();
+  });
+});
+
+describe("per-kind fallback state", () => {
+  it("reads Hermes' missing transcript as a deliberate, named explanation rather than a failure", async () => {
+    items = [{id:"pane:lane-10", kind:"terminal_block", role:"tools", text:"$ hermes\nWaiting for input.\n› ", at:null}];
+    render(() => <ConversationPane target={target} kind="hermes" visible onTerminal={vi.fn()} />);
+    const note = await screen.findByText(/Hermes Agent/);
+    expect(note.textContent).toContain("sends its output straight to the terminal");
+    expect(note.textContent?.toLowerCase()).not.toContain("broken");
+    expect(await screen.findByRole("button", {name:/Terminal excerpt/})).toBeInTheDocument();
+  });
+  it("no longer shows the no-transcript note for Antigravity, one of the daemon's four scanned kinds", async () => {
+    items = [row("a1", "The scanner now feeds this lane's real transcript.")];
+    render(() => <ConversationPane target={target} kind="antigravity" visible onTerminal={vi.fn()} />);
+    await screen.findByText("The scanner now feeds this lane's real transcript.");
+    expect(screen.queryByText(/sends its output straight to the terminal/)).not.toBeInTheDocument();
+  });
+});
+
+describe("selecting transcript text copies it, Claude TUI style", () => {
+  it("writes a selection inside the ledger to the clipboard on mouseup, but not one outside it", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    items = [row("a1", "Copy this reply text.")];
+    const result = mount();
+    const node = await screen.findByText("Copy this reply text.");
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fireEvent.mouseUp(result.container.querySelector(".conversation")!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Copy this reply text."));
+    writeText.mockClear();
+    const outside = document.createElement("p");
+    outside.textContent = "Outside the ledger";
+    document.body.appendChild(outside);
+    const outsideRange = document.createRange();
+    outsideRange.selectNodeContents(outside);
+    selection.removeAllRanges();
+    selection.addRange(outsideRange);
+    fireEvent.mouseUp(result.container.querySelector(".conversation")!);
+    expect(writeText).not.toHaveBeenCalled();
+    outside.remove();
+  });
+});
+
+describe("earlier-message pagination affordance", () => {
+  it("shows the daemon's count, a loading state while fetching, and a beginning-of-conversation result", async () => {
+    items = [row("live:1", "Now")];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    let resolvePage!: (value: {items: TranscriptItem[]; next_before: number | null; remaining_before?: number | null}) => void;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:10, remaining_before:42 } : null;
+      if (method === "agent.transcript_page") return new Promise((resolve) => { resolvePage = resolve; });
+      return original(method, ...args);
+    });
+    mount();
+    const older = await screen.findByRole("button", {name:"Load 42 earlier messages"});
+    fireEvent.click(older);
+    await waitFor(() => expect(screen.getByRole("button", {name:"Loading earlier messages…"})).toBeDisabled());
+    resolvePage({ items:[row("old:1", "The very first message")], next_before:null, remaining_before:null });
+    await screen.findByText("The very first message");
+    expect(await screen.findByText("Beginning of conversation")).toBeInTheDocument();
+    expect(screen.queryByRole("button", {name:/Load/})).not.toBeInTheDocument();
+  });
+
+  it("reveals already-loaded rows beyond the render cap for free before asking the daemon for more", async () => {
+    items = Array.from({length: 260}, (_, i) => row(`h${i}`, `Message ${i}`));
+    const result = mount();
+    await screen.findByText("Message 259");
+    expect(result.container.querySelectorAll("article")).toHaveLength(250);
+    expect(screen.queryByText("Message 0")).not.toBeInTheDocument();
+    const older = await screen.findByRole("button", {name:"Load 10 earlier messages"});
+    fireEvent.click(older);
+    await screen.findByText("Message 0");
+    expect(result.container.querySelectorAll("article")).toHaveLength(260);
+    expect(daemonCall).not.toHaveBeenCalledWith("agent.transcript_page", expect.anything());
+  });
 });
