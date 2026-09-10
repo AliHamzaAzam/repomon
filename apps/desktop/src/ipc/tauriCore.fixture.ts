@@ -287,7 +287,14 @@ const defectRepo = repo(505, "repomind");
 // "antigravity" models one of the daemon's four scanned kinds rendering an ordinary transcript,
 // the state the operator's broken capture should reach once C1 round 5's daemon half lands.
 const scenarioAgent = scenario === "no-source" ? "hermes" : scenario === "antigravity" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex";
-const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : [])] });
+// "agentsDemo" adds a second, non-tmux (external) session beside the primary one, so a single
+// conversation screenshot can show both the sidebar's interactive row and its inert counterpart
+// side by side. "spawn-loading" strips the lane down to no agent at all: that is the real,
+// unforced way to reach the Spawn agent dialog, whose Select Runtime list this then leaves
+// loading forever (agent.detect never resolves below) for the loading-skeleton screenshot.
+const agentsDemo = query.has("agentsDemo");
+const spawnLoading = scenario === "spawn-loading";
+const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: spawnLoading ? [] : [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : []), ...(agentsDemo ? [agentSession({id:103,agent:"claude-code",session_id:null,tmux_window:null,external:true,status:"idle",custom_label:"design-review"})] : [])] });
 const fixtureRepos = defects ? [defectRepo] : fleetMode === "operator" || scenario === "operator" || defects ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
 const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
@@ -348,7 +355,10 @@ function transcriptItems(): TranscriptItem[] {
     item("u2", "user", "Also check the mobile breakpoint.", { partial:true }),
     item("u3", "user", "And the tablet one too.", { partial:true }),
   ];
-  if (scenario === "dull" || scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
+  // The DULL case is deliberately the thinnest fixture on offer: one idle agent, nothing said -
+  // the quiet lane the busy "rich" fixture never shows on its own.
+  if (scenario === "dull") return [];
+  if (scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
   if (scenario === "broken") return brokenItems;
   if (scenario === "dialog") return richItems.slice(0, -2);
   if (scenario === "notices") return [richItems[0],
@@ -454,6 +464,36 @@ if (surface === "settings") {
     else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.click();
   }, 100);
 }
+if (spawnLoading) {
+  // The real, unforced route to the Spawn dialog: a lane with no agent yet shows this button
+  // instead of a mounted pane, so no keyboard-shortcut simulation is needed to reach it.
+  const openSpawn = setInterval(() => {
+    const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.includes("Spawn agent"));
+    if (!button) return;
+    clearInterval(openSpawn);
+    button.click();
+  }, 100);
+}
+if (query.has("pill")) {
+  // Scrolls away from the bottom once the ledger has content to scroll, so the Latest output
+  // pill is on screen for its screenshot; scenario "rich" keeps streaming a reply in behind it
+  // (see agent.transcript_watch below), landing while scrolled up for the unread badge too.
+  const scrollUp = setInterval(() => {
+    const scroll = document.querySelector<HTMLElement>(".conversation-scroll");
+    if (!scroll || scroll.scrollHeight <= scroll.clientHeight) return;
+    clearInterval(scrollUp);
+    scroll.scrollTop = 0;
+  }, 50);
+}
+if (agentsDemo) {
+  // A visible focus ring is the proof this row is a real control now, not decoration.
+  const focusRow = setInterval(() => {
+    const row = document.querySelector<HTMLElement>(".context-agent-interactive");
+    if (!row) return;
+    clearInterval(focusRow);
+    row.focus();
+  }, 100);
+}
 
 const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "repo.list": () => fixtureRepos,
@@ -489,7 +529,10 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
     totals: { cost_usd: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
     unpriced_models: [],
   }),
-  "agent.detect": () => AGENT_CHOICES,
+  // Never resolves for spawn-loading: the daemon serialises this behind the chat's own first
+  // page in the reported bug, so the fixture holds it open indefinitely for the loading-skeleton
+  // screenshot rather than approximating the delay with a timer.
+  "agent.detect": () => (spawnLoading ? new Promise(() => undefined) : AGENT_CHOICES),
   "lane.headline": (params) => {
     const id = (params as { lane_id:number }).lane_id;
     if (surface === "conversation" && scenario === "operator") return "Theme-swap watch for aventhi-voice";

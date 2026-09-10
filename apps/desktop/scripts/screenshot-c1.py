@@ -33,6 +33,9 @@ scenarios = {
     "conversation-dialog": "surface=conversation&case=dialog",
     "conversation-attachments": "surface=conversation&case=attachments",
     "conversation-notices": "surface=conversation&case=notices",
+    "conversation-latest-pill": "surface=conversation&case=long-history&pill=1",
+    "conversation-spawn-loading": "surface=conversation&case=spawn-loading",
+    "conversation-agents-rail": "surface=conversation&case=rich&agentsDemo=1",
     "settings-notices": "surface=settings&home=1&fleet=real&notices=1",
     "settings-agents": "surface=settings&home=1&fleet=real",
 }
