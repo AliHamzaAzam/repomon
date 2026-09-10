@@ -172,18 +172,51 @@ it("renders delivered paths as image references and typed file chips for user an
 
 describe("session activity, pinned above the composer", () => {
   it("formats elapsed seconds and compact tokens, and drops parts that are absent", () => {
-    expect(activityLabel({ verb:"Whisking", elapsed_secs:33, tokens:1100 })).toBe("Whisking… (33s, 1.1k tokens)");
-    expect(activityLabel({ verb:"Thinking", elapsed_secs:75, tokens:null })).toBe("Thinking… (1m 15s)");
-    expect(activityLabel({ verb:"Idle" })).toBe("Idle…");
+    expect(activityLabel({ verb:"Whisking", elapsed_seconds:33, token_count:1100, thought_seconds:null, model:null, effort:null })).toBe("Whisking… (33s, 1.1k tokens)");
+    expect(activityLabel({ verb:"Thinking", elapsed_seconds:75, token_count:null, thought_seconds:null, model:null, effort:null })).toBe("Thinking… (1m 15s)");
+    expect(activityLabel({ verb:"Idle", elapsed_seconds:null, token_count:null, thought_seconds:null, model:null, effort:null })).toBe("Idle…");
+    expect(activityLabel({ verb:null, elapsed_seconds:null, token_count:null, thought_seconds:null, model:"gpt-6-astra", effort:"high" })).toBeNull();
+    expect(activityLabel({ verb:"Editing", elapsed_seconds:12, token_count:null, thought_seconds:null, model:"gpt-6-astra", effort:"high" })).toBe("Editing… (12s, gpt-6-astra, high)");
   });
-  it("renders left of Open live terminal when supplied, and leaves no hole when idle", async () => {
-    const withActivity = render(() => <ConversationPane target={target} kind="codex" visible activity={{verb:"Whisking", elapsed_secs:33, tokens:1100}} onTerminal={vi.fn()} />);
+  it("renders left of Open live terminal from the watch response, updates from an event, and leaves no hole when idle", async () => {
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:120, activity:{verb:"Whisking", elapsed_seconds:33, token_count:1100, thought_seconds:null, model:null, effort:null} } : null;
+      return original(method, ...args);
+    });
+    mount();
     await screen.findByText("Whisking… (33s, 1.1k tokens)");
     expect(screen.getByRole("button", {name:"Expand terminal"})).toBeInTheDocument();
-    withActivity.unmount();
-    const idle = render(() => <ConversationPane target={target} kind="codex" visible activity={null} onTerminal={vi.fn()} />);
-    await screen.findByRole("button", {name:"Expand terminal"});
-    expect(idle.container.querySelector(".conversation-activity")).not.toBeInTheDocument();
+    update([], [], {activity:null});
+    await waitFor(() => expect(screen.queryByText(/Whisking/)).not.toBeInTheDocument());
+  });
+});
+
+describe("pending queued/sent user turns", () => {
+  it("reads a sent-but-unconsumed user row as waiting, not as Writing or failed, and resolves in place on consumption", async () => {
+    items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{u1:"queued"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Queued");
+    expect(screen.queryByText(/Writing/)).not.toBeInTheDocument();
+    const node = result.container.querySelector('[data-transcript-id="u1"]');
+    update([{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:false }], [], {input_states:{}});
+    await waitFor(() => expect(screen.queryByText("Queued")).not.toBeInTheDocument());
+    expect(result.container.querySelector('[data-transcript-id="u1"]')).toBe(node);
+  });
+});
+
+describe("Codex tool-rollup summaries", () => {
+  it("shows the rollup summary without a redundant tool_summary label, inside the normal tool disclosure", async () => {
+    items = [{ id:"t1", kind:"tool_call", role:"tools", name:"tool_summary", input_summary:"Ran 1 shell command", status:"ok", text:"Ran 1 shell command", at:null }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", {name:/Used 1 tool/}));
+    const toolButton = await screen.findByRole("button", {name:/Ran 1 shell command/});
+    expect(toolButton.textContent).not.toContain("tool_summary");
   });
 });
 
@@ -236,9 +269,9 @@ describe("earlier-message pagination affordance", () => {
   it("shows the daemon's count, a loading state while fetching, and a beginning-of-conversation result", async () => {
     items = [row("live:1", "Now")];
     const original = vi.mocked(daemonCall).getMockImplementation()!;
-    let resolvePage!: (value: {items: TranscriptItem[]; next_before: number | null; remaining_before?: number | null}) => void;
+    let resolvePage!: (value: {items: TranscriptItem[]; next_before: number | null; older_message_count?: number | null}) => void;
     vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
-      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:10, remaining_before:42 } : null;
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:10, older_message_count:42 } : null;
       if (method === "agent.transcript_page") return new Promise((resolve) => { resolvePage = resolve; });
       return original(method, ...args);
     });
@@ -246,7 +279,7 @@ describe("earlier-message pagination affordance", () => {
     const older = await screen.findByRole("button", {name:"Load 42 earlier messages"});
     fireEvent.click(older);
     await waitFor(() => expect(screen.getByRole("button", {name:"Loading earlier messages…"})).toBeDisabled());
-    resolvePage({ items:[row("old:1", "The very first message")], next_before:null, remaining_before:null });
+    resolvePage({ items:[row("old:1", "The very first message")], next_before:null, older_message_count:null });
     await screen.findByText("The very first message");
     expect(await screen.findByText("Beginning of conversation")).toBeInTheDocument();
     expect(screen.queryByRole("button", {name:/Load/})).not.toBeInTheDocument();

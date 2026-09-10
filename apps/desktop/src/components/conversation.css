@@ -32,6 +32,7 @@
 .conversation-tool-detail { padding:8px 0 10px 20px; }
 .conversation-raw { white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.6 var(--font-mono); margin:0; color:var(--muted); }
 .conversation-streaming { display:inline-block; font:10px var(--font-mono); color:var(--signal); margin-top:6px; }
+.conversation-pending { display:inline-block; font:10px var(--font-mono); color:var(--muted); margin-top:6px; }
 .conversation-source-note { margin:0 0 24px 96px; font-size:12px; color:var(--muted); }
 .conversation-empty { padding:20px 0 48px 96px; }
 .conversation-older { font-size:11px; color:var(--muted); margin:0 0 24px 96px; }
