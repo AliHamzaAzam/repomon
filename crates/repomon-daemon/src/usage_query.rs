@@ -187,9 +187,9 @@ const HEADLINE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2
 
 /// The lane's title for the home screen: the first user message of its most recent usage-ledger
 /// session (already parsed by `scan_claude_transcript` / `scan_codex_rollout`), via
-/// `headline_from_text`. `None` for a lane with no ledger session yet (an agent kind the ledger
-/// doesn't parse, or one that hasn't produced a transcript); callers fall back to the branch
-/// name.
+/// `headline_from_text`. `None` when the opening is not a credible task description or the lane
+/// has no ledger session yet; callers fall back to the branch name. Stored titles are checked
+/// again while versioned redigestion catches up.
 pub async fn lane_headline(
     ctx: &Arc<Ctx>,
     lane_id: repomon_core::model::LaneId,
@@ -204,7 +204,12 @@ pub async fn lane_headline(
     }
     let window = (DateTime::<Utc>::UNIX_EPOCH, Utc::now());
     let rows = sessions(ctx, window, Some(lane_id), 1).await?;
-    let headline = rows.into_iter().next().and_then(|r| r.headline);
+    // Recheck old stored titles immediately, including when their source is unavailable or
+    // still waiting in the bounded headline-redigest backlog. Preserve raw tooltip data.
+    let headline = rows.into_iter().next().and_then(|r| {
+        r.headline
+            .and_then(|head| repomon_core::usage_ledger::scan::headline_from_text(&head))
+    });
     ctx.headline_cache
         .lock()
         .await
@@ -556,6 +561,124 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lane_headline(&ctx, no_session_lane).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn headline_quality_survives_scanning_storage_stale_reads_and_redigest() {
+        use repomon_core::usage_ledger::{
+            HEADLINE_VERSION,
+            scan::{scan_claude_transcript, scan_codex_rollout},
+        };
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../repomon-core/src/usage_ledger/fixtures/headline_quality_v0.json"
+        ))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for claude in [true, false] {
+            let (ctx, _, lane) = ctx_with_repo().await;
+            let fixture = if claude {
+                include_str!("../../repomon-core/src/usage_ledger/fixtures/claude_usage_v0.jsonl")
+            } else {
+                include_str!("../../repomon-core/src/usage_ledger/fixtures/codex_usage_v0.jsonl")
+            };
+            let kind = if claude { "claude-code" } else { "codex" };
+            let session = if claude {
+                "sess-claude-1"
+            } else {
+                "sess-codex-1"
+            };
+            let path = dir.path().join(format!("{kind}.jsonl"));
+            for case in &cases {
+                let raw = case["text"].as_str().unwrap();
+                let expected = case["headline"].as_str();
+                let mut records: Vec<serde_json::Value> = fixture
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                if claude {
+                    records[0]["message"]["content"] = serde_json::json!(raw);
+                    let mut followup = records[0].clone();
+                    followup["message"]["content"] =
+                        serde_json::json!("Fix a different issue after the review.");
+                    records.push(followup);
+                } else {
+                    let opening = serde_json::json!({"type":"event_msg", "timestamp":"2026-09-02T09:00:02Z",
+                        "payload":{"type":"user_message", "message":raw}});
+                    let mut followup = opening.clone();
+                    followup["payload"]["message"] =
+                        serde_json::json!("Fix a different issue after the review.");
+                    records.insert(2, opening);
+                    records.push(followup);
+                }
+                let body = records.iter().map(|v| format!("{v}\n")).collect::<String>();
+                commit_scanned_session(&ctx, lane, &path, &body, |path, offset| {
+                    if claude {
+                        scan_claude_transcript(path, offset, None)
+                    } else {
+                        scan_codex_rollout(path, offset)
+                    }
+                })
+                .await;
+                // Simulate titles already installed on the operator's fleet under version 2.
+                ctx.store
+                    .update_usage_session_headline(
+                        kind.into(),
+                        session.into(),
+                        Some(raw.into()),
+                        Some(raw.into()),
+                        HEADLINE_VERSION - 1,
+                    )
+                    .await
+                    .unwrap();
+                ctx.headline_cache.lock().await.clear();
+                assert_eq!(
+                    lane_headline(&ctx, lane).await.unwrap().as_deref(),
+                    expected,
+                    "stale read: {kind} {}",
+                    case["kind"]
+                );
+                let window = (DateTime::<Utc>::UNIX_EPOCH, Utc::now());
+                let before = sessions(&ctx, window, Some(lane), 1).await.unwrap();
+                assert_eq!(
+                    before[0].headline_raw.as_deref(),
+                    Some(raw),
+                    "read gate preserves tooltip"
+                );
+                assert_eq!(
+                    crate::usage_ingest::redigest_stale_headlines(&ctx)
+                        .await
+                        .unwrap(),
+                    1
+                );
+                let after = sessions(&ctx, window, Some(lane), 1).await.unwrap();
+                assert_eq!(
+                    after[0].headline.as_deref(),
+                    expected,
+                    "stored redigest: {kind} {}",
+                    case["kind"]
+                );
+                let tooltip = after[0]
+                    .headline_raw
+                    .as_deref()
+                    .expect("rejected raw text stays available");
+                if raw.chars().count() <= 400 {
+                    assert_eq!(tooltip, raw);
+                }
+                assert!(tooltip.chars().count() <= 400);
+                ctx.headline_cache.lock().await.clear();
+                assert_eq!(
+                    lane_headline(&ctx, lane).await.unwrap().as_deref(),
+                    expected
+                );
+                assert_eq!(
+                    crate::usage_ingest::redigest_stale_headlines(&ctx)
+                        .await
+                        .unwrap(),
+                    0,
+                    "current versions do not keep rescanning"
+                );
+            }
+        }
     }
 
     #[tokio::test]
