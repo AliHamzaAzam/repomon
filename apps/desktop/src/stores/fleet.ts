@@ -583,8 +583,12 @@ export function createFleetStore(source: FleetSource = daemonFleetSource) {
   }
 
   function usageEvent(event: DaemonEvent) {
-    // Terminal frames do not change the fleet. Reloading on them feeds redraws back into RPC.
-    if (["event.agent.bytes", "event.agent.output", "event.agent.grid"].includes(event.method)) return;
+    // Terminal frames and transcript deltas do not change fleet-level metadata (repos, lanes,
+    // usage). A streaming conversation fires event.agent.transcript once per token; treating that
+    // as a fleet-wide refresh trigger reconciled the whole lane store many times a second and
+    // starved every other mounted pane, terminals included. The 1.2s heartbeat poll still picks
+    // up whatever this misses (headline, last_activity_at).
+    if (["event.agent.bytes", "event.agent.output", "event.agent.grid", "event.agent.transcript"].includes(event.method)) return;
     if (event.method === "event.usage.refreshed") {
       const result = event.params as UsageRefreshed | undefined;
       if (result && Number.isFinite(result.request_id) && Array.isArray(result.snapshot)

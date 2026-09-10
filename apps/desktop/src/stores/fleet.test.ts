@@ -763,3 +763,25 @@ describe("serialized fleet refresh", () => {
     } finally { h.fleet.stop(); h.dispose(); vi.useRealTimers(); }
   });
 });
+
+describe("daemon event fan-out", () => {
+  it("does not reload the fleet for a streamed transcript delta, unlike an ordinary lane event", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    let event!: Parameters<FleetSource["subscribe"]>[0];
+    const load = vi.fn(async () => ({ repos: [], lanes: [], usage: [], terminals: [], sortReposByActivity: null, sortMode: null, tabSortMode: null }));
+    const source: FleetSource = { load, refreshUsage: async () => {}, subscribe: async (next) => { event = next; return () => {}; } };
+    const view = createRoot((dispose) => { const fleet = createFleetStore(source); fleet.start(); return { fleet, dispose }; });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const before = load.mock.calls.length;
+      event({ jsonrpc: "2.0", method: "event.agent.transcript", params: { lane_id: 1, window: "lane-1", subscription_id: 1, items: [], removed_ids: [], next_before: null } });
+      event({ jsonrpc: "2.0", method: "event.agent.transcript", params: { lane_id: 1, window: "lane-1", subscription_id: 1, items: [], removed_ids: [], next_before: null } });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(load.mock.calls.length).toBe(before);
+      event({ jsonrpc: "2.0", method: "event.lane.changed", params: {} });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(load.mock.calls.length).toBe(before + 1);
+    } finally { view.fleet.stop(); view.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); }
+  });
+});

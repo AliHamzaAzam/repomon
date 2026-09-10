@@ -88,7 +88,36 @@ export interface UsageWindowParams {
 }
 
 export interface TranscriptTarget { lane_id: number; window?: string; session_id?: string; kind?: string }
-export interface TranscriptPage { items: TranscriptItem[]; next_before: number | null }
+// Session-level activity ("Whisking... (33s, 1.1k tokens)"), pinned above the composer - distinct
+// from a message's own `partial` streaming marker. null clears it; an object replaces the
+// previous one wholesale. Missing provider data is null, never inferred client-side.
+export interface ActivitySnapshot {
+  verb: string | null;
+  elapsed_seconds: number | null;
+  token_count: number | null;
+  thought_seconds: number | null;
+  model: string | null;
+  effort: string | null;
+}
+export interface TranscriptPage {
+  items: TranscriptItem[];
+  next_before: number | null;
+  // Number of items in this page/event; informational, not used for pagination decisions.
+  page_count?: number;
+  // Exact count of older provider message records, OpenCode only today; null/absent elsewhere.
+  older_message_count?: number | null;
+  // The complete authoritative id order of the current window, including ids that needed no
+  // upsert. Present on watch responses and every event; a page's own order describes only that
+  // page's items and is not the watch suffix. Never sort by `at` - this is the ordering contract.
+  order?: string[];
+  removed_ids?: string[];
+  // Watch/event only: current session activity. Absent on a page response (out of scope there).
+  activity?: ActivitySnapshot | null;
+  // Watch/event only: replacement snapshot of sent-but-not-yet-consumed user items, keyed by id.
+  // "consumed" can precede durable persistence; it means neither "Sent" nor "Queued" - just an
+  // ordinary seated row, no label. Durable consumption removes the entry (and partial) entirely.
+  input_states?: Record<string, "sent" | "queued" | "consumed">;
+}
 // subscription_id is daemon-internal connection routing, never a UI row identity.
 export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }
 

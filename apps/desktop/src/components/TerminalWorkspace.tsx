@@ -703,9 +703,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
             {(target) => {
               const visibleIndex = createMemo(() => visibleTargets().findIndex((item) => item.window === target.window));
               const visible = createMemo(() => visibleIndex() >= 0);
-              const sessionId = createMemo(() => (
-                targets().find((item) => item.window === target.window)?.sessionId ?? null
-              ));
               const closing = createMemo(() => isTargetClosing(target));
               const paneSpan = createMemo(() => props.workspace.multitaskSpans()[target.window] ?? { columns: 1, rows: 1 });
               // Only worth calling out the active pane when there's more than one on screen to
@@ -748,7 +745,6 @@ export default function TerminalWorkspace(props: TerminalWorkspaceProps) {
                     followTail={multitasking()}
                     onMinimumHeight={(pixels) => recordPaneMinimumHeight(target.window, pixels)}
                     shell={target.shell}
-                    sessionId={sessionId()}
                     fleet={props.fleet}
                     editor={props.editor}
                     workspace={props.workspace}

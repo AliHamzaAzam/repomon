@@ -1,7 +1,7 @@
 import { createEffect, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { TranscriptItem } from "../bindings";
-import { daemonCall, subscribeDaemon, type TranscriptTarget, type TranscriptUpdate } from "../ipc/rpc";
+import { daemonCall, subscribeDaemon, type ActivitySnapshot, type TranscriptTarget, type TranscriptUpdate } from "../ipc/rpc";
 
 export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean; paneExcerpt?: boolean }
 const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block"]);
@@ -29,21 +29,70 @@ export function mergeTranscript(current: ConversationRow[], incoming: Conversati
   return prepend ? [...added, ...kept] : [...kept, ...added];
 }
 
+// The daemon's authoritative window order: place every id in `order`, in that sequence, as a
+// suffix after whatever loaded (older-page) rows are absent from it. Never a timestamp sort -
+// ordered upserts alone can't seat a newly-ingested user row before an assistant partial that
+// answered it, since the partial kept an earlier arrival slot; `order` is what can.
+export function orderRows(rows: ConversationRow[], order: string[]): ConversationRow[] {
+  const byId = new Map(rows.map((row) => [row.key, row]));
+  const inOrder = new Set(order);
+  const leading = rows.filter((row) => !inOrder.has(row.key));
+  const suffix: ConversationRow[] = [];
+  for (const id of order) { const row = byId.get(id); if (row) suffix.push(row); }
+  return [...leading, ...suffix];
+}
+
 /// One watch per mounted pane. Reconciliation keeps Solid's row proxies and DOM nodes alive
 /// across partial/final upserts. The latest-page cursor never overwrites an older page cursor.
 export function createTranscript(target: () => TranscriptTarget | null) {
   const [state, setState] = createStore<{ rows: ConversationRow[] }>({ rows: [] });
   const [nextBefore, setNextBefore] = createSignal<number | null>(null);
+  const [remaining, setRemaining] = createSignal<number | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [revision, setRevision] = createSignal(0);
+  const [pagedOnce, setPagedOnce] = createSignal(false);
+  const [activity, setActivity] = createSignal<ActivitySnapshot | null>(null);
+  const [inputStates, setInputStates] = createSignal<Record<string, "sent" | "queued" | "consumed">>({});
   let epoch = 0;
   let paged = false;
   let historyTarget = "";
   let lifecycle: Promise<void> = Promise.resolve();
-  const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false) => {
-    setState("rows", reconcile(mergeTranscript([...state.rows], rows, removed, prepend), { key: "key" }));
-    setRevision((n) => n + 1);
+  // Mirrors state.rows' key -> index so a pure upsert (every incoming key already present, no
+  // removals, no prepend, no order change - the common case for a streamed partial/final delta)
+  // can patch just the changed rows in place instead of rebuilding and re-diffing the whole
+  // loaded history on every token. Structural changes (paging, removal, a brand new row, or the
+  // daemon's order actually moving something) still rebuild fully below and refresh this index;
+  // those happen far less often than a streamed content update.
+  let indexByKey = new Map<string, number>();
+  const rebuildIndex = () => { indexByKey = new Map(state.rows.map((row, i) => [row.key, i])); };
+  let lastOrderKey: string | undefined;
+  const orderKeyOf = (order: string[]) => order.join(" ");
+
+  const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false, order?: string[]) => {
+    const structural = prepend || removed.length > 0 || rows.some((row) => !indexByKey.has(row.key));
+    // A metadata-only push (activity or input_states ticking with no row content changed) calls
+    // apply([]) with an unchanged order; skip the revision bump so the follow-scroll effect below
+    // does not run on updates that changed nothing visible - it depends on revision alone.
+    let changed = rows.length > 0 || removed.length > 0;
+    if (structural) {
+      let merged = mergeTranscript([...state.rows], rows, removed, prepend);
+      if (order && !prepend) { merged = orderRows(merged, order); lastOrderKey = orderKeyOf(order); }
+      setState("rows", reconcile(merged, { key: "key" }));
+      rebuildIndex();
+    } else {
+      for (const row of rows) setState("rows", indexByKey.get(row.key)!, reconcile(row));
+      if (order) {
+        const key = orderKeyOf(order);
+        if (key !== lastOrderKey) {
+          setState("rows", reconcile(orderRows([...state.rows], order), { key: "key" }));
+          rebuildIndex();
+          changed = true;
+        }
+        lastOrderKey = key;
+      }
+    }
+    if (changed) setRevision((n) => n + 1);
   };
 
   createEffect(() => {
@@ -60,13 +109,21 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       historyTarget = identity;
       paged = false;
       setState("rows", []);
+      indexByKey = new Map();
+      lastOrderKey = undefined;
       setNextBefore(null);
+      setRemaining(null);
+      setPagedOnce(false);
+      setActivity(null);
+      setInputStates({});
     }
     setLoading(true);
     setError(null);
     const update = (value: TranscriptUpdate) => {
-      apply(value.items.map((item, index) => transcriptRow(item, `event:${run}:${index}`)), value.removed_ids);
-      if (!paged) setNextBefore(value.next_before);
+      apply(value.items.map((item, index) => transcriptRow(item, `event:${run}:${index}`)), value.removed_ids, false, value.order);
+      if (!paged) { setNextBefore(value.next_before); setRemaining(value.older_message_count ?? null); }
+      if (value.activity !== undefined) setActivity(value.activity);
+      if (value.input_states !== undefined) setInputStates(value.input_states);
     };
     lifecycle = lifecycle.catch(() => undefined).then(async () => {
       if (disposed) return;
@@ -84,8 +141,10 @@ export function createTranscript(target: () => TranscriptTarget | null) {
         const incoming = page.items.map((item, index) => transcriptRow(item, `page:latest:${index}`));
         const present = new Set(incoming.map((row) => row.key));
         const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
-        apply(incoming, staleLive);
-        if (!paged) setNextBefore(page.next_before);
+        apply(incoming, staleLive, false, page.order);
+        if (!paged) { setNextBefore(page.next_before); setRemaining(page.older_message_count ?? null); }
+        if (page.activity !== undefined) setActivity(page.activity);
+        if (page.input_states !== undefined) setInputStates(page.input_states);
         initialized = true;
         buffered.forEach(update);
         setRevision((n) => n + 1);
@@ -117,13 +176,18 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       const page = await daemonCall("agent.transcript_page", { ...params, before });
       if (run !== epoch) return;
       paged = true;
-      apply(page.items.map((item, index) => transcriptRow(item, `page:${before}:${index}`)), [], true);
+      setPagedOnce(true);
+      const rows = page.items.map((item, index) => transcriptRow(item, `page:${before}:${index}`));
+      const ordered = page.order ? orderRows(rows, page.order) : rows;
+      apply(ordered, page.removed_ids ?? [], true);
       setNextBefore(page.next_before);
+      setRemaining(page.older_message_count ?? null);
+      return page.items.length;
     } catch (cause) {
       if (run === epoch) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (run === epoch) setLoading(false);
     }
   }
-  return { rows: () => state.rows, nextBefore, loading, error, revision, loadOlder };
+  return { rows: () => state.rows, nextBefore, remaining, loading, error, revision, pagedOnce, activity, inputStates, loadOlder };
 }

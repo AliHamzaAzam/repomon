@@ -2,16 +2,23 @@
 .conversation-layout { height:100%; }
 .conversation-main { height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; }
 .conversation-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; }
-.conversation-ledger { max-width:900px; padding:28px 28px 40px; margin-inline:auto; }
+.conversation-ledger { max-width:900px; padding:28px 28px 40px; margin-inline:auto; user-select:text; }
 .conversation-row { display:grid; grid-template-columns:76px minmax(0,1fr); gap:20px; margin-bottom:28px; }
 .conversation-gutter { display:flex; flex-direction:column; gap:3px; align-content:start; font:10px/1.5 var(--font-mono); color:var(--muted); padding-top:3px; min-width:0; }
 .conversation-gutter span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversation-body { min-width:0; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .conversation-body p:first-child { margin-top:0; }
 .conversation-body p:last-child { margin-bottom:0; }
-.conversation-user .conversation-body { justify-self:end; max-width:90%; display:flex; flex-direction:column; align-items:flex-end; }
+/* A right-aligned turn is one unit, not a row split into a fixed-width metadata column plus a
+   content column: that column layout exists to line assistant metadata up in the LEFT gutter,
+   and a trailing copy of it just relocates the same seam to the right, still cutting the
+   bubble's available width short of the row's true right edge. Instead, the whole turn becomes
+   a single right-aligned flex column, so the bubble, its image preview, a pending label, and the
+   timestamp are all just children of one block and share its one right edge by construction. */
+.conversation-user { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.conversation-user .conversation-body { order:1; max-width:90%; }
 .conversation-user .conversation-message { background:var(--raised); padding:12px 16px; }
-.conversation-user .conversation-gutter { align-self:center; }
+.conversation-user .conversation-gutter { order:2; flex-direction:row; align-items:baseline; gap:6px; padding-top:0; max-width:90%; }
 .conversation-body blockquote { padding:12px 16px; background:var(--surface); border:1px solid var(--line); }
 .conversation-excerpt-toggle { display:flex; align-items:center; gap:8px; padding:5px 0; color:var(--muted); font-size:12px; text-align:left; }
 .conversation-excerpt-toggle:hover { color:var(--foreground); }
@@ -28,22 +35,27 @@
 .conversation-tool-detail { padding:8px 0 10px 20px; }
 .conversation-raw { white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.6 var(--font-mono); margin:0; color:var(--muted); }
 .conversation-streaming { display:inline-block; font:10px var(--font-mono); color:var(--signal); margin-top:6px; }
+.conversation-pending { display:inline-block; font:10px var(--font-mono); color:var(--muted); margin-top:6px; }
 .conversation-source-note { margin:0 0 24px 96px; font-size:12px; color:var(--muted); }
 .conversation-empty { padding:20px 0 48px 96px; }
 .conversation-older { font-size:11px; color:var(--muted); margin:0 0 24px 96px; }
+.conversation-history-boundary { font-size:11px; color:var(--muted); margin:0 0 24px 96px; }
 .conversation-footer { flex:none; background:var(--background); padding:0 28px 20px; }
 .conversation-terminal-line { display:flex; align-items:baseline; gap:16px; max-width:844px; margin-inline:auto; padding:8px 0; }
+.conversation-activity { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:10px/1.5 var(--font-mono); color:var(--muted); }
 .conversation-compact-context { display:flex; align-items:baseline; gap:10px; min-width:0; font-size:10px; color:var(--muted); }
 .conversation-compact-context strong { font-weight:500; color:var(--foreground); }
 .conversation-compact-context > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversation-tail { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; font-size:10px; color:var(--muted); }
 .conversation-tail:hover { color:var(--foreground); }
-.conversation-dialog { display:flex; flex-wrap:wrap; align-items:center; gap:10px 24px; padding:12px 16px; max-height:220px; max-width:844px; margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); }
+.conversation-dialog { display:flex; flex-wrap:wrap; align-items:center; gap:10px 24px; padding:12px 16px; max-height:220px; max-width:844px; margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); user-select:text; }
 .conversation-question { font:12px/1.6 var(--font-sans); margin:0; }
 .conversation-dialog > div:first-child { min-width:180px; }
 .conversation-compose { max-width:844px; margin-inline:auto; }
-.conversation-reply { width:100%; background:var(--surface); border:1px solid var(--line); }
+.conversation-reply { position:relative; width:100%; background:var(--surface); border:1px solid var(--line); }
 .conversation-reply:focus-within { border-color:var(--signal); }
+.conversation-reply.is-drag-target { border-color:var(--signal); border-style:dashed; }
+.conversation-reply-drop { position:absolute; inset:0; z-index:1; display:flex; align-items:center; justify-content:center; background:color-mix(in srgb, var(--signal) 8%, var(--surface)); font-size:12px; color:var(--signal); pointer-events:none; }
 .conversation-compose textarea { display:block; box-sizing:border-box; width:100%; height:40px; min-height:0; min-width:0; resize:none; background:transparent; border:0; font:13px/1.6 var(--font-sans); outline:none; padding:12px 14px 6px; max-height:160px; caret-color:var(--signal); }
 .conversation .conversation-compose textarea:focus-visible { outline:none; }
 .conversation-compose textarea:disabled { opacity:0.65; cursor:not-allowed; }
@@ -67,6 +79,12 @@
 .attachment-chip button { display:grid; place-items:center; padding:3px; min-width:20px; min-height:20px; color:var(--muted); }
 .attachment-chip svg { flex-shrink:0; }
 .conversation-latest { position:absolute; bottom:160px; right:28px; background:var(--surface); border:1px solid var(--line); padding:6px 12px; font-size:11px; }
+/* Mirrors the TUI's own split: a message the agent has not read yet is not seated in the
+   transcript as though delivered - it stays pinned here, above the composer, until consumption
+   moves it into the ordinary ledger. */
+.conversation-pending-queue { flex:none; max-width:900px; margin-inline:auto; padding:10px 28px 0; background:var(--raised); }
+.conversation-pending-row { margin-bottom:10px; }
+.conversation-pending-row:last-child { margin-bottom:14px; }
 .conversation-context { display:none; overflow:auto; }
 @container (min-width:1200px) {
   .conversation-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; }
@@ -83,8 +101,12 @@
 }
 
 .conversation-images { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin-bottom:8px; }
-.conversation-user .conversation-images { justify-content:flex-end; }
-.attachment-preview { display:inline-block; max-width:100%; }
+/* No bottom margin here: touching the bubble directly below reads as one attached unit sharing
+   its right edge (via the parent's align-items:flex-end), instead of an unrelated card floating
+   above it with daylight in between. */
+.conversation-user .conversation-images { justify-content:flex-end; margin-bottom:0; }
+.attachment-preview { display:inline-block; position:relative; max-width:100%; }
 .attachment-preview img { max-width:min(240px, 100%); max-height:160px; width:auto; height:auto; object-fit:contain; border:1px solid var(--line); }
+.attachment-preview-number { position:absolute; top:4px; left:4px; min-width:16px; padding:1px 4px; text-align:center; font:10px/1.5 var(--font-mono); color:var(--background); background:color-mix(in srgb, var(--foreground) 72%, transparent); }
 .attachment-reference { display:inline-block; font-size:12px; margin:4px 6px 0 0; }
 .attachment-type { flex-shrink:0; font-size:10px; }

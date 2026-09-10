@@ -1,7 +1,25 @@
 import { createSignal } from "solid-js";
 export type AgentView = "terminal" | "conversation";
 export const [agentViewDefaults, setAgentViewDefaults] = createSignal<Record<string, string>>({});
-export function hasTranscriptSource(kind: string) { return kind === "claude-code" || kind === "codex"; }
+/// The daemon's four transcript-scanned SourceKind variants (Claude, Codex, Antigravity,
+/// OpenCode). Every other kind, including Hermes, has no scanner and relies on the deliberate
+/// terminal_block fallback built from agent.capture instead.
+export function hasTranscriptSource(kind: string) {
+  const raw = kind.toLowerCase().trim();
+  return raw === "claude-code" || raw === "claude" || raw === "codex" || raw === "antigravity" || raw === "agy" || raw === "opencode";
+}
+export function agentKindDisplayName(agent?: string | null): string {
+  const raw = agent?.toLowerCase().trim() ?? "";
+  if (raw === "claude-code" || raw === "claude") return "Claude Code";
+  if (raw === "antigravity" || raw === "agy") return "Antigravity";
+  if (raw === "hermes" || raw === "hermes-agent") return "Hermes Agent";
+  if (raw === "codex") return "Codex";
+  if (raw === "opencode") return "OpenCode";
+  if (raw === "cursor") return "Cursor";
+  if (raw === "aider") return "Aider";
+  if (!raw || raw === "unknown") return "Agent";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
 export function resolveAgentView(override: string | null | undefined, kind: string | null | undefined, defaults: Record<string, string>): AgentView {
   const value = override ?? (kind ? defaults[kind] : undefined);
   return value === "conversation" ? "conversation" : "terminal";

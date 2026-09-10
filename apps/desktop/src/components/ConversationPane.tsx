@@ -1,6 +1,6 @@
 import { ErrorBoundary, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { Lane, PendingDialog } from "../bindings";
-import { daemonCall, type TranscriptTarget } from "../ipc/rpc";
+import { daemonCall, type ActivitySnapshot, type TranscriptTarget } from "../ipc/rpc";
 import { createTranscript, type ConversationRow } from "../stores/transcript";
 import DiffView, { parseDiff } from "./DiffView";
 import { MarkdownRenderer, parseMarkdown } from "./markdown";
@@ -11,8 +11,35 @@ import ConversationContext from "./ConversationContext";
 import AttachmentChip, { isImageAttachment } from "./controls/AttachmentChip";
 import AttachmentPreview from "./controls/AttachmentPreview";
 import { attachmentTextParts } from "./attachmentText";
-import { hasTranscriptSource, statusRowsFor } from "../stores/agentViews";
+import { agentKindDisplayName, hasTranscriptSource, statusRowsFor } from "../stores/agentViews";
+import { formatTokens } from "./usageMetrics";
 import "./conversation.css";
+
+// Session-level activity ("Whisking... (33s, 1.1k tokens)"), distinct from the per-message
+// streaming marker: this belongs to the session and stays pinned above the composer regardless
+// of scroll position, while "Writing..." stays attached to the streaming row it describes.
+// Structured fields from the daemon's watch/event payload (never scraped from pane text).
+function formatElapsed(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+}
+// A Codex idle footer can report model/effort with verb and elapsed both null - that reads as
+// "nothing active" for this row's purpose, not as a label-less parenthetical, so it renders
+// nothing rather than leaving a stray "(gpt-6-astra, high)" with no verb in front of it.
+export function activityLabel(activity: ActivitySnapshot): string | null {
+  if (!activity.verb) return null;
+  const parts = [
+    activity.elapsed_seconds != null ? formatElapsed(activity.elapsed_seconds) : null,
+    activity.token_count != null ? `${formatTokens(activity.token_count)} tokens` : null,
+    activity.thought_seconds != null ? `thought ${formatElapsed(activity.thought_seconds)}` : null,
+    activity.model,
+    activity.effort,
+  ].filter((part): part is string => !!part);
+  return parts.length ? `${activity.verb}… (${parts.join(", ")})` : `${activity.verb}…`;
+}
 
 export function dialogSummary(dialog: PendingDialog): string {
   const text = dialog.title != null ? `${dialog.title} \u2014 ${dialog.question}` : dialog.question;
@@ -51,6 +78,12 @@ function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: (
     <Show when={expanded()}><pre class="conversation-raw conversation-excerpt focus-ring" tabindex="0" aria-label={pane() ? "Terminal excerpt content" : "Unformatted entry content"}>{props.row.item.text || "No text in this entry."}</pre></Show>
   </Show>;
 }
+// Codex's grammar-matched tool-rollup summaries ("Ran 1 shell command") arrive as an ordinary
+// tool_call with name "tool_summary" - the summary text itself already reads as a complete
+// sentence, so the raw internal name would be redundant chrome rather than useful identification.
+function toolLabel(name: string | undefined): string | null {
+  return name && name !== "tool_summary" ? name : null;
+}
 function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string; onResize?: () => void }) {
   const item = () => props.row.item;
   const [expanded, setExpanded] = createSignal<boolean>();
@@ -59,12 +92,12 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
   const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().role === "user" ? "you" : item().kind === "status" ? "status" : props.kind === "claude-code" ? "claude" : props.kind;
   return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${item().role === "user" ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
-    <div class="conversation-gutter"><Show when={!tool()}><time>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></div>
+    <div class="conversation-gutter"><Show when={!tool()}><time>{time()}</time><Show when={item().role !== "user"}><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></Show></div>
     <div class="conversation-body rounded">
       <Show when={tool()} fallback={<Show when={item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><MessageBody row={props.row} laneId={props.laneId} onResize={props.onResize} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
           <span class="shrink-0 text-muted">{open() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</span>
-          <span class="font-semibold">{item().name ?? "Tool"}</span><span class="min-w-0 flex-1 truncate text-muted" title={item().input_summary}>{item().input_summary ?? item().result_summary ?? item().text}</span>
+          <Show when={toolLabel(item().name)}>{(name) => <span class="font-semibold">{name()}</span>}</Show><span class="min-w-0 flex-1 truncate text-muted" title={item().input_summary}>{item().input_summary ?? item().result_summary ?? item().text}</span>
           <span class={item().status === "error" ? "text-fault" : "text-muted"}>{item().status === "error" ? "failed" : item().status ?? "result"}</span>
         </button>
         <Show when={open()}><div class="conversation-tool-detail">
@@ -73,7 +106,13 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
           </Show>
         </div></Show>
       </Show>
-      <Show when={item().partial && !props.row.fallback}><span class="conversation-streaming" role="status">Writing<span aria-hidden="true">…</span></span></Show>
+      {/* A still-partial user row reaching this point is mid-transition to "consumed" (or
+         untracked) - the contract is explicit that consumed shows neither Sent nor Queued, just
+         an ordinary seated line, so only the assistant case gets a marker here. Sent/Queued rows
+         never reach this component: they render in the pinned queue below instead. */}
+      <Show when={item().partial && !props.row.fallback && item().role !== "user"}>
+        <span class="conversation-streaming" role="status">Writing<span aria-hidden="true">…</span></span>
+      </Show>
     </div>
   </article>;
 }
@@ -112,11 +151,59 @@ function TurnWork(props: { rows: ConversationRow[]; detail: string; kind: string
   </div></Show>;
 }
 
-export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; kind: string; lane?: Lane; onFiles?: () => void; detail?: TranscriptDetail; onTerminal: () => void }) {
-  const transcript = createTranscript(() => props.visible ? props.target : null);
+// Caps how many loaded rows mount as DOM/Solid components at once, so a long-running lane or a
+// history built from many "Load earlier messages" pages does not keep growing the live render
+// tree forever. The window grows with what the user actually asks to see: loading an older page,
+// or revealing already-loaded rows that fell outside the cap, both extend it by exactly what
+// became visible so the ledger never mounts more than what is either recent or requested.
+const RENDER_CAP = 250;
+
+export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; shown?: boolean; kind: string; lane?: Lane; onFiles?: () => void; detail?: TranscriptDetail; onTerminal: () => void }) {
+  // `visible` is pane-level (is this window still relevant at all); `shown` (defaulting to
+  // visible for callers that don't distinguish the two) is specifically "chat is the displayed
+  // view right now" and gates cosmetic, display-only work that would otherwise run against an
+  // invisible DOM tree. Neither alone should drive the transcript subscription: gating on
+  // `visible` alone would page in a conversation for a pane the user has never actually opened
+  // Chat on; gating on `shown` alone is the round 6 regression this fixes - it tears the watch
+  // down and re-pages from scratch on every Terminal/Chat toggle even though the pane never
+  // unmounted. So subscribing is lazy (first happens when chat is actually shown) but then
+  // latches for the pane's lifetime, tracking only `visible` from then on - once opened, Chat
+  // stays subscribed across toggles and only tears down when the pane itself goes away.
+  const displayed = () => props.shown ?? props.visible;
+  const [everShown, setEverShown] = createSignal(false);
+  createEffect(() => { if (displayed()) setEverShown(true); });
+  const subscribed = () => props.visible && everShown();
+  const transcript = createTranscript(() => subscribed() ? props.target : null);
   const detail = () => props.detail ?? "normal";
   const [dialog, setDialog] = createSignal<PendingDialog | null>(null);
-  const work = createMemo(() => groupTurnWork(transcript.rows()));
+  const [revealed, setRevealed] = createSignal(0);
+  const visibleRows = createMemo(() => {
+    const all = transcript.rows();
+    const limit = RENDER_CAP + revealed();
+    return all.length > limit ? all.slice(all.length - limit) : all;
+  });
+  // Something the agent has not read yet is not "seated in the transcript as though it were
+  // delivered" - matching the TUI's own split between consumed `>` lines and the highlighted
+  // still-waiting block at the bottom. "consumed" (and untracked/durable rows) stay in the
+  // ordinary ledger; only sent/queued move to the pinned queue below the scroll area.
+  const pendingKeys = createMemo(() => {
+    const states = transcript.inputStates();
+    const keys = new Set<string>();
+    for (const key in states) if (states[key] === "sent" || states[key] === "queued") keys.add(key);
+    return keys;
+  });
+  const pendingRows = createMemo(() => transcript.rows().filter((row) => pendingKeys().has(row.key)));
+  const hiddenLoaded = () => transcript.rows().length - visibleRows().length;
+  const hasOlder = () => hiddenLoaded() > 0 || transcript.nextBefore() !== null;
+  const olderLabel = () => {
+    if (transcript.loading()) return "Loading earlier messages…";
+    const hidden = hiddenLoaded();
+    if (hidden > 0) return `Load ${hidden} earlier message${hidden === 1 ? "" : "s"}`;
+    const remaining = transcript.remaining();
+    return remaining ? `Load ${remaining} earlier message${remaining === 1 ? "" : "s"}` : "Load earlier messages";
+  };
+  const ledgerRows = createMemo(() => visibleRows().filter((row) => !pendingKeys().has(row.key)));
+  const work = createMemo(() => groupTurnWork(ledgerRows()));
   const model = () => [...transcript.rows()].reverse().find((row) => row.item.model)?.item.model;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -144,18 +231,33 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     onCleanup(() => { disposed = true; clearInterval(interval); refreshPrompt = undefined; });
   });
   const followLatest = () => {
-    if (props.visible && following()) {
+    if (displayed() && following()) {
       cancelAnimationFrame(pendingScroll);
       pendingScroll = requestAnimationFrame(() => { if (scroll) scroll.scrollTop = scroll.scrollHeight; });
     }
   };
   createEffect(() => { transcript.revision(); followLatest(); });
   onCleanup(() => cancelAnimationFrame(pendingScroll));
+  // Claude TUI's own behaviour: a text selection over transcript content copies itself, no
+  // explicit copy step. Scoped to the ledger and the pending-decision body so it never fires for
+  // the composer textarea, whose own selection is not part of window.getSelection() anyway.
+  function copySelectionToClipboard() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+    const text = selection.toString();
+    if (!text) return;
+    const anchor = selection.anchorNode;
+    const element = anchor instanceof Element ? anchor : anchor?.parentElement;
+    if (!element?.closest(".conversation-ledger, .conversation-dialog")) return;
+    void navigator.clipboard.writeText(text).catch(() => undefined);
+  }
   async function older() {
     const height = scroll.scrollHeight;
     const top = scroll.scrollTop;
     setFollowing(false);
-    await transcript.loadOlder();
+    const hidden = hiddenLoaded();
+    if (hidden > 0) setRevealed((n) => n + hidden);
+    else { const fetched = await transcript.loadOlder(); if (fetched) setRevealed((n) => n + fetched); }
     requestAnimationFrame(() => { scroll.scrollTop = top + scroll.scrollHeight - height; });
   }
   async function answer(choice: number) {
@@ -175,23 +277,33 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     catch (cause) { setError(String(cause)); return false; }
     finally { setBusy(false); }
   }
-  return <section class="conversation" aria-label="Conversation">
+  return <section class="conversation" aria-label="Conversation" onMouseUp={copySelectionToClipboard} onKeyUp={copySelectionToClipboard}>
     <div class="conversation-layout">
     <div class="conversation-main">
     <div class="conversation-scroll" ref={scroll} onScroll={() => setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48)}>
       <div class="conversation-ledger">
-        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">This agent has no chat transcript. Expand the terminal excerpt below or open the live terminal.</p></Show>
-        <Show when={transcript.nextBefore() !== null}><button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>Load earlier messages</button></Show>
+        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">{agentKindDisplayName(props.kind)} sends its output straight to the terminal; there is no saved chat transcript to read here. A live excerpt appears below, or open the live terminal to follow along.</p></Show>
+        <Show when={hasOlder()} fallback={<Show when={transcript.pagedOnce()}><p class="conversation-history-boundary">Beginning of conversation</p></Show>}>
+          <button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>{olderLabel()}</button>
+        </Show>
         <Show when={transcript.error()}><p class="text-fault text-xs" role="alert">{transcript.error()} <button class="underline focus-ring" onClick={props.onTerminal}>Open terminal</button></p></Show>
         <Show when={!transcript.rows().length}><div class="conversation-empty"><p>{transcript.loading() ? "Opening conversation…" : "No conversation yet"}</p><p class="text-xs text-muted">{transcript.loading() ? "Connecting to this agent's output." : "Replies will appear here as the agent writes. The terminal is available below."}</p></div></Show>
-        <For each={transcript.rows().filter((row) => !work().hidden.has(row.key))}>
+        <For each={ledgerRows().filter((row) => !work().hidden.has(row.key))}>
           {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} onResize={followLatest} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
         </For>
       </div>
     </div>
     <Show when={!following()}><button class="conversation-latest focus-ring" onClick={() => { setFollowing(true); scroll.scrollTop = scroll.scrollHeight; }}>Latest output</button></Show>
+    <Show when={pendingRows().length}>
+      <div class="conversation-pending-queue" aria-label="Not yet read by the agent">
+        <For each={pendingRows()}>{(row) => <div class="conversation-row conversation-user conversation-pending-row" data-transcript-id={row.key}>
+          <div class="conversation-gutter"><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
+          <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} /></div>
+        </div>}</For>
+      </div>
+    </Show>
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>
-      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
+      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
         <div class="min-w-0 flex-1">
           <p class="conversation-question"><Show when={pending().title}><span>{pending().title}: </span></Show>{pending().question}</p>
           <Show when={pending().body?.length}><pre class="conversation-raw">{pending().body?.join("\n")}</pre></Show>
@@ -202,7 +314,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       <AttachmentComposer kind={props.kind} model={model()} disabled={!!dialog()} busy={busy()} onSend={send} />
     </footer>
     </div>
-    <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={props.visible} onChanges={props.onFiles} />}</Show>
+    <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} />}</Show>
     </div>
   </section>;
 }
