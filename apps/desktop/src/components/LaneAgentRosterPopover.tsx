@@ -6,6 +6,9 @@ import { slotOf } from "./agentLabel";
 import { agentSessionOrderKey, agentSessionTargetId } from "./agentIdentity";
 import { createPointerReorder } from "./pointerReorder";
 import { AgentIcon, IconGitBranch } from "./icons";
+import { agentKindDisplayName } from "../stores/agentViews";
+
+export { agentKindDisplayName };
 
 export interface AgentStatusDetails {
   label: string;
@@ -85,19 +88,6 @@ export function getSessionStatusDetails(session: AgentSession): AgentStatusDetai
     dotClass: "bg-muted/40",
     badgeClass: "bg-raised/80 text-muted border border-line/60",
   };
-}
-
-export function agentKindDisplayName(agent?: string | null): string {
-  const raw = agent?.toLowerCase().trim() ?? "";
-  if (raw === "claude-code" || raw === "claude") return "Claude Code";
-  if (raw === "antigravity" || raw === "agy") return "Antigravity";
-  if (raw === "hermes" || raw === "hermes-agent") return "Hermes Agent";
-  if (raw === "codex") return "Codex";
-  if (raw === "opencode") return "OpenCode";
-  if (raw === "cursor") return "Cursor";
-  if (raw === "aider") return "Aider";
-  if (!raw || raw === "unknown") return "Agent";
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 export function agentSessionTitle(session: AgentSession): string {
