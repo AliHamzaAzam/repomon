@@ -9,13 +9,16 @@
 .conversation-body { min-width:0; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
 .conversation-body p:first-child { margin-top:0; }
 .conversation-body p:last-child { margin-bottom:0; }
-/* A right-aligned turn is laid out as one unit: the gutter moves to the trailing grid column,
-   directly beside the bubble it labels, instead of the leading column meant for left-aligned
-   assistant rows. */
-.conversation-user { grid-template-columns:minmax(0,1fr) 76px; }
-.conversation-user .conversation-body { order:1; justify-self:end; max-width:90%; display:flex; flex-direction:column; align-items:flex-end; }
+/* A right-aligned turn is one unit, not a row split into a fixed-width metadata column plus a
+   content column: that column layout exists to line assistant metadata up in the LEFT gutter,
+   and a trailing copy of it just relocates the same seam to the right, still cutting the
+   bubble's available width short of the row's true right edge. Instead, the whole turn becomes
+   a single right-aligned flex column, so the bubble, its image preview, a pending label, and the
+   timestamp are all just children of one block and share its one right edge by construction. */
+.conversation-user { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.conversation-user .conversation-body { order:1; max-width:90%; }
 .conversation-user .conversation-message { background:var(--raised); padding:12px 16px; }
-.conversation-user .conversation-gutter { order:2; align-self:start; align-items:flex-end; text-align:right; }
+.conversation-user .conversation-gutter { order:2; flex-direction:row; align-items:baseline; gap:6px; padding-top:0; max-width:90%; }
 .conversation-body blockquote { padding:12px 16px; background:var(--surface); border:1px solid var(--line); }
 .conversation-excerpt-toggle { display:flex; align-items:center; gap:8px; padding:5px 0; color:var(--muted); font-size:12px; text-align:left; }
 .conversation-excerpt-toggle:hover { color:var(--foreground); }
@@ -49,8 +52,10 @@
 .conversation-question { font:12px/1.6 var(--font-sans); margin:0; }
 .conversation-dialog > div:first-child { min-width:180px; }
 .conversation-compose { max-width:844px; margin-inline:auto; }
-.conversation-reply { width:100%; background:var(--surface); border:1px solid var(--line); }
+.conversation-reply { position:relative; width:100%; background:var(--surface); border:1px solid var(--line); }
 .conversation-reply:focus-within { border-color:var(--signal); }
+.conversation-reply.is-drag-target { border-color:var(--signal); border-style:dashed; }
+.conversation-reply-drop { position:absolute; inset:0; z-index:1; display:flex; align-items:center; justify-content:center; background:color-mix(in srgb, var(--signal) 8%, var(--surface)); font-size:12px; color:var(--signal); pointer-events:none; }
 .conversation-compose textarea { display:block; box-sizing:border-box; width:100%; height:40px; min-height:0; min-width:0; resize:none; background:transparent; border:0; font:13px/1.6 var(--font-sans); outline:none; padding:12px 14px 6px; max-height:160px; caret-color:var(--signal); }
 .conversation .conversation-compose textarea:focus-visible { outline:none; }
 .conversation-compose textarea:disabled { opacity:0.65; cursor:not-allowed; }
@@ -74,6 +79,12 @@
 .attachment-chip button { display:grid; place-items:center; padding:3px; min-width:20px; min-height:20px; color:var(--muted); }
 .attachment-chip svg { flex-shrink:0; }
 .conversation-latest { position:absolute; bottom:160px; right:28px; background:var(--surface); border:1px solid var(--line); padding:6px 12px; font-size:11px; }
+/* Mirrors the TUI's own split: a message the agent has not read yet is not seated in the
+   transcript as though delivered - it stays pinned here, above the composer, until consumption
+   moves it into the ordinary ledger. */
+.conversation-pending-queue { flex:none; max-width:900px; margin-inline:auto; padding:10px 28px 0; background:var(--raised); }
+.conversation-pending-row { margin-bottom:10px; }
+.conversation-pending-row:last-child { margin-bottom:14px; }
 .conversation-context { display:none; overflow:auto; }
 @container (min-width:1200px) {
   .conversation-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; }
@@ -83,7 +94,6 @@
 @container (max-width:800px) {
   .conversation-ledger { padding:20px 20px 28px; }
   .conversation-row { grid-template-columns:52px minmax(0,1fr); gap:12px; }
-  .conversation-user { grid-template-columns:minmax(0,1fr) 52px; }
   .conversation-work { margin-left:64px; }
   .conversation-footer { padding:0 20px 16px; }
   .conversation-empty { padding-left:64px; }
