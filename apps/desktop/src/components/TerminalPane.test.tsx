@@ -497,6 +497,38 @@ describe("TerminalPane clickable path links", () => {
 });
 
 
+describe("Terminal / Chat, round 6 item 2 - session targeting", () => {
+  it("omits session_id for a non-Claude window even when another window in the same lane has one", async () => {
+    watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "agent.capture") return { content: "" };
+      if (method === "agent.prompt") return { dialog: null };
+      if (method === "agent.transcript_watch") return { items: [], next_before: null };
+      return null;
+    });
+    const mockFleet = {
+      lanes: () => [{
+        id: 1,
+        repo: { name: "repo", label: null },
+        state: { dirty: { staged: 0, unstaged: 0, untracked: 0 }, ahead: 0, behind: 0 },
+        worktree: { path: "/tmp/worktree", name: "worktree", branch: "main", is_main: true, id: 1, repo_id: 1 },
+        agent_sessions: [
+          { agent: "claude-code", tmux_window: "lane-1-1", session_id: "claude-session-abc" },
+          { agent: "antigravity", tmux_window: "lane-1-2", session_id: null },
+        ],
+      }],
+    } as any;
+    render(() => <TerminalPane laneId={1} window="lane-1-2" label="antigravity" fleet={mockFleet} renderer="dom" visible focused />);
+    await flushMicrotasks();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    const watchCall = daemonCallMock.mock.calls.find(([method, params]) => method === "agent.transcript_watch" && (params as { on?: boolean }).on);
+    expect(watchCall?.[1]).toMatchObject({ lane_id: 1, window: "lane-1-2" });
+    expect(watchCall?.[1]).not.toHaveProperty("session_id", "claude-session-abc");
+    expect((watchCall?.[1] as { session_id?: unknown }).session_id).toBeUndefined();
+  });
+});
+
 describe("Terminal / Chat", () => {
   it("switches a transcript-less pane without restarting its terminal watch or emulator", async () => {
     watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
@@ -519,5 +551,39 @@ describe("Terminal / Chat", () => {
     expect(terminalInstances).toHaveLength(count);
     expect(terminalInstances[terminalInstances.length - 1]).toBe(terminal);
     expect(watchTerminalMock).toHaveBeenCalledTimes(watchCount);
+  });
+
+  it("round 6 item 6: does not re-subscribe or re-page the transcript on a Terminal/Chat toggle, only on genuine unmount", async () => {
+    watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
+    const stopWatch = vi.fn().mockResolvedValue(null);
+    daemonCallMock.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === "agent.capture") return { content: "" };
+      if (method === "agent.prompt") return { dialog: null };
+      if (method === "agent.transcript_watch") {
+        if (!(params as { on?: boolean })?.on) return stopWatch();
+        return { items: [{ id: "a1", kind: "assistant", role: "assistant", text: "Answer", at: null }], next_before: null };
+      }
+      return null;
+    });
+    const { unmount } = render(() => <TerminalPane laneId={9} window="lane-9" label="codex" renderer="dom" visible focused />);
+    await flushMicrotasks();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    await screen.findByText("Answer");
+    const watchStarts = () => daemonCallMock.mock.calls.filter(([method, p]) => method === "agent.transcript_watch" && (p as { on?: boolean })?.on).length;
+    expect(watchStarts()).toBe(1);
+    // Toggling away and back must not tear the watch down at all - the pane is still mounted.
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await flushMicrotasks();
+    expect(stopWatch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    await screen.findByText("Answer");
+    expect(watchStarts()).toBe(1);
+    expect(stopWatch).not.toHaveBeenCalled();
+    // Only unmounting the pane entirely (navigating away) tears it down.
+    unmount();
+    await flushMicrotasks();
+    expect(stopWatch).toHaveBeenCalledTimes(1);
   });
 });

@@ -54,7 +54,6 @@ interface TerminalPaneProps extends TerminalTarget {
   onMinimumHeight?: (pixels: number) => void;
   /// A GUI-owned shell (no other viewer): safe to force the pane to our size so it always fits.
   shell?: boolean;
-  sessionId?: string | null;
   fleet?: FleetStore;
   editor?: EditorStore;
   workspace?: WorkspaceStore;
@@ -192,7 +191,15 @@ export default function TerminalPane(props: TerminalPaneProps) {
     onCleanup(() => { disposed = true; });
   });
   const [localView, setLocalView] = createSignal<AgentView>("terminal");
-  const agentKind = createMemo(() => props.fleet?.lanes().find((lane) => lane.id === props.laneId)?.agent_sessions?.find((agent) => agent.tmux_window === props.window)?.agent ?? "agent");
+  const windowSession = createMemo(() => props.fleet?.lanes().find((item) => item.id === props.laneId)?.agent_sessions?.find((agent) => agent.tmux_window === props.window));
+  const agentKind = createMemo(() => windowSession()?.agent ?? "agent");
+  // Looked up fresh by (laneId, window) rather than trusting props.sessionId, which is threaded
+  // down through TerminalWorkspace's target-stabilization cache and can lag behind a window
+  // switching agents. A non-Claude session has no identity except its tmux_window (the daemon
+  // never assigns it a session_id), so sending one at all - stale or not - now fails the RPC
+  // outright once the daemon makes window authoritative; omit it whenever this window's own
+  // session doesn't actually carry one.
+  const windowSessionId = createMemo(() => windowSession()?.session_id ?? undefined);
   const view = createMemo(() => props.workspace?.viewFor?.({ laneId: props.laneId, agent: agentKind(), shell: !!props.shell }) ?? localView());
   const setView = (value: AgentView | null) => {
     setFinding(false);
@@ -950,8 +957,12 @@ export default function TerminalPane(props: TerminalPaneProps) {
       />
       <Show when={!props.shell}>
         <div class={`absolute inset-0 z-[5] pt-10 ${view() === "conversation" ? "" : "hidden"}`}>
-          <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: props.sessionId ?? undefined, kind: agentKind() }}
-            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} detail={detail()} visible={props.visible !== false && view() === "conversation"} onTerminal={() => setView("terminal")} />
+          {/* visible is pane-level: the transcript watch stays subscribed across a Terminal/Chat
+             toggle, since the pane itself is still mounted and still the one on screen - only
+             shown (chat is the displayed view right now) gates cosmetic, display-only work, so
+             switching back to Chat repaints already-loaded rows instantly instead of re-paging. */}
+          <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: windowSessionId(), kind: agentKind() }}
+            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} detail={detail()} visible={props.visible !== false} shown={view() === "conversation"} onTerminal={() => setView("terminal")} />
         </div>
       </Show>
       <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-10 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">

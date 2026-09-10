@@ -192,6 +192,68 @@ describe("session activity, pinned above the composer", () => {
   });
 });
 
+describe("streaming flash (round 6 item 1), instrumented", () => {
+  function observe(container: HTMLElement) {
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(container.querySelector(".conversation-ledger")!, { childList: true, subtree: true });
+    return { mutations, stop: () => observer.disconnect(), flush: () => observer.takeRecords().forEach((r) => mutations.push(r)) };
+  }
+  it("does not add or remove any DOM node across a streamed run whose order stays byte-identical", async () => {
+    items = [
+      { id: "u1", kind: "user", role: "user", text: "Do it", at: null },
+      { id: "live:1", kind: "assistant", role: "assistant", text: "Start", at: null, partial: true },
+    ];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on ? { items, next_before: null, order: ["u1", "live:1"] } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Start");
+    const ledger = result.container.querySelector(".conversation-ledger")!;
+    const rowNode = result.container.querySelector('[data-transcript-id="live:1"]')!;
+    const probe = observe(result.container);
+    for (let i = 0; i < 8; i++) {
+      // next_before must be pinned explicitly: the shared update() helper otherwise defaults it
+      // to a truthy value, which flips the pagination affordance on mid-stream - a real proof
+      // artifact once, not a fixture default worth repeating.
+      update([{ id: "live:1", kind: "assistant", role: "assistant", text: `Start plus token ${i}`, at: null, partial: true }], [], { order: ["u1", "live:1"], next_before: null });
+    }
+    await screen.findByText(/Start plus token 7/);
+    probe.flush();
+    // Row-internal mutations (markdown re-parsing new text into existing nodes) are expected;
+    // what must never happen is the ledger's own direct children being added/removed/reordered.
+    const topLevel = probe.mutations.filter((m) => m.target === ledger);
+    expect(topLevel).toHaveLength(0);
+    expect(result.container.querySelector('[data-transcript-id="live:1"]')).toBe(rowNode);
+    probe.stop();
+  });
+  it("keeps a row's own DOM node across a same-membership order that resequences (robustness, not the observed cause)", async () => {
+    // Confirmed separately (crates/repomon-core/src/agent/conversation.rs) that order and items
+    // come from one Vec-built snapshot per poll and never reshuffle for stable membership - this
+    // scenario does not occur in practice. Kept as a robustness check: even if it did, Solid's
+    // keyed reconcile must not treat a repositioned id as a new row.
+    items = [
+      { id: "u1", kind: "user", role: "user", text: "Do it", at: null },
+      { id: "t1", kind: "tool_call", role: "tools", name: "exec", status: "ok", text: "ran", at: null },
+      { id: "live:1", kind: "assistant", role: "assistant", text: "Start", at: null, partial: true },
+    ];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on ? { items, next_before: null, order: ["u1", "t1", "live:1"] } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Start");
+    const node = result.container.querySelector('[data-transcript-id="live:1"]');
+    const rotations = [["t1", "u1", "live:1"], ["u1", "live:1", "t1"], ["u1", "t1", "live:1"]];
+    for (const order of rotations) update([{ id: "live:1", kind: "assistant", role: "assistant", text: "Start updated", at: null, partial: true }], [], { order, next_before: null });
+    await screen.findByText("Start updated");
+    expect(result.container.querySelector('[data-transcript-id="live:1"]')).toBe(node);
+  });
+});
+
 describe("pending queued/sent user turns", () => {
   it("reads a sent-but-unconsumed user row as waiting, not as Writing or failed, and resolves in place on consumption", async () => {
     items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
@@ -201,12 +263,35 @@ describe("pending queued/sent user turns", () => {
       return original(method, ...args);
     });
     const result = mount();
+    // Matches the TUI: not yet read by the agent means not seated in the transcript as though
+    // delivered - it lives in the pinned queue below the ledger, not as an ordinary ledger row.
     await screen.findByText("Queued");
     expect(screen.queryByText(/Writing/)).not.toBeInTheDocument();
-    const node = result.container.querySelector('[data-transcript-id="u1"]');
+    expect(result.container.querySelector(".conversation-pending-queue [data-transcript-id=\"u1\"]")).not.toBeNull();
+    expect(result.container.querySelector(".conversation-ledger [data-transcript-id=\"u1\"]")).toBeNull();
     update([{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:false }], [], {input_states:{}});
     await waitFor(() => expect(screen.queryByText("Queued")).not.toBeInTheDocument());
-    expect(result.container.querySelector('[data-transcript-id="u1"]')).toBe(node);
+    expect(result.container.querySelector(".conversation-pending-queue")).toBeNull();
+    const seated = result.container.querySelector(".conversation-ledger [data-transcript-id=\"u1\"]");
+    expect(seated).not.toBeNull();
+    expect(seated?.textContent).not.toContain("Queued");
+    expect(seated?.textContent).not.toContain("Sent");
+  });
+  it("treats consumed as an ordinary seated row with no label, even while still briefly partial", async () => {
+    items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{u1:"consumed"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Do the thing");
+    expect(result.container.querySelector(".conversation-pending-queue")).toBeNull();
+    const seated = result.container.querySelector('.conversation-ledger [data-transcript-id="u1"]');
+    expect(seated).not.toBeNull();
+    expect(seated?.textContent).not.toContain("Queued");
+    expect(seated?.textContent).not.toContain("Sent");
+    expect(screen.queryByText(/Writing/)).not.toBeInTheDocument();
   });
 });
 
