@@ -56,7 +56,7 @@ function lane(id: number, target: Repo, sessions: AgentSession[], lastActivityAt
 describe("needsInputLanes", () => {
   it("keeps only lanes whose most urgent agent needs the operator, newest first", () => {
     const repoA = repo(1, "a");
-    const waiting = session({ status: "waiting", status_reason: `"Allow Bash: bun run build?"` });
+    const waiting = session({ status: "waiting", pending_prompt: "Allow Bash: bun run build?" });
     const running = session({ status: "running" });
     const older = lane(1, repoA, [waiting], "2026-09-10T10:00:00Z");
     const idle = lane(2, repoA, [running], "2026-09-10T12:00:00Z");
@@ -65,13 +65,43 @@ describe("needsInputLanes", () => {
     const rows = needsInputLanes([older, idle, newer]);
 
     expect(rows.map((row) => row.lane.id)).toEqual([3, 1]);
-    expect(rows[0].question).toBe(`"Allow Bash: bun run build?"`);
+    expect(rows[0].question).toBe("Allow Bash: bun run build?");
+    expect(rows[0].isQuestion).toBe(true);
   });
 
   it("is empty when nothing needs the operator", () => {
     const repoA = repo(1, "a");
     const idle = lane(1, repoA, [session({ status: "running" })], "2026-09-10T10:00:00Z");
     expect(needsInputLanes([idle])).toEqual([]);
+  });
+
+  it("prefers the parsed dialog's question over the compact pending_prompt", () => {
+    const repoA = repo(1, "a");
+    const waiting = session({
+      status: "waiting",
+      pending_prompt: "Do you want to proceed?",
+      pending_dialog: {
+        title: "Bash command",
+        question: "Do you want to proceed?",
+        body: ["bun run build"],
+        options: [],
+        selected: null,
+        context: [],
+      },
+    });
+    const rows = needsInputLanes([lane(1, repoA, [waiting], "2026-09-10T10:00:00Z")]);
+    expect(rows[0].question).toBe("Do you want to proceed?");
+    expect(rows[0].isQuestion).toBe(true);
+  });
+
+  it("falls back to the daemon's status reason, unquoted, when the agent has no question", () => {
+    // A daemon status_reason is a description of why the agent is waiting ("no output for
+    // 4m", "pane unchanged for 4m"), never a question - it must never be quoted like one.
+    const repoA = repo(1, "a");
+    const stalled = session({ status: "running", stale: true, status_reason: "no output for 4m" });
+    const rows = needsInputLanes([lane(1, repoA, [stalled], "2026-09-10T10:00:00Z")]);
+    expect(rows[0].question).toBe("no output for 4m");
+    expect(rows[0].isQuestion).toBe(false);
   });
 });
 

@@ -73,7 +73,13 @@ function NeedsYouStrip(props: { row: NeedsYouRow; title: string; onOpen: () => v
         {formatStripAge(props.row.lane.last_activity_at)}
       </span>
       <span class="col-start-2 col-end-5 flex min-w-0 items-center gap-3 font-mono text-xs text-muted">
-        <span class="min-w-0 truncate">{props.row.question ? `"${props.row.question}"` : "Waiting on you"}</span>
+        <span class="min-w-0 truncate">
+          {props.row.question
+            ? props.row.isQuestion
+              ? `"${props.row.question}"`
+              : props.row.question
+            : "Waiting on you"}
+        </span>
         <span class="ml-auto shrink-0 font-sans text-[11px] font-medium text-attention">needs you</span>
       </span>
     </button>

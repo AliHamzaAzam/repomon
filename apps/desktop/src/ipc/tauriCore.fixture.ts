@@ -116,7 +116,10 @@ const LANES = [
         id: 101,
         agent: "codex",
         status: "waiting",
-        status_reason: `"Allow Bash: bun run build?"`,
+        // The strip's second line: a real dialog/prompt question, not the status_reason
+        // field (that's a description of *why* it's waiting, e.g. "no output for 4m" - see
+        // lane 16 below for that case - never a question, and the daemon never quotes it).
+        pending_prompt: "Allow Bash: bun run build?",
         session_id: "s10",
         tmux_window: "lane-10",
       }),
@@ -132,7 +135,7 @@ const LANES = [
         id: 111,
         agent: "antigravity",
         status: "waiting",
-        status_reason: `"Which currency should the estimate use?"`,
+        pending_prompt: "Which currency should the estimate use?",
         session_id: "s11",
         tmux_window: "lane-11",
       }),
@@ -171,6 +174,26 @@ const LANES = [
     branch: "claude/wire-usage-ledger",
     last_activity_at: ago(360),
     agent_sessions: [],
+  }),
+  // Needs-you with no pending prompt at all: the strip falls back to the daemon's
+  // status_reason, in its own idiom (crates/repomon-daemon/src/rpc.rs), shown unquoted since
+  // it is a description of why the agent is waiting, not a question it asked.
+  lane({
+    id: 16,
+    repo: REPOS[3],
+    branch: "claude/stalled-migration",
+    last_activity_at: ago(6),
+    agent_sessions: [
+      agentSession({
+        id: 161,
+        agent: "claude-code",
+        status: "running",
+        stale: true,
+        status_reason: "no output for 6m",
+        session_id: "s16",
+        tmux_window: "lane-16",
+      }),
+    ],
   }),
 ];
 

@@ -3,7 +3,15 @@ import { agentStateIn, agentStateReason, isUrgentState, laneState, type AgentSta
 
 export interface NeedsYouRow {
   lane: Lane;
+  /// The strip's second line. `null` when the agent has neither a dialog/prompt nor a status
+  /// reason to show.
   question: string | null;
+  /// Whether `question` is the agent's actual question (`pending_dialog.question` or
+  /// `pending_prompt`), which the strip quotes, as opposed to the daemon's `status_reason`
+  /// (e.g. "no output for 4m", "pane unchanged for 4m") describing why it's waiting, which
+  /// the strip shows plain - quoting a status description would misrepresent it as something
+  /// the agent asked.
+  isQuestion: boolean;
 }
 
 function activityMs(lane: Lane): number {
@@ -15,13 +23,18 @@ function byNewestActivity(a: Lane, b: Lane): number {
   return activityMs(b) - activityMs(a);
 }
 
-/// The dialog or question text for a lane's most urgent agent, straight from the daemon's status
-/// reason - the same source `laneIndicatorTitle`'s tooltip reads, never invented here.
-function needsYouQuestion(lane: Lane): string | null {
+/// The strip's second line for a lane's most urgent agent: its actual question when it has
+/// one (the parsed dialog's `question`, else the compact `pending_prompt`), falling back to
+/// the daemon's status reason - the same source `laneIndicatorTitle`'s tooltip reads - only
+/// when there is no question to show.
+function needsYouLine(lane: Lane): Pick<NeedsYouRow, "question" | "isQuestion"> {
   const state = laneState(lane);
-  if (state === null) return null;
+  if (state === null) return { question: null, isQuestion: false };
   const agent = lane.agent_sessions.find((session) => agentStateIn(lane, session) === state);
-  return agent ? agentStateReason(agent) : null;
+  if (!agent) return { question: null, isQuestion: false };
+  const asked = agent.pending_dialog?.question ?? agent.pending_prompt;
+  if (asked) return { question: asked, isQuestion: true };
+  return { question: agentStateReason(agent), isQuestion: false };
 }
 
 /// Lanes needing the operator, any kind, newest activity first - the home screen's strips above
@@ -33,7 +46,7 @@ export function needsInputLanes(lanes: Lane[]): NeedsYouRow[] {
       return state !== null && isUrgentState(state);
     })
     .sort(byNewestActivity)
-    .map((lane) => ({ lane, question: needsYouQuestion(lane) }));
+    .map((lane) => ({ lane, ...needsYouLine(lane) }));
 }
 
 /// Every other lane, newest activity first - the plain one-line strips under the rule.
