@@ -1,9 +1,9 @@
-import { For } from "solid-js";
+import Select from "./Select";
 export type TranscriptDetail = "summary" | "normal" | "verbose";
 export default function TranscriptDetailToggle(props: { value: TranscriptDetail; onChange: (value: TranscriptDetail) => void }) {
-  return <div role="group" aria-label="Transcript detail" class="pointer-events-auto inline-flex shrink-0 rounded border border-line bg-raised p-0.5 font-sans text-xs normal-case tracking-normal">
-    <For each={["summary", "normal", "verbose"] as const}>{(value) => <button type="button" aria-pressed={props.value === value}
-      class={`focus-ring rounded px-2 py-1 capitalize transition-colors ${props.value === value ? "bg-surface text-foreground" : "text-muted hover:text-foreground"}`}
-      onClick={() => props.onChange(value)}>{value}</button>}</For>
+  return <div class="pointer-events-auto shrink-0 font-sans normal-case tracking-normal" title="Summary: collapsed work, no notices. Normal: collapsed work and limits. Verbose: expanded work and all notices. Settings can override notices per agent.">
+    <Select ariaLabel="Transcript detail" value={props.value} align="right" variant="frameless" options={[
+      {value:"summary", label:"Summary detail"}, {value:"normal", label:"Normal detail"}, {value:"verbose", label:"Verbose detail"},
+    ]} onChange={(value) => props.onChange(value as TranscriptDetail)} />
   </div>;
 }

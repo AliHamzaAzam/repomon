@@ -1,11 +1,14 @@
 import { ErrorBoundary, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
-import type { PendingDialog } from "../bindings";
+import type { Lane, PendingDialog } from "../bindings";
 import { daemonCall, type TranscriptTarget } from "../ipc/rpc";
 import { createTranscript, type ConversationRow } from "../stores/transcript";
 import DiffView, { parseDiff } from "./DiffView";
 import { MarkdownRenderer, parseMarkdown } from "./markdown";
-import { IconChevronDown, IconChevronRight, IconArrowUp } from "./icons";
+import { IconChevronDown, IconChevronRight } from "./icons";
 import type { TranscriptDetail } from "./controls/TranscriptDetailToggle";
+import AttachmentComposer from "./controls/AttachmentComposer";
+import ConversationContext from "./ConversationContext";
+import { hasTranscriptSource, statusRowsFor } from "../stores/agentViews";
 import "./conversation.css";
 
 export function dialogSummary(dialog: PendingDialog): string {
@@ -29,9 +32,9 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
   const tool = () => item().kind === "tool_call";
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
   const speaker = () => tool() ? "tool" : item().kind === "terminal_block" ? "terminal" : item().role === "user" ? "you" : item().kind === "status" ? "status" : props.kind === "claude-code" ? "claude" : props.kind;
-  return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
+  return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${item().role === "user" ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
     <div class="conversation-gutter"><Show when={!tool()}><time>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></div>
-    <div class="conversation-body">
+    <div class="conversation-body rounded">
       <Show when={tool()} fallback={<Show when={!props.row.fallback && item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><TextBody text={item().text} laneId={props.laneId} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
           <span class="shrink-0 text-muted">{open() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</span>
@@ -44,19 +47,51 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
           </Show>
         </div></Show>
       </Show>
-      <Show when={item().model && !tool()}><span class="conversation-model">{item().model}</span></Show>
       <Show when={item().partial}><span class="conversation-streaming" role="status">Writing<span aria-hidden="true">…</span></span></Show>
-      <Show when={item().cost_usd != null}><span class="font-mono text-[10px] text-muted">${item().cost_usd!.toFixed(4)}</span></Show>
     </div>
   </article>;
 }
 
-export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; kind: string; detail?: TranscriptDetail; onTerminal: () => void }) {
+// A turn starts at a user message. Keep each original row object so streamed assistant
+// upserts retain their DOM node, while all the turn's work shares one disclosure.
+export function groupTurnWork(rows: ConversationRow[]) {
+  const groups = new Map<string, ConversationRow[]>();
+  const hidden = new Set<string>();
+  let first: string | undefined;
+  for (const row of rows) {
+    if ((row.item.role === "user" && row.item.kind !== "status") || row.item.status_kind === "turn_started") first = undefined;
+    if (!row.fallback && (row.item.kind === "tool_call" || row.item.kind === "status")) {
+      if (!first) { first = row.key; groups.set(first, []); }
+      else hidden.add(row.key);
+      groups.get(first)!.push(row);
+    }
+  }
+  return { groups, hidden };
+}
+function TurnWork(props: { rows: ConversationRow[]; detail: string; kind: string; laneId: number }) {
+  const [expanded, setExpanded] = createSignal<boolean>();
+  const open = () => expanded() ?? props.detail === "verbose";
+  const tools = () => props.rows.filter((row) => row.item.kind === "tool_call");
+  const notices = () => props.rows.filter((row) => row.item.kind === "status" && statusRowsFor(props.kind, props.detail).includes(row.item.status_kind ?? ""));
+  const failed = () => tools().filter((row) => row.item.status === "error").length;
+  const running = () => tools().some((row) => row.item.status === "running" || row.item.partial);
+  return <Show when={tools().length || notices().length}><div class="conversation-work">
+    <button type="button" class="work-summary focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
+      {open() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+      <span>{tools().length ? `${running() ? "Using" : "Used"} ${tools().length} ${tools().length === 1 ? "tool" : "tools"}` : "Turn details"}</span>
+      <Show when={failed()}><span class="text-fault">{failed()} failed</span></Show>
+      <Show when={notices().some((row) => row.item.status_kind === "rate_limit" || row.item.status_kind === "usage_limit")}><span class="text-attention">Limit reached</span></Show>
+    </button>
+    <Show when={open()}><div class="work-details"><For each={tools()}>{(row) => <LedgerRow row={row} laneId={props.laneId} kind={props.kind} detail="verbose" />}</For><For each={notices()}>{(row) => <p class="work-notice" data-transcript-id={row.key}>{row.item.text}</p>}</For></div></Show>
+  </div></Show>;
+}
+
+export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; kind: string; lane?: Lane; onFiles?: () => void; detail?: TranscriptDetail; onTerminal: () => void }) {
   const transcript = createTranscript(() => props.visible ? props.target : null);
   const detail = () => props.detail ?? "normal";
-  const [tail, setTail] = createSignal("");
   const [dialog, setDialog] = createSignal<PendingDialog | null>(null);
-  const [reply, setReply] = createSignal("");
+  const work = createMemo(() => groupTurnWork(transcript.rows()));
+  const model = () => [...transcript.rows()].reverse().find((row) => row.item.model)?.item.model;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [following, setFollowing] = createSignal(true);
@@ -71,11 +106,10 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     const poll = async () => {
       if (polling || disposed) return;
       polling = true;
-      const results = await Promise.allSettled([daemonCall("agent.capture", { ...target, lines: 3 }), daemonCall("agent.prompt", target)]);
-      if (!disposed) {
-        if (results[0].status === "fulfilled") setTail(results[0].value.content.split("\n").filter((line) => line.trim()).slice(-3).join("\n"));
-        if (results[1].status === "fulfilled") setDialog(validDialog(results[1].value.dialog) ? results[1].value.dialog : null);
-      }
+      try {
+        const result = await daemonCall("agent.prompt", target);
+        if (!disposed) setDialog(validDialog(result.dialog) ? result.dialog : null);
+      } catch { /* Keep the last known prompt until the next refresh. */ }
       polling = false;
     };
     refreshPrompt = poll;
@@ -108,28 +142,30 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     } catch (cause) { setError(String(cause)); await refreshPrompt?.(); }
     finally { setBusy(false); }
   }
-  async function send() {
-    const text = reply();
-    if (!text.trim() || busy() || dialog()) return;
+  async function send(text: string): Promise<boolean> {
+    if (!text.trim() || busy() || dialog()) return false;
     setBusy(true); setError(null);
-    try { await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true }); setReply(""); setFollowing(true); }
-    catch (cause) { setError(String(cause)); }
+    try { await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true }); setFollowing(true); return true; }
+    catch (cause) { setError(String(cause)); return false; }
     finally { setBusy(false); }
   }
   return <section class="conversation" aria-label="Conversation">
+    <div class="conversation-layout">
+    <div class="conversation-main">
     <div class="conversation-scroll" ref={scroll} onScroll={() => setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48)}>
       <div class="conversation-ledger">
+        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">This agent has no chat transcript. Live terminal output is shown below.</p></Show>
         <Show when={transcript.nextBefore() !== null}><button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>Load earlier messages</button></Show>
         <Show when={transcript.error()}><p class="text-fault text-xs" role="alert">{transcript.error()} <button class="underline focus-ring" onClick={props.onTerminal}>Open terminal</button></p></Show>
         <Show when={!transcript.rows().length}><div class="conversation-empty"><p>{transcript.loading() ? "Opening conversation…" : "No conversation yet"}</p><p class="text-xs text-muted">{transcript.loading() ? "Connecting to this agent's output." : "Replies will appear here as the agent writes. The terminal is available below."}</p></div></Show>
-        <For each={transcript.rows().filter((row) => detail() !== "summary" || row.item.kind !== "tool_call")}>
-          {(row) => <LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} />}
+        <For each={transcript.rows().filter((row) => !work().hidden.has(row.key))}>
+          {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
         </For>
       </div>
     </div>
     <Show when={!following()}><button class="conversation-latest focus-ring" onClick={() => { setFollowing(true); scroll.scrollTop = scroll.scrollHeight; }}>Latest output</button></Show>
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>
-      <Show when={dialog()} fallback={<button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal"><span class="conversation-footer-label">Terminal <IconChevronRight size={12} /></span><pre>{tail() || "No terminal output yet"}</pre></button>}>{(pending) => <div class="conversation-dialog">
+      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
         <div class="min-w-0 flex-1">
           <p class="conversation-question"><Show when={pending().title}><span>{pending().title}: </span></Show>{pending().question}</p>
           <Show when={pending().body?.length}><pre class="conversation-raw">{pending().body?.join("\n")}</pre></Show>
@@ -137,12 +173,10 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
         <div class="flex flex-wrap gap-2"><For each={pending().options}>{(option, index) => <button class="focus-ring rounded border border-line bg-surface px-3 py-1.5 text-xs hover:border-attention disabled:opacity-50" disabled={busy()} onClick={() => void answer(index())}>{option.text}</button>}</For></div>
       </div>}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
-      <form class="conversation-compose" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-        <div class="conversation-reply">
-        <textarea class="rounded" aria-label={`Reply to ${props.kind}`} placeholder={dialog() ? "Answer the prompt first" : `Reply to ${props.kind}…`} disabled={!!dialog() || busy()} value={reply()} rows={1} onInput={(event) => setReply(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); } }} />
-        <button class="focus-ring rounded p-2 text-muted hover:text-foreground disabled:opacity-50" type="submit" aria-label="Send reply" disabled={!reply().trim() || !!dialog() || busy()}><IconArrowUp size={16} /></button>
-        </div>
-      </form>
+      <AttachmentComposer kind={props.kind} model={model()} disabled={!!dialog()} busy={busy()} onSend={send} />
     </footer>
+    </div>
+    <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={props.visible} onChanges={props.onFiles} />}</Show>
+    </div>
   </section>;
 }

@@ -10,14 +10,16 @@ import tempfile
 import time
 
 root = pathlib.Path(__file__).resolve().parents[3]
-output = root / "qa" / "design-completion"
+output = root / "qa" / "design-round4"
 output.mkdir(parents=True, exist_ok=True)
 chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 scenarios = {
+    "home-operator": "home=1&fleet=operator",
     "home-real": "home=1&fleet=real",
     "home-raw": "home=1&fleet=raw",
     "home-ordinary": "home=1&fleet=ordinary",
     "home-rich": "home=1&fleet=rich",
+    "conversation-operator": "surface=conversation&case=operator",
     "conversation-rich": "surface=conversation&case=rich",
     "conversation-focused": "surface=conversation&case=dull&focus=reply",
     "conversation-diff": "surface=conversation&case=diff",
@@ -26,6 +28,9 @@ scenarios = {
     "conversation-broken": "surface=conversation&case=broken",
     "conversation-no-source": "surface=conversation&case=no-source",
     "conversation-dialog": "surface=conversation&case=dialog",
+    "conversation-attachments": "surface=conversation&case=attachments",
+    "conversation-notices": "surface=conversation&case=notices",
+    "settings-notices": "surface=settings&home=1&fleet=real&notices=1",
     "settings-agents": "surface=settings&home=1&fleet=real",
 }
 if len(sys.argv) > 1:

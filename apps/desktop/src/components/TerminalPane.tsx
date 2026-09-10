@@ -951,7 +951,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       <Show when={!props.shell}>
         <div class={`absolute inset-0 z-[5] pt-10 ${view() === "conversation" ? "" : "hidden"}`}>
           <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: props.sessionId ?? undefined, kind: agentKind() }}
-            kind={agentKind()} detail={detail()} visible={props.visible !== false && view() === "conversation"} onTerminal={() => setView("terminal")} />
+            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} detail={detail()} visible={props.visible !== false && view() === "conversation"} onTerminal={() => setView("terminal")} />
         </div>
       </Show>
       <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-10 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">

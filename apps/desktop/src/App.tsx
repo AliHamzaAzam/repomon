@@ -1,4 +1,4 @@
-import { setAgentViewDefaults } from "./stores/agentViews";
+import { setAgentStatusRows, setAgentViewDefaults } from "./stores/agentViews";
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import ActionModals from "./components/ActionModals";
@@ -178,6 +178,7 @@ function App(props: AppProps) {
           }
           applyAccent(config.accent);
           setAgentViewDefaults(config.agent_views ?? {});
+          setAgentStatusRows(config.agent_status_rows ?? {});
           if (config.agent_icons) setAgentIconOverrides(config.agent_icons);
         })
         .catch(() => undefined);

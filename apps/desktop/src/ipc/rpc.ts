@@ -94,6 +94,7 @@ export interface TranscriptUpdate extends TranscriptPage { lane_id: number; wind
 
 export interface ConfigView {
   agent_views?: Record<string, string>;
+  agent_status_rows?: Record<string, string[]>;
   accent?: string | null;
   theme?: string | null;
   worktree_template: string;

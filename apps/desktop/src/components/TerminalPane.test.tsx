@@ -426,6 +426,8 @@ describe("TerminalPane clickable path links", () => {
       lanes: () => [{
         id: 1,
         repo: { name: "repo", label: null },
+        state: { dirty: { staged: 0, unstaged: 0, untracked: 0 }, ahead: 0, behind: 0 },
+        agent_sessions: [],
         worktree: { path: "/tmp/worktree", name: "worktree", branch: "main", is_main: true, id: 1, repo_id: 1 },
       }],
     } as any;

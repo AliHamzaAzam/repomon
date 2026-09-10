@@ -677,3 +677,16 @@ describe("Default agent views", () => {
     expect(within(cursor).getByRole("button", { name: "Terminal" })).toBeDisabled();
   });
 });
+
+it("persists explicit status overrides and can return to detail-driven defaults", async () => {
+  state.config = {...config, agent_status_rows:{}};
+  render(() => <SettingsModal initialTab="agents" onClose={() => undefined} />);
+  await screen.findByText("Chat detail");
+  const follow = screen.getByRole("switch", {name:"codex: Follow detail level", hidden:true});
+  fireEvent.click(follow);
+  await waitFor(() => expect(calls.saved[calls.saved.length - 1]).toMatchObject({agent_status_rows:{codex:["rate_limit", "usage_limit"]}}));
+  fireEvent.click(screen.getByRole("switch", {name:"codex: Turn cost", hidden:true}));
+  await waitFor(() => expect(calls.saved[calls.saved.length - 1]).toMatchObject({agent_status_rows:{codex:["rate_limit", "usage_limit", "turn_cost"]}}));
+  fireEvent.click(follow);
+  await waitFor(() => expect(calls.saved[calls.saved.length - 1]?.agent_status_rows).toEqual({}));
+});

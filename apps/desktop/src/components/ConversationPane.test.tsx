@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
-import ConversationPane, { dialogSummary } from "./ConversationPane";
+import ConversationPane, { dialogSummary, groupTurnWork } from "./ConversationPane";
 vi.mock("../ipc/rpc", () => ({ daemonCall:vi.fn(), subscribeDaemon:vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl:vi.fn() }));
 let emit: (event: DaemonEvent) => void;
@@ -55,10 +55,10 @@ describe("ConversationPane", () => {
   it("shows running and failed tools with keyboard-operable disclosure", async () => {
     items = [{ id:"tool", role:"tools", kind:"tool_call", name:"exec_command", input_summary:"bun run build", status:"running", text:"build starting", at:null }];
     mount();
-    const button = await screen.findByRole("button", { name:/exec_command.*running/ });
+    const button = await screen.findByRole("button", { name:/Using 1 tool/ });
     expect(button).toHaveAttribute("aria-expanded", "false");
     update([{ ...items[0], status:"error", text:"Build exited with code 1" }]);
-    fireEvent.click(screen.getByRole("button", { name:/exec_command.*failed/ }));
+    fireEvent.click(screen.getByRole("button", { name:/Used 1 tool.*1 failed/ }));
     expect(screen.getByText("Build exited with code 1")).toBeInTheDocument();
   });
   it("answers the current dialog using zero-based choice and the exact stale-prompt guard", async () => {
@@ -119,4 +119,23 @@ it("retains older pages across a Terminal / Chat round trip", async () => {
   setVisible(true);
   await waitFor(() => expect(vi.mocked(daemonCall).mock.calls.filter(([method, params]) => method === "agent.transcript_watch" && (params as {on:boolean}).on)).toHaveLength(2));
   expect(screen.getByText("Earlier history")).toBeInTheDocument();
+});
+
+it("groups work by turn and renders the daemon cost text only once inside expanded work", async () => {
+  items = [
+    {id:"u",role:"user",kind:"user",text:"Check it",at:null},
+    {id:"start",role:"tools",kind:"status",status_kind:"turn_started",text:"Turn started",at:null},
+    {id:"tool",role:"tools",kind:"tool_call",status:"ok",name:"Bash",text:"Done",at:null},
+    {id:"cost",role:"tools",kind:"status",status_kind:"turn_cost",text:"Turn cost $0.0511",cost_usd:0.0511,at:null},
+    {id:"end",role:"tools",kind:"status",status_kind:"turn_finished",text:"Turn finished",at:null},
+  ];
+  const [detail, setDetail] = createSignal<"normal" | "verbose">("normal");
+  render(() => <ConversationPane target={target} kind="codex" visible detail={detail()} onTerminal={vi.fn()} />);
+  await screen.findByRole("button", {name:"Used 1 tool"});
+  expect(screen.queryByText(/Turn cost/)).not.toBeInTheDocument();
+  setDetail("verbose");
+  expect(await screen.findByText("Turn cost $0.0511")).toBeInTheDocument();
+  expect(document.body.textContent?.match(/\$0\.0511/g)).toHaveLength(1);
+  const rows = [...items, {...items[1],id:"next-start"}, {...items[2],id:"next-tool"}].map((item) => ({key:item.id!,item,fallback:false}));
+  expect([...groupTurnWork(rows).groups.keys()]).toEqual(["start", "next-start"]);
 });

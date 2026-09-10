@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-10T10:57:28.372642+00:00",
+  "generatedAt": "2026-09-10T12:16:50.958756+00:00",
   "title": "Design System: Repomon desktop",
   "extensions": {
     "shadows": [
@@ -39,6 +39,14 @@
       {
         "name": "short-height",
         "value": "720px"
+      },
+      {
+        "name": "home-and-chat-context-container-min",
+        "value": "1200px"
+      },
+      {
+        "name": "chat-compact-container-max",
+        "value": "800px"
       }
     ]
   },
@@ -60,18 +68,18 @@
       "css": ".ds-secondary{font-family:var(--font-sans);font-size:12px;line-height:1.333333;border-radius:0.5rem;padding:0.375rem 0.875rem;cursor:pointer;transition:color 150ms,background-color 150ms,border-color 150ms;border:1px solid var(--line);background:var(--surface);color:var(--foreground);font-weight:500;}.ds-secondary:hover{background:var(--raised);}.ds-secondary:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-secondary:disabled{opacity:0.5;}"
     },
     {
-      "name": "Reply field",
-      "kind": "input",
+      "name": "Attachment composer",
+      "kind": "custom",
       "refersTo": "reply-field",
-      "description": "Bounded raised reply field with signal focus and pending disabled state.",
-      "html": "<textarea class=\"ds-reply\" rows=\"1\" aria-label=\"Reply to agent\" placeholder=\"Reply to agent\"></textarea>",
-      "css": ".ds-reply{width:100%;max-width:960px;resize:none;background:var(--raised);border:1px solid var(--line);border-radius:0.25rem;color:var(--foreground);font:13px/1.6 var(--font-sans);padding:6px 10px;max-height:120px;}.ds-reply::placeholder{color:var(--muted);}.ds-reply:focus-visible{border-color:var(--signal);outline:1px solid var(--signal);outline-offset:1px;}.ds-reply:disabled{opacity:0.65;cursor:not-allowed;}"
+      "description": "Unified surface for attachment identity, text, attach, observed model, and send; focus belongs to its boundary.",
+      "html": "<div class=\"ds-composer\"><ul class=\"ds-attachments\" aria-label=\"Attachments\"><li class=\"ds-attachment\"><span>screen.png</span><button type=\"button\" aria-label=\"Remove screen.png\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M18 6 6 18M6 6l12 12\"/></svg></button></li></ul><textarea class=\"ds-reply\" rows=\"2\" aria-label=\"Reply to codex\" placeholder=\"Ask a question or describe a change\u2026\"></textarea><div class=\"ds-composer-actions\"><button class=\"ds-attach\" type=\"button\" aria-label=\"Attach images or files\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 5v14M5 12h14\"/></svg></button><span class=\"ds-agent\">codex <span>\u00b7 observed model</span></span><button class=\"ds-send\" type=\"button\" aria-label=\"Send reply\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"m5 12 7-7 7 7M12 5v14\"/></svg></button></div></div>",
+      "css": ".ds-composer{max-width:844px;background:var(--surface);border:1px solid var(--line);border-radius:0.25rem;color:var(--foreground);font-family:var(--font-sans);}.ds-composer:focus-within{border-color:var(--signal);}.ds-reply{display:block;box-sizing:border-box;width:100%;resize:none;background:transparent;border:0;color:var(--foreground);font:13px/1.6 var(--font-sans);padding:12px 14px 6px;max-height:160px;caret-color:var(--signal);}.ds-reply:focus-visible{outline:none;}.ds-reply::placeholder{color:var(--muted);}.ds-reply:disabled{opacity:0.65;cursor:not-allowed;}.ds-attachments{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:10px 12px 0;}.ds-attachment{display:flex;align-items:center;gap:8px;max-width:100%;background:var(--raised);border:1px solid var(--line);border-radius:0.25rem;padding:5px 8px;font-size:11px;}.ds-attachment button{display:grid;place-items:center;padding:3px;background:transparent;border:0;color:var(--muted);}.ds-composer-actions{display:flex;align-items:center;gap:10px;padding:4px 8px 8px;}.ds-composer-actions button{display:grid;place-items:center;width:30px;height:30px;border:0;border-radius:0.25rem;cursor:pointer;}.ds-attach{background:transparent;color:var(--muted);}.ds-attach:hover:not(:disabled){background:var(--raised);color:var(--foreground);}.ds-send{margin-left:auto;background:var(--signal);color:var(--background);}.ds-send:hover:not(:disabled){opacity:0.85;}.ds-agent{font-size:11px;}.ds-agent span{color:var(--muted);}.ds-composer button:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-composer button:disabled{opacity:0.45;cursor:not-allowed;}"
     },
     {
       "name": "View toggle",
       "kind": "nav",
       "refersTo": "view-toggle",
-      "description": "The same segmented pattern also carries transcript detail.",
+      "description": "Primary Terminal/Chat representation control; transcript detail uses the existing frameless Select.",
       "html": "<div class=\"ds-toggle\" role=\"group\" aria-label=\"Agent view\"><button class=\"ds-segment\" aria-pressed=\"false\">Terminal</button><button class=\"ds-segment\" aria-pressed=\"true\">Chat</button></div>",
       "css": ".ds-toggle{display:inline-flex;padding:0.125rem;border:1px solid var(--line);border-radius:0.25rem;background:var(--raised);}.ds-segment{border:0;border-radius:0.25rem;background:transparent;color:var(--muted);padding:0.25rem 0.625rem;font:12px/1.333333 var(--font-sans);cursor:pointer;transition:color 150ms,background-color 150ms;}.ds-segment[aria-pressed=\"true\"]{background:var(--surface);color:var(--foreground);}.ds-segment:hover{color:var(--foreground);}.ds-segment:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-segment:disabled{cursor:not-allowed;opacity:0.5;}"
     },
@@ -98,15 +106,30 @@
       "description": "The compact text field used by SettingsModal.",
       "html": "<label class=\"ds-field-label\">Model<input class=\"ds-field\" type=\"text\" placeholder=\"Model name\"></label>",
       "css": ".ds-field-label{display:block;color:var(--foreground);font:12px/1.45 var(--font-sans);}.ds-field{display:block;margin-top:0.375rem;height:2rem;width:100%;border-radius:0.5rem;border:1px solid var(--line);background:var(--surface);padding:0 0.75rem;color:var(--foreground);font:12px/1.333333 var(--font-sans);}.ds-field::placeholder{color:color-mix(in srgb,var(--muted) 60%,transparent);}.ds-field:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}"
+    },
+    {
+      "name": "Turn work disclosure",
+      "kind": "custom",
+      "description": "One summary per turn; failures and selected limits stay visible when closed. Selected notices and daemon cost live inside disclosed work.",
+      "html": "<details class=\"ds-work\"><summary class=\"ds-work-summary\">Used 3 tools <span class=\"ds-work-failed\">1 failed</span><span class=\"ds-work-limit\">Limit reached</span></summary><div class=\"ds-work-details\"><p class=\"ds-work-notice\">Selected turn notice from the daemon.</p></div></details>",
+      "css": ".ds-work{color:var(--muted);font-family:var(--font-sans);}.ds-work-summary{padding:5px 0;font-size:12px;cursor:pointer;}.ds-work-summary span{margin-left:8px;}.ds-work-summary:hover{color:var(--foreground);}.ds-work-summary:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-work-failed{color:var(--fault);}.ds-work-limit{color:var(--attention);}.ds-work-details{margin-top:8px;padding:8px 12px;background:var(--surface);border:1px solid var(--line);}.ds-work-notice{margin:8px 0;font:11px/1.6 var(--font-mono);}"
+    },
+    {
+      "name": "Transcript detail Select",
+      "kind": "custom",
+      "description": "Subordinate frameless trigger for Summary, Normal, and Verbose detail; the actual Select owns keyboard and portaled listbox behavior.",
+      "html": "<button type=\"button\" class=\"ds-detail\" role=\"combobox\" aria-label=\"Transcript detail\" aria-expanded=\"false\" aria-haspopup=\"listbox\">Normal detail<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"m6 9 6 6 6-6\"/></svg></button>",
+      "css": ".ds-detail{display:flex;align-items:center;justify-content:space-between;gap:6px;height:32px;padding:0 6px;border:0;background:transparent;color:var(--muted);font:500 12px/1.333333 var(--font-sans);cursor:pointer;transition:color 150ms;}.ds-detail:hover{color:var(--foreground);}.ds-detail:focus-visible{outline:2px solid var(--signal);outline-offset:1px;}.ds-detail:disabled{opacity:0.5;cursor:not-allowed;}"
     }
   ],
   "narrative": {
     "northStar": "Order carries attention",
-    "overview": "Repomon keeps agent work in a dense, quiet desktop workspace. Home and Settings prioritize operating the fleet; Conversation combines a readable transcript ledger with the existing terminal and reply controls. The approved home and conversation references retain the incumbent chrome, with repo-leading home rows and bounded reading widths.",
+    "overview": "Repomon keeps agent work in a dense, quiet desktop workspace. Home and Settings prioritize operating the fleet; Conversation gives assistant prose a continuous reading track, contains human turns on the right, and collects work behind one disclosure per turn. Wide panes earn repository context while reading widths stay bounded. The incumbent chrome, repo-leading strips, and transcript ledger remain authoritative.",
     "keyCharacteristics": [
       "Semantic theme colors and existing SVG controls.",
       "Compact operational rows with explicit state words.",
-      "A transcript ledger with a persistent action footer."
+      "Assistant-led prose, grouped work, and a unified attachment composer.",
+      "Useful wide context with compact pane fallbacks."
     ],
     "rules": [
       {
@@ -118,6 +141,11 @@
         "name": "The Identity Rule",
         "body": "Home leads with the repository, then the accepted headline or branch fallback. Repeated repository/title pairs retain the lane identifier.",
         "section": "typography"
+      },
+      {
+        "name": "The Context Width Rule",
+        "body": "Spend wide pane space on compact lane columns and repository context while retaining a bounded transcript and composer.",
+        "section": "layout"
       }
     ],
     "dos": [
@@ -129,7 +157,9 @@
     "donts": [
       "Don't introduce a new palette, font system, decorative assets, emoji, or glyph icons.",
       "Don't depend on a rich headline, model label, timestamp, or valid Markdown for readable identity and content.",
-      "Don't stretch home rows or the reply action across the full width of a large window."
+      "Don't replace useful wide-pane context with longer prose or a full-width reply action.",
+      "Don't give routine turn notices separate transcript rows or duplicate the daemon's cost text.",
+      "Don't make an observed model label look editable."
     ]
   }
 }

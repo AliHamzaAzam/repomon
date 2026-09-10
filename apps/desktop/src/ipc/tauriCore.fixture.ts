@@ -264,15 +264,24 @@ const REAL_LANES = ORDINARY_LANES.map((item, index) => ({ ...item,
 }));
 REAL_LANES[7] = { ...REAL_LANES[7], repo: REAL_LANES[0].repo, worktree: { ...REAL_LANES[7].worktree, branch: "shopify-app", name: "shopify-app" } };
 const REAL_PRS = ["docs: add Spanish README", "fix: make spawned agents immediately talkable", "fix: usage tracker and agent names follow the agent, not its sidebar slot"].map((title, index) => ({ ...PULL_REQUESTS[0], number: [87, 78, 53][index], title }));
+// Identity and visible-state replay transcribed from rejected-home-bdb56bd.png.
+// Git change counts are deliberately empty fixture values, not a live fleet query.
+const OPERATOR_REPOS = [repo(501, "AliHamzaAzam"), repo(502, "aventhi-voice"), repo(503, "repomon"), repo(504, "deneblondon-theme")];
+const OPERATOR_LANES = [
+  [0, "main", "running"], [3, "feat/voice-loader-tag", "idle"], [2, "c1-design-candidate", null],
+  [2, "feat/conversation-view-ui", "running"], [1, "main", null], [2, "feat/conversation-view-daemon", "running"],
+  [1, "shopify-app", null], [1, "woocommerce", null], [3, "feat/seo-lcp-preload", null],
+  [3, "feat/seo-crawl-ux", null], [3, "feat/seo-structured-data", null], [0, "claude/aventh-hero-redesign-638ea3", null],
+].map(([repoIndex, branch, state], index) => lane({id:500+index, repo:OPERATOR_REPOS[Number(repoIndex)], branch:String(branch), last_activity_at:ago(index < 6 ? 29 + index * 3 : index < 8 ? 5760 : 93600), agent_sessions:state ? [agentSession({id:500+index,agent:index === 3 || index === 5 ? "codex" : "claude-code", status:state === "running" ? "running" : "idle",tmux_window:`lane-${500+index}`})] : []}));
 const query = new URLSearchParams(location.search);
 const fleetMode = query.get("fleet");
 const ordinary = fleetMode === "ordinary";
 const real = fleetMode === "real" || fleetMode === "raw";
 const surface = query.get("surface");
 const scenario = query.get("case") ?? "rich";
-const conversationLane = lane({ id: 10, repo: REPOS[0], branch: "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenario === "no-source" ? "opencode" : "codex", session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" })] });
-const fixtureRepos = ordinary || real ? ORDINARY_REPOS : REPOS;
-const fixtureLanes = surface === "conversation" ? [conversationLane] : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
+const conversationLane = lane({ id: 10, repo: scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: ["dull", "attachments", "no-source", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenario === "no-source" ? "opencode" : scenario === "operator" ? "claude-code" : "codex", session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" })] });
+const fixtureRepos = fleetMode === "operator" || scenario === "operator" ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
+const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
 // TranscriptItem::new keeps legacy roles user|assistant|tools. conversation.rs emits running
 // tools, partial assistant output, working status and live:dialog; transcript.rs emits pane:<window>
@@ -296,29 +305,67 @@ const brokenItems = [
   item("broken:1", "terminal_block", '{"type":"response_item","payload": { malformed transcript line'),
   item("a1", "assistant", "The build failed because the collection module is missing. I'll fix the import before trying again."),
 ];
+// The readable reply from the operator's rejected conversation capture. Injected-only
+// user frames are absent, as promised by the daemon round-four cleaning contract.
+const operatorItems: TranscriptItem[] = [
+  item("operator-tool", "tool_call", "Controller inbox checked.", {name:"Bash", input_summary:"Read the controller reply", status:"ok"}),
+  item("operator-cost1", "status", "Turn cost $0.0511", {status_kind:"turn_cost",cost_usd:0.0511}),
+  item("operator-reply", "assistant", "The controller confirmed. Its reply to you, in short: it read the manual and named its own failures (narrative mails, praise essays to workers, em-dashes, task files in the wrong folder, proposing home-screen rounds on worker fixture screenshots without ever building and looking at the app itself). It says both workers are running and it is applying the manual from this turn.\n\nWhere things stand:\n\n- `~/repomind/REPOMIND.md` is the new operating manual, loaded into every future controller boot. Boot context regenerated.\n- `~/repomind/AGENTS.md` now defines `fleet/<repo>/tasks/` for worker briefs.\n- The live controller (`lane-48355624/1`) has acknowledged and switched behaviour. Its next operator message should be the first under the manual: under fifteen lines, outcome first, one decision, and live screenshots before any more proposal.\n\nIf it slips again, point it at the manual section it broke, since it now treats that as the bar.", {model:"claude-fable-5-1"}),
+  item("operator-finished1", "status", "Turn finished", {status_kind:"turn_finished"}),
+  item("operator-cost2", "status", "Turn cost $0.0540", {status_kind:"turn_cost",cost_usd:0.054}),
+  item("operator-finished2", "status", "Turn finished", {status_kind:"turn_finished"}),
+];
 let promptAnswered = false;
 const eventChannels = new Set<{ onmessage: (event: unknown) => void }>();
 const watchTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
 function transcriptItems(): TranscriptItem[] {
+  if (scenario === "operator") return operatorItems;
   if (scenario === "no-source") return [item("pane:lane-10", "terminal_block", "$ opencode\nWaiting for input.\n› ", { at:null })];
-  if (scenario === "dull") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
+  if (scenario === "dull" || scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
   if (scenario === "broken") return brokenItems;
   if (scenario === "dialog") return richItems.slice(0, -2);
+  if (scenario === "notices") return [richItems[0],
+    item("started", "status", "Turn started", { status_kind:"turn_started" }),
+    ...richItems.slice(1).filter((row) => !row.partial && row.id !== "live:working").map((row) => row.status === "running" ? {...row,status:"ok" as const} : row),
+    item("finished", "status", "Turn finished", { status_kind:"turn_finished" }),
+    item("cost", "status", "Turn cost $0.0511", { status_kind:"turn_cost", cost_usd:0.0511 }),
+    item("rate", "status", "Rate limit reached. Resets at 14:00.", { status_kind:"rate_limit" }),
+    item("usage", "status", "Usage limit reached for this account.", { status_kind:"usage_limit" })];
   return richItems;
 }
 const initialPage = () => ({ items:transcriptItems(), next_before: scenario === "rich" ? 120 : null });
-let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"} };
+let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"}, agent_status_rows:query.has("notices") ? {codex:["rate_limit", "usage_limit"]} : {} };
 if (query.get("focus") === "reply") {
   const focusReply = setInterval(() => {
     const field = document.querySelector<HTMLTextAreaElement>('textarea[aria-label^="Reply to"]');
     if (field) { field.focus(); clearInterval(focusReply); }
   }, 100);
 }
-if (scenario === "diff") {
+if (scenario === "diff" || scenario === "notices") {
   const expand = setInterval(() => {
-    const button = document.querySelector<HTMLButtonElement>('[aria-label="Transcript detail"] button:last-child');
-    if (button) { button.click(); clearInterval(expand); }
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent?.includes("Verbose detail"));
+    if (option) { option.click(); clearInterval(expand); }
+    else document.querySelector<HTMLButtonElement>('button[aria-label="Transcript detail"]')?.click();
   }, 100);
+}
+if (scenario === "attachments") {
+  const timer = setInterval(() => {
+    const field = document.querySelector<HTMLTextAreaElement>('textarea[aria-label^="Reply to"]');
+    if (!field) return;
+    const data = new DataTransfer();
+    data.items.add(new File(["fixture image bytes"], "layout-reference.png", { type:"image/png" }));
+    data.items.add(new File(["fixture review notes"], "review-notes.md", { type:"text/markdown" }));
+    field.dispatchEvent(new ClipboardEvent("paste", { bubbles:true, clipboardData:data }));
+    field.focus(); clearInterval(timer);
+  }, 100);
+}
+if (query.has("notices")) {
+  const timer = setInterval(() => {
+    const section = document.querySelector<HTMLElement>('[aria-label="Conversation detail"]');
+    if (!section) return;
+    section.querySelectorAll("details").forEach((node) => node.open = true);
+    section.scrollIntoView({ block:"start" }); clearInterval(timer);
+  }, 200);
 }
 if (surface === "settings") {
   // Drive the real app's accessible controls. Navigation stays inside the dev-only fixture.
@@ -365,11 +412,12 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "agent.detect": () => AGENT_CHOICES,
   "lane.headline": (params) => {
     const id = (params as { lane_id:number }).lane_id;
-    if (ordinary || (surface === "conversation" && scenario === "no-source")) return null;
+    if (surface === "conversation" && scenario === "operator") return "Theme-swap watch for aventhi-voice";
+    if (fleetMode === "operator" || ordinary || (surface === "conversation" && ["dull", "attachments", "no-source"].includes(scenario))) return null;
     if (real) return fleetMode === "raw" ? REAL_HEADLINES[id - 200] ?? null : id === 206 ? REAL_HEADLINES[6] : null;
     return HEADLINES[id] ?? null;
   },
-  "repo.pull_requests": () => ordinary ? [] : real ? REAL_PRS : PULL_REQUESTS,
+  "repo.pull_requests": () => ordinary || fleetMode === "operator" ? [] : real ? REAL_PRS : PULL_REQUESTS,
   "repomind.status": () => null,
   "message.list": () => ({ messages: [], next_before: null }),
 };
@@ -384,6 +432,8 @@ const CONNECTED_STATUS = {
 };
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (cmd === "save_chat_attachment") return `/fixture/attachments/${args?.name}` as T;
+  if (cmd === "plugin:dialog|open") return ["/fixture/notes.md"] as T;
   if (cmd === "daemon_subscribe") { eventChannels.add(args?.onEvent as { onmessage: (event: unknown) => void }); return null as T; }
   if (cmd === "term_watch") return { cols:120, rows:32, generation:1, sequence:1 } as T;
   if (cmd === "connection_status") return CONNECTED_STATUS as T;

@@ -136,6 +136,11 @@ describe("HomeScreen ordinary fleet", () => {
     expect(screen.getByRole("button", { name: "SAAS: main, Exited" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "portfolio: main, No agent" })).toBeTruthy();
     expect(second.textContent).toContain("Mira");
+    screen.getAllByRole("button").filter((node) => node.classList.contains("home-strip")).forEach((node, index) => {
+      const rect = new DOMRect(0, index * 40, 600, 40);
+      vi.spyOn(node, "getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+      vi.spyOn(node, "getBoundingClientRect").mockReturnValue(rect);
+    });
     first.focus();
     fireEvent.keyDown(first, { key: "ArrowDown" });
     expect(document.activeElement).toBe(second);
@@ -158,4 +163,20 @@ describe("HomeScreen ordinary fleet", () => {
     dispose();
   });
 
+});
+
+it("moves spatially through the wide board's two columns", async () => {
+  const {fleet,dispose} = await mountedHomeScreen([ordinaryLane(1,"one"),ordinaryLane(2,"two"),ordinaryLane(3,"three"),ordinaryLane(4,"four")]);
+  const rows = screen.getAllByRole("button").filter((node) => node.classList.contains("home-strip"));
+  rows.forEach((node,index) => {
+    const rect = new DOMRect(index % 2 * 400, Math.floor(index / 2) * 48, 400, 48);
+    vi.spyOn(node,"getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+    vi.spyOn(node,"getBoundingClientRect").mockReturnValue(rect);
+  });
+  rows[0].focus();
+  fireEvent.keyDown(rows[0],{key:"ArrowDown"}); expect(document.activeElement).toBe(rows[2]);
+  fireEvent.keyDown(rows[2],{key:"ArrowRight"}); expect(document.activeElement).toBe(rows[3]);
+  fireEvent.keyDown(rows[3],{key:"ArrowUp"}); expect(document.activeElement).toBe(rows[1]);
+  fireEvent.keyDown(rows[1],{key:"ArrowLeft"}); expect(document.activeElement).toBe(rows[0]);
+  fleet.stop(); dispose();
 });

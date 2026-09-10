@@ -36,7 +36,7 @@ components:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.foreground}"
   reply-field:
-    backgroundColor: "{colors.raised}"
+    backgroundColor: "{colors.surface}"
     textColor: "{colors.foreground}"
   view-toggle:
     backgroundColor: "{colors.raised}"
@@ -55,15 +55,16 @@ components:
 
 **Creative North Star: "Order carries attention"**
 
-Repomon keeps agent work in a dense, quiet desktop workspace. Home and Settings prioritize operating the fleet; Conversation combines a readable transcript ledger with the existing terminal and reply controls. The approved home and conversation references retain the incumbent chrome, with repo-leading home rows and bounded reading widths.
+Repomon keeps agent work in a dense, quiet desktop workspace. Home and Settings prioritize operating the fleet; Conversation gives assistant prose a continuous reading track, contains human turns on the right, and collects work behind one disclosure per turn. Wide panes earn repository context while reading widths stay bounded. The incumbent chrome, repo-leading strips, and transcript ledger remain authoritative.
 
-Authority: [PRODUCT.md](PRODUCT.md), [index.css](src/index.css), the built HomeScreen, ConversationPane, TerminalPane, SettingsModal, and controls. The approved reference paths are recorded in PRODUCT.md. This is a record of the incumbent system, not a replacement visual direction.
+Authority: [PRODUCT.md](PRODUCT.md), [index.css](src/index.css), the built HomeScreen, ConversationPane, ConversationContext, TerminalPane, SettingsModal, [conversation.css](src/components/conversation.css), and controls. The approved reference paths are recorded in PRODUCT.md. This is a record of the incumbent system, not a replacement visual direction.
 
 **Key Characteristics:**
 
 - Semantic theme colors and existing SVG controls.
 - Compact operational rows with explicit state words.
-- A transcript ledger with a persistent action footer.
+- Assistant-led prose, grouped work, and a unified attachment composer.
+- Useful wide context with compact pane fallbacks.
 
 ## Colors
 
@@ -79,17 +80,21 @@ Neutral: `background` grounds the workspace, `surface` holds controls and pane c
 
 Use the existing `--font-sans` system stack for interface text and transcript prose, and `--font-mono` for branches, timestamps, model metadata, tool output, and terminal content. No display scale is introduced.
 
-Pane titles and controls are compact; repository names use semibold text, accepted home headlines use the slightly larger body treatment, and branch fallbacks use muted mono. Transcript prose has more line spacing than operational chrome. Model labels sit below message content, secondary to the short speaker label.
+Pane titles and controls are compact; repository names use semibold text, accepted home headlines use the slightly larger body treatment, and branch fallbacks use muted mono. Transcript prose has more line spacing than operational chrome. The ledger gutter stacks time above a short speaker label; message model metadata is available in the speaker tooltip. The latest observed model appears read-only beside the agent name inside the composer.
 
 **The Identity Rule.** Home leads with the repository, then the accepted headline or branch fallback. Repeated repository/title pairs retain the lane identifier.
 
 ## Layout
 
-Home uses a left-aligned reading column capped at (64rem). Compact strips align the status icon, identity, explicit state, and age; ordinary rows use vertical padding (10px), with extra room for an inline blocking question. At widths up to (1100px), repository and state columns narrow while retaining the same order.
+Home fills its available pane. At a pane width of (1200px), its recent-lane area becomes two compact columns beside a context rail (320px) for repositories, changed lanes, and pull requests. The attention area stays above the lane grid. Each wide lane strip stacks repository above headline or branch, retaining explicit state and age; its padding is (12px 20px). Below that pane breakpoint, lanes use a single column and pull requests return inline. Ordinary single-column strips use vertical padding (10px), with extra room for an inline blocking question. The existing viewport adjustment at (1100px) narrows repository and state columns.
 
-Conversation keeps the existing app tabs above a pane header (40px) containing task identity, repository, and adjacent Terminal/Chat and Summary/Normal/Verbose controls. Its scrollable ledger is bounded at (960px), with a metadata gutter (108px), gap (14px), and prose capped at (76ch). Time and short speaker occupy parallel gutter columns. At widths up to (1100px), ledger padding and body size tighten.
+Conversation keeps the existing app tabs and pane header. Terminal/Chat is the primary segmented control; the existing frameless Select places transcript detail beside it as a subordinate action. The scrollable ledger has an outer width cap (900px), including horizontal padding (28px per side), and centers within the main column. Rows use a stacked time/speaker gutter (76px) and gap (20px). Assistant prose stays plain; human content is right aligned within the body track and capped at (90%) of that track.
 
-The footer stays outside the scrollable ledger. Its terminal tail or pending decision sits above the reply row; the field and send action share a bounded area (960px). Settings uses the existing centered modal, independently scrolling body, sticky section tabs, and persistent footer. Short windows constrain modal height rather than hiding actions. The existing multi-pane layout and app tabs are preserved.
+At a Conversation pane width of (1200px), a context rail (320px) shows environment, working changes, files, agents, and repository pull requests. Below that threshold, compact repository/branch context sits above the composer. At pane widths up to (800px), ledger padding becomes (20px), the gutter becomes (52px), and the gap becomes (12px); the composer keyboard hint hides. These are container queries so split panes and an open editor receive the same compact behavior.
+
+The footer remains outside the scrollable ledger. Its context or pending-decision strip and unified composer align to the ledger's inner width cap (844px). An Open live terminal action leads to the mounted emulator; Chat chrome contains no raw terminal tail. Settings retains its centered modal, independently scrolling body, sticky section tabs, and persistent footer. Short windows constrain modal height rather than hiding actions. The existing multi-pane layout and app tabs are preserved.
+
+**The Context Width Rule.** Spend wide pane space on compact lane columns and repository context while retaining a bounded transcript and composer.
 
 ## Elevation & Depth
 
@@ -97,15 +102,17 @@ Home strips and transcript rows use tonal surfaces and fine rules. Existing sett
 
 ## Shapes
 
-Keep the flat strip and ledger geometry. Reuse small rounded controls, larger rounded settings cards and modal shells, and the existing pill switch. Do not give transcript messages the card silhouette used by separate settings and history surfaces. Borders use `--line`; focus and semantic state can change the boundary color.
+Keep the flat strip and ledger geometry. Reuse small rounded controls, larger rounded settings cards and modal shells, and the existing pill switch. Assistant prose stays on the plain ledger ground. Human turns use a small rounded raised containment; malformed output and disclosed work use inset surface panels. These retain the compact geometry rather than inheriting settings-card silhouettes. Borders use `--line`; focus and semantic state can change the boundary color.
 
 ## Components
 
 - **Buttons and fields:** retain the existing primary signal action, bordered surface action, and quiet icon action. Hover clarifies the surface or foreground; keyboard focus uses the signal boundary. Disabled actions remain visibly disabled. Settings fields keep their labels and compact dimensions.
-- **View and detail controls:** reuse the existing segmented components. A selected segment has a surface ground and foreground text inside a raised bordered group, with `aria-pressed` exposing selection. Unsupported agent defaults remain disabled with the visible Terminal only explanation.
-- **Home strips:** the whole row is a keyboard-focusable action. Use existing state icons with explicit words, truncate long secondary identity without losing the repository, and retain the inline attention question and recessed separator.
-- **Transcript ledger:** use the same content column for prose, raw monospace fallback, and tool rows. Tool rows have a quiet bottom rule and no repeated time/tool gutter. Summary hides tool rows; Normal collapses them by default; Verbose opens them by default. Manual expansion reveals raw results or the existing diff renderer. Partial output has the visible Writing state.
-- **Conversation footer:** the ordinary terminal preview opens Terminal. A pending decision replaces it with an attention-colored top rule, the title incorporated into the mono question, and adjacent wrapping choices. The raised reply field stays visible and explains its disabled state until the decision is answered; its focus boundary uses signal.
+- **View and detail controls:** Terminal/Chat reuses the existing segmented component, with surface-ground selection and `aria-pressed`. Transcript detail uses the existing frameless Select, with a muted trigger, keyboard selection, and a portaled listbox that escapes terminal stacking contexts. Unsupported agent defaults remain disabled with the visible Terminal only explanation. Changing representation preserves the mounted session.
+- **Home strips:** the whole row is a keyboard-focusable action. Use existing state icons with explicit words, truncate long secondary identity without losing the repository, and retain the inline attention question and recessed separator. Keyboard navigation follows the visible lane-grid arrangement.
+- **Transcript ledger and turn work:** prose and raw fallback share the body track. A user message or turn-start boundary begins a work group; tool calls and selected status notices share one expandable work row. Summary and Normal keep work collapsed by default; Verbose opens it. A closed work row still names failed tools and selected limit notices. Disclosed tools retain raw results or the existing diff renderer. Partial output has the visible Writing state. Malformed content remains a contained monospace block.
+- **Turn notice selection:** absent an explicit per-agent override, Summary shows no notices, Normal selects rate and usage limits, and Verbose selects all five notice kinds: turn started, turn finished, turn cost, rate limit, and usage limit. Settings displays Follow detail level until a custom list is chosen. That list, stored under `agent_status_rows` through Config/config.set, overrides notice selection at every detail level; it does not change disclosure defaults. Notices appear inside work details, and daemon cost text appears there once without a second amount synthesized from metadata.
+- **Unified attachment composer:** one surface contains removable filename chips, editable text, an attach action, read-only observed agent/model, and send. Focus changes the whole composer boundary to signal. Enter sends and Shift+Enter adds a line. The native picker supplies existing file paths; pasted attachment bytes are saved in application data before their paths are added to the prompt. Failed sends preserve draft and attachments. Attachment errors remain visible. Model and effort are not live-change controls.
+- **Pending decision:** an attention-colored top rule introduces the question and any command/body alongside wrapping choices. This replaces the ordinary context/terminal action strip. The composer remains visible with Answer the prompt first until the decision is answered.
 - **Settings and icons:** keep the existing modal, horizontal section tabs, cards, Select, Switch, and ColorField. SVG paths come from the incumbent icon library and inherit current color; controls supply accessible names. Reuse these components rather than restyling each instance.
 
 ## Do's and Don'ts
@@ -121,4 +128,6 @@ Keep the flat strip and ledger geometry. Reuse small rounded controls, larger ro
 
 - Don't introduce a new palette, font system, decorative assets, emoji, or glyph icons.
 - Don't depend on a rich headline, model label, timestamp, or valid Markdown for readable identity and content.
-- Don't stretch home rows or the reply action across the full width of a large window.
+- Don't replace useful wide-pane context with longer prose or a full-width reply action.
+- Don't give routine turn notices separate transcript rows or duplicate the daemon's cost text.
+- Don't make an observed model label look editable.
