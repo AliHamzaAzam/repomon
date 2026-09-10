@@ -45,19 +45,13 @@ fn tokens(text: &str) -> Option<u64> {
     (value.is_finite() && value >= 0.0 && value < u64::MAX as f64).then(|| value.round() as u64)
 }
 
-fn glyph(c: char) -> bool {
-    matches!(
-        c,
-        '+' | '*' | '✻' | '✽' | '✳' | '✶' | '✢' | '∗' | '•' | '●' | '\u{2801}'..='\u{28ff}'
-    )
-}
-
 pub(super) fn timed_line(kind: &str, line: &str) -> Option<Activity> {
     let line = line.trim();
-    if !line.starts_with(glyph) {
-        return None;
-    }
-    let body = line.trim_start_matches(glyph).trim();
+    // Recognize the timer/counter grammar independently of the CLI's rotating frame set.
+    // An optional leading symbol is decoration; alphabetic prose remains part of the verb.
+    let body = line
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim();
     let (verb, counters) = body.split_once(" (")?;
     let counters = counters.strip_suffix(')')?;
     let mut activity = Activity::default();
@@ -170,6 +164,25 @@ pub fn queue_indicator(kind: &str, pane: &str) -> bool {
 mod tests {
     use super::*;
     use crate::agent::conversation::{pane_content, pane_items};
+    #[test]
+    fn activity_grammar_handles_unknown_frames_and_middot_without_leaking_chrome() {
+        let pane = include_str!("fixtures/claude_activity_middot_2026_09_11.txt");
+        for frame in ["·", "¤", "⟳", "", "*"] {
+            let pane = pane.replace("· Drizzling", &format!("{frame} Drizzling"));
+            let activity = pane_activity("claude-code", &pane).unwrap();
+            assert_eq!(activity.verb.as_deref(), Some("Drizzling"));
+            assert_eq!(activity.elapsed_seconds, Some(47.0));
+            assert_eq!(activity.token_count, Some(2700));
+            assert_eq!(activity.thought_seconds, Some(15.0));
+            assert!(!pane_content("claude-code", &pane).contains("Drizzling"));
+            let rows = pane_items("claude-code", &pane);
+            assert!(
+                rows.iter()
+                    .any(|r| r.text.contains("review is in progress"))
+            );
+            assert!(rows.iter().all(|r| !r.text.contains("Drizzling")));
+        }
+    }
     #[test]
     fn real_claude_pane_and_operator_status_extract_counters_without_inline_chrome() {
         // Existing captured Claude pane, with the operator-transcribed active footer replacing
