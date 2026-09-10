@@ -5945,9 +5945,22 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
     let tmux = ctx.backend.clone();
     // Reuse the last successful windows on probe failure to avoid detaching live agents; a
     // successful empty result still clears them.
+    let mut window_starts = HashMap::new();
     let fresh: Result<Vec<agent::WindowMeta>, String> =
-        match tokio::task::spawn_blocking(move || tmux.list_windows_meta()).await {
-            Ok(Ok(w)) => Ok(w),
+        match tokio::task::spawn_blocking(move || {
+            let windows = tmux.list_windows_meta()?;
+            let starts = windows
+                .iter()
+                .filter_map(|w| tmux.window_started_at(&w.name).map(|at| (w.wid, at)))
+                .collect();
+            Ok::<_, repomon_core::Error>((windows, starts))
+        })
+        .await
+        {
+            Ok(Ok((w, starts))) => {
+                window_starts = starts;
+                Ok(w)
+            }
             Ok(Err(e)) => Err(e.to_string()),
             Err(e) => Err(e.to_string()),
         };
@@ -6028,7 +6041,12 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         if !summaries.is_empty() {
             // Preserve durable session stamps; unbound transcripts require pane evidence before
             // claiming a window.
-            let pairing = pair_transcripts_to_windows(&summaries, &lane_windows, now);
+            let pairing = pair_transcripts_to_windows_with_ages(
+                &summaries,
+                &lane_windows,
+                now,
+                &window_starts,
+            );
             if !pairing.new_bindings.is_empty() || !pairing.duplicate_stamps.is_empty() {
                 stamp_batches.push((
                     pairing.new_bindings,
@@ -6250,6 +6268,16 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     }
                 }
                 for (wid, name, sid, kind) in confirmed {
+                    // Revalidate after pane capture and before either direct or fingerprint stamping.
+                    if !cands.iter().any(|c| {
+                        c.sid == sid
+                            && activity_belongs_to_window(
+                                c.last_activity,
+                                tmux.window_started_at(&name),
+                            )
+                    }) {
+                        continue;
+                    }
                     if let Err(e) = tmux.set_window_session_by_id(wid, &sid) {
                         tracing::warn!("failed to stamp @repomon_session on {name} (@{wid}): {e}");
                     }
@@ -6670,6 +6698,7 @@ pub(crate) const VIEWPORT_OWNED_TTL: std::time::Duration = std::time::Duration::
 /// cannot establish identity.
 struct BindingCandidate {
     sid: String,
+    last_activity: chrono::DateTime<chrono::Utc>,
     /// Normalized fingerprint of the transcript's last message ([`message_fingerprint`]);
     /// `None` (no message yet / too short) means no evidence - the candidate simply returns
     /// next tick.
@@ -6880,12 +6909,34 @@ fn direct_bind_allowed(cands_len: usize, probe_len: usize, lane_window_count: us
     cands_len == 1 && probe_len == 1 && lane_window_count == 1
 }
 
-/// Keep durable bindings until unique pane evidence confirms a replacement, preserving identity
-/// across activity-rank changes and restarts.
+/// Unknown creation time is insufficient evidence to attach any transcript.
+fn activity_belongs_to_window(
+    activity: chrono::DateTime<chrono::Utc>,
+    started: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    started.is_some_and(|start| activity >= start)
+}
+
+#[cfg(test)]
 fn pair_transcripts_to_windows(
     summaries: &[agent::TranscriptSummary],
     windows: &[agent::WindowMeta],
     now: chrono::DateTime<chrono::Utc>,
+) -> Pairing {
+    let starts = windows
+        .iter()
+        .map(|w| (w.wid, chrono::DateTime::UNIX_EPOCH))
+        .collect();
+    pair_transcripts_to_windows_with_ages(summaries, windows, now, &starts)
+}
+
+/// Keep durable bindings until unique pane evidence confirms a replacement, preserving identity
+/// across activity-rank changes and restarts.
+fn pair_transcripts_to_windows_with_ages(
+    summaries: &[agent::TranscriptSummary],
+    windows: &[agent::WindowMeta],
+    now: chrono::DateTime<chrono::Utc>,
+    starts: &HashMap<u64, chrono::DateTime<chrono::Utc>>,
 ) -> Pairing {
     let is_fresh =
         |s: &agent::TranscriptSummary| (now - s.last_activity).num_seconds() < RECENTLY_ACTIVE_SECS;
@@ -6912,6 +6963,11 @@ fn pair_transcripts_to_windows(
             .iter()
             .position(|s| s.session_id.as_deref() == Some(sid.as_str()))
         {
+            if !activity_belongs_to_window(summaries[si].last_activity, starts.get(&w.wid).copied())
+            {
+                duplicate_stamps.push((w.wid, w.name.clone()));
+                continue;
+            }
             if !claimed[si] {
                 claim[wi] = Some(si);
                 claimed[si] = true;
@@ -6977,9 +7033,17 @@ fn pair_transcripts_to_windows(
         if let Some(sid) = &summaries[si].session_id {
             let needle = message_fingerprint(summaries[si].last_message.as_deref());
             let nominate = is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some());
-            if nominate {
+            if nominate
+                && free.iter().any(|&wi| {
+                    activity_belongs_to_window(
+                        summaries[si].last_activity,
+                        starts.get(&windows[wi].wid).copied(),
+                    )
+                })
+            {
                 new_bindings.push(BindingCandidate {
                     sid: sid.clone(),
+                    last_activity: summaries[si].last_activity,
                     needle,
                     kind: summaries[si].kind.clone(),
                 });
@@ -8910,6 +8974,48 @@ mod tests {
     /// A passed reset time and newer transcript activity must each independently clear stale pane
     /// quota text.
     #[test]
+    fn new_windows_reject_old_transcripts_even_with_stamps_or_pane_evidence() {
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::seconds(10);
+        let summary = tsum_msg(
+            "old",
+            old,
+            "Previous agent completion report with unique fingerprint text",
+        );
+        let mut windows = vec![agent::WindowMeta {
+            name: "lane-1".into(),
+            wid: 1,
+            session: None,
+            agent_kind: Some("claude-code".into()),
+        }];
+        let starts = HashMap::from([(1, now)]);
+        let pair = pair_transcripts_to_windows_with_ages(
+            std::slice::from_ref(&summary),
+            &windows,
+            now,
+            &starts,
+        );
+        assert!(pair.new_bindings.is_empty());
+        assert_eq!(pair.unpaired, vec!["lane-1"]);
+        windows[0].session = Some("old".into());
+        let pair = pair_transcripts_to_windows_with_ages(
+            std::slice::from_ref(&summary),
+            &windows,
+            now,
+            &starts,
+        );
+        assert_eq!(pair.assignment, vec![None]);
+        assert_eq!(pair.duplicate_stamps, vec![(1, "lane-1".into())]);
+        assert!(!activity_belongs_to_window(old, Some(now)));
+        assert!(!activity_belongs_to_window(now, None));
+        assert!(activity_belongs_to_window(now, Some(now)));
+        let pair =
+            pair_transcripts_to_windows_with_ages(&[summary], &windows, now, &HashMap::new());
+        assert!(pair.new_bindings.is_empty());
+        assert_eq!(pair.assignment, vec![None]);
+    }
+
+    #[test]
     fn rate_limit_lifts_once_the_reset_time_has_passed_even_without_new_activity() {
         // The pane never produced new output after the pause (auto-continue may still be
         // nudging it), but the reset instant it named has already come and gone, so the row
@@ -10807,6 +10913,7 @@ mod tests {
     #[test]
     fn stamps_follow_pane_evidence_not_the_hint() {
         let cand = |sid: &str, msg: &str| BindingCandidate {
+            last_activity: chrono::Utc::now(),
             sid: sid.into(),
             needle: message_fingerprint(Some(msg)),
             kind: AgentKind::ClaudeCode,
@@ -10851,6 +10958,7 @@ mod tests {
     #[test]
     fn ambiguous_or_absent_pane_evidence_stamps_nothing() {
         let cand = |sid: &str, msg: Option<&str>| BindingCandidate {
+            last_activity: chrono::Utc::now(),
             sid: sid.into(),
             needle: message_fingerprint(msg),
             kind: AgentKind::ClaudeCode,

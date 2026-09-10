@@ -67,6 +67,9 @@ pub(super) async fn lane_source(
     ctx.backend
         .set_window_agent_kind(&TmuxRuntime::window_name(lane), kind)
         .unwrap();
+    ctx.backend
+        .set_window_session(&TmuxRuntime::window_name(lane), session)
+        .unwrap();
     serde_json::from_value(json!({"lane_id":lane,"session_id":session,"kind":kind})).unwrap()
 }
 pub(super) fn user_record(n: usize, kind: &str) -> String {

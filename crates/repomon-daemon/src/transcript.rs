@@ -8,13 +8,10 @@ use repomon_core::agent::{
     prompt,
 };
 use repomon_core::model::{LaneId, TranscriptItem};
-use repomon_core::usage_ledger::{
-    FleetIndex,
-    scan::{
-        ScanOptions, SourceScan, scan_antigravity_transcript_with_options, scan_claude_transcript,
-        scan_claude_transcript_with_options, scan_codex_rollout_with_options,
-        scan_opencode_db_with_options,
-    },
+use repomon_core::usage_ledger::scan::{
+    ScanOptions, SourceScan, scan_antigravity_transcript_with_options,
+    scan_claude_transcript_with_options, scan_codex_rollout_with_options,
+    scan_opencode_db_with_options,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -83,7 +80,7 @@ fn check_window_session(p: &Params, resolved: Option<&str>) -> Result<(), Transc
         if requested == &format!("win:{window}") {
             return Ok(());
         }
-        if Some(requested.as_str()) != resolved {
+        if resolved.is_some_and(|actual| requested != actual) {
             return Err(TranscriptError::InvalidParams(format!(
                 "session_id does not belong to window {window}; omit session_id to address this window"
             )));
@@ -370,7 +367,7 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     }
     .or(meta.agent_kind)
     .unwrap_or_else(|| "claude-code".into());
-    let bound_session = win.and_then(|w| w.session);
+    let bound_session = win.as_ref().and_then(|w| w.session.clone());
     if p.window.is_some() && bound_session.is_some() {
         check_window_session(p, bound_session.as_deref())?;
     }
@@ -382,7 +379,17 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
             .filter(|s| !s.starts_with("win:"))
             .or(bound_session)
     };
-    let started = if session.is_some() { None } else { started };
+    // A missing creation time or provider identity never authorizes lane-wide history.
+    // Keep the pane available while the overlay establishes a window-specific binding.
+    let unknown = Source {
+        window: window.clone(),
+        kind: kind.clone(),
+        path: None,
+        session: session.clone(),
+    };
+    if started.is_none() || session.is_none() {
+        return Ok(unknown);
+    }
     if !matches!(
         kind.as_str(),
         "claude-code" | "codex" | "antigravity" | "opencode"
@@ -410,76 +417,65 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         });
     }
     if !discover {
-        check_window_session(p, session.as_deref())?;
-        return Ok(Source {
-            window,
-            kind,
-            path: None,
-            session,
-        });
+        return Ok(unknown);
     }
+    // A stale ledger row still provides a session-specific path for age validation. Do not
+    // scan other sessions or provider directories when the window's source is unknown.
+    let recorded = ctx
+        .store
+        .conversation_source(p.lane_id, kind.clone(), session.clone(), None)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(path, _)| PathBuf::from(path));
     let scan_kind = kind.clone();
-    let lane = p.lane_id;
     let selected_session = session.clone();
     let found = tokio::task::spawn_blocking(move || {
+        let start = started?;
+        let id = session.as_ref()?;
         if scan_kind == "claude-code" {
-            if let Some(id) = &session {
-                return repomon_core::agent::claude::transcript_path_for_session(&cwd, id)
-                    .map(|p| (p, Some(id.clone())));
-            }
-            return repomon_core::agent::claude::summaries_for(
-                &cwd,
-                chrono::Duration::hours(24 * 30),
-                1,
-            )
-            .iter()
-            .find(|s| {
-                started.is_none_or(|start| {
-                    scan_claude_transcript(&s.manifest_path, 0, None)
-                        .ok()
-                        .and_then(|scan| scan.sessions.iter().filter_map(|r| r.first_at).min())
-                        .is_some_and(|at| at >= start)
-                })
-            })
-            .map(|s| (s.manifest_path.clone(), session.clone()));
+            let path = recorded
+                .or_else(|| repomon_core::agent::claude::transcript_path_for_session(&cwd, id))?;
+            // The incremental summary reads new records only, even for a large live session.
+            let activity = repomon_core::agent::claude::transcript_activity(&path)?;
+            return Some(if activity >= start { Ok(path) } else { Err(()) });
         }
-        let index = FleetIndex::new(Vec::new(), vec![(lane, meta.repo_id, cwd)]);
-        crate::usage_ingest::discover_sources(512)
-            .into_iter()
-            .filter(|s| {
-                matches!(
-                    (scan_kind.as_str(), s.kind),
-                    ("codex", crate::usage_ingest::SourceKind::Codex)
-                        | ("antigravity", crate::usage_ingest::SourceKind::Antigravity)
-                        | ("opencode", crate::usage_ingest::SourceKind::OpenCode)
-                )
-            })
-            .find_map(|s| {
-                let scan = crate::usage_ingest::scan_source(&s, 0).ok()?;
-                scan.sessions
-                    .iter()
-                    .filter(|row| {
-                        index.attribute(row.cwd.as_deref()).lane_id == Some(lane)
-                            && session.as_ref().is_none_or(|id| &row.session_id == id)
-                            && started
-                                .is_none_or(|start| row.first_at.is_some_and(|at| at >= start))
-                    })
-                    .max_by_key(|row| row.last_at)
-                    .map(|row| (s.path, Some(row.session_id.clone())))
-            })
+        let path = recorded?;
+        let source_kind = match scan_kind.as_str() {
+            "codex" => crate::usage_ingest::SourceKind::Codex,
+            "antigravity" => crate::usage_ingest::SourceKind::Antigravity,
+            "opencode" => crate::usage_ingest::SourceKind::OpenCode,
+            _ => return None,
+        };
+        let source = crate::usage_ingest::Source {
+            path: path.clone(),
+            kind: source_kind,
+            account: String::new(),
+            cwd_hint: None,
+            model_hint: String::new(),
+        };
+        let scan = crate::usage_ingest::scan_source(&source, 0).ok()?;
+        let row = scan.sessions.iter().find(|row| &row.session_id == id)?;
+        let at = row.last_at?;
+        Some(if at >= start { Ok(path) } else { Err(()) })
     })
     .await
     .map_err(|e| e.to_string())?;
-    let (path, session) = found.map_or((None, selected_session), |(path, session)| {
-        (Some(path), session)
-    });
-    check_window_session(p, session.as_deref())?;
-    Ok(Source {
-        window,
-        kind,
-        path,
-        session,
-    })
+    if let Some(Ok(path)) = &found {
+        check_window_session(p, selected_session.as_deref())?;
+        return Ok(Source {
+            window,
+            kind,
+            path: Some(path.clone()),
+            session: selected_session,
+        });
+    }
+    // A rejected stamp must not keep reintroducing an obsolete identity on subsequent polls.
+    if let Some(win) = win.filter(|w| w.session.is_some() && matches!(found, Some(Err(())))) {
+        let backend = ctx.backend.clone();
+        let _ = tokio::task::spawn_blocking(move || backend.set_window_session_by_id(win.wid, ""))
+            .await;
+    }
+    Ok(unknown)
 }
 
 #[cfg(test)]
@@ -831,9 +827,11 @@ pub async fn watch(
         let mut stream_ended = false;
         let mut discovery = std::time::Instant::now() - Duration::from_secs(2);
         let mut reads = tokio::task::JoinSet::new();
-        let mut discoveries = tokio::task::JoinSet::new();
+        let mut discoveries: tokio::task::JoinSet<Result<Source, TranscriptError>> =
+            tokio::task::JoinSet::new();
         let mut previous_activity = initial_activity;
         let mut previous_order = Vec::new();
+        let mut identity_removed = Vec::new();
         let mut previous_inputs = Value::Null;
         let mut previous_pending = initial_pending;
         let mut input_source = initial_source.clone();
@@ -853,7 +851,12 @@ pub async fn watch(
                 Some(result) = discoveries.join_next(), if !discoveries.is_empty() => {
                     if let Ok(Ok(src)) = result {
                         if src != initial_source {
+                            if initial_source.path.is_some() && (initial_source.path != src.path || initial_source.session != src.session) {
+                                identity_removed.extend(previous_order.iter().cloned());
+                                state = ConversationStream::default();
+                            }
                             initial_source = src;
+                            cached = json!({"items":[], "next_before":null, "older_message_count":null});
                             source_cache = task_ctx.transcript_cache.entry(&initial_source);
                             signature = None;
                             dirty = true;
@@ -921,6 +924,7 @@ pub async fn watch(
                     let replaced = task_ctx.transcript_inputs.reconcile(&task_window, &initial_source, &mut finals);
                     let replaced: Vec<_> = replaced.into_iter().filter(|id| state.forget_replaced_user(id)).collect();
                     let mut update = state.update(finals, live, active);
+                    update.removed_ids.append(&mut identity_removed);
                     update.removed_ids.extend(replaced);
                     let mut input_states = task_ctx.transcript_inputs.append(&task_window, &initial_source, &pane, &mut update.items, &mut update.order);
                     if let Some(anchor) = update.order.iter().find(|id| state.is_partial_assistant(id)).cloned() {
@@ -981,11 +985,36 @@ mod tests {
     pub(super) struct ScriptedBackend {
         opens: AtomicU64,
         pub(super) pane: StdMutex<String>,
+        pub(super) started: StdMutex<Option<Option<chrono::DateTime<chrono::Utc>>>>,
         pub(super) metas: StdMutex<Vec<repomon_core::agent::WindowMeta>>,
         pub(super) senders:
             StdMutex<HashMap<String, (u64, tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>)>>,
     }
     impl SessionBackend for ScriptedBackend {
+        fn window_started_at(&self, _window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+            self.started
+                .lock()
+                .unwrap()
+                .unwrap_or(Some(chrono::DateTime::UNIX_EPOCH))
+        }
+        fn set_window_session(&self, window: &str, session: &str) -> repomon_core::Result<()> {
+            if let Some(meta) = self
+                .metas
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|m| m.name == window)
+            {
+                meta.session = (!session.is_empty()).then(|| session.into());
+            }
+            Ok(())
+        }
+        fn set_window_session_by_id(&self, wid: u64, session: &str) -> repomon_core::Result<()> {
+            if let Some(meta) = self.metas.lock().unwrap().iter_mut().find(|m| m.wid == wid) {
+                meta.session = (!session.is_empty()).then(|| session.into());
+            }
+            Ok(())
+        }
         fn available(&self) -> bool {
             true
         }
@@ -1184,6 +1213,8 @@ mod tests {
             );
             let sess = ctx.open_session(ConnKind::Local).await;
             let window = TmuxRuntime::window_name(lane);
+            backend.set_window_agent_kind(&window, kind).unwrap();
+            backend.set_window_session(&window, "fixture").unwrap();
             let params: Params =
                 serde_json::from_value(json!({"lane_id":lane,"kind":kind,"on":true})).unwrap();
             let mut events = ctx.events.subscribe();

@@ -200,7 +200,15 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
         })
     };
 
+    // Independent reads may overtake other requests. Everything else, including input,
+    // viewport changes and watch/unwatch, executes in wire order. Clients match replies by ID.
+    let mut requests = tokio::task::JoinSet::new();
+    let mut ordered_tail: Option<tokio::sync::oneshot::Receiver<()>> = None;
     while let Some(frame) = in_rx.recv().await {
+        while requests.try_join_next().is_some() {}
+        if requests.len() >= 128 {
+            requests.join_next().await;
+        }
         let req: Request = match serde_json::from_slice(&frame) {
             Ok(r) => r,
             Err(e) => {
@@ -225,19 +233,32 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
         if req.method == "subscribe" {
             forwarding.store(true, Ordering::Relaxed);
         }
-        let id = req.id;
-        let resp = match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
-            Ok(value) => Response::ok(id, value),
-            Err(err) => Response::err(id, err),
+        let (previous, done) = if independent_read(&req.method) {
+            (None, None)
+        } else {
+            let (done, next) = tokio::sync::oneshot::channel();
+            (ordered_tail.replace(next), Some(done))
         };
-        if out_tx
-            .send(serde_json::to_vec(&resp).unwrap_or_default())
-            .await
-            .is_err()
-        {
-            break;
-        }
+        let ctx = ctx.clone();
+        let sess = sess.clone();
+        let out_tx = out_tx.clone();
+        requests.spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let resp = match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
+                Ok(value) => Response::ok(req.id, value),
+                Err(err) => Response::err(req.id, err),
+            };
+            let _ = out_tx
+                .send(serde_json::to_vec(&resp).unwrap_or_default())
+                .await;
+            // Dropping the sender also releases the successor on a panic.
+            drop(done);
+        });
     }
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
 
     // Client gone: drop our writer handle so the writer task ends, stop the forwarder, and let the
     // writer flush what it has queued.
@@ -246,9 +267,141 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     let _ = writer.await;
 }
 
+/// Keep the allowlist small: new methods default to ordered execution, including all mutations.
+fn independent_read(method: &str) -> bool {
+    matches!(
+        method,
+        "ping" | "agent.detect" | "lane.list" | "agent.transcript_page"
+    )
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn slow_overlay_does_not_delay_ping_on_the_same_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        let ctx = Ctx::new_with_paths(
+            repomon_core::Store::open_in_memory().unwrap(),
+            repomon_core::Config::default(),
+            None,
+            dir.path().join("config"),
+            dir.path().join("notes"),
+        );
+        // lane.list cannot finish while this lock is held. The test releases it only after ping.
+        let blocked = ctx.overlay_flight.lock().await;
+        let task = tokio::spawn(handle_conn(ctx.clone(), server));
+        protocol::write_message(&mut client, &Request::new(1, "lane.list", None))
+            .await
+            .unwrap();
+        protocol::write_message(&mut client, &Request::new(2, "ping", None))
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(2), protocol::read_frame(&mut client))
+            .await
+            .expect("ping queued behind overlay")
+            .unwrap()
+            .unwrap();
+        let response: Response = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(response.id, Some(2));
+        assert_eq!(response.result, Some(serde_json::json!("pong")));
+        drop(blocked);
+        let frame = tokio::time::timeout(Duration::from_secs(5), protocol::read_frame(&mut client))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Response>(&frame).unwrap().id,
+            Some(1)
+        );
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordered_mutations_keep_wire_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordered.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        let ctx = Ctx::new_with_paths(
+            repomon_core::Store::open_in_memory().unwrap(),
+            repomon_core::Config::default(),
+            None,
+            dir.path().join("config"),
+            dir.path().join("notes"),
+        );
+        let blocked = ctx.config.write().await;
+        let task = tokio::spawn(handle_conn(ctx.clone(), server));
+        // A pending configuration write must hold later ordered requests, while ping bypasses it.
+        protocol::write_message(
+            &mut client,
+            &Request::new(
+                1,
+                "agent.add",
+                Some(serde_json::json!({"name":"qa-ordered", "command":"echo"})),
+            ),
+        )
+        .await
+        .unwrap();
+        protocol::write_message(&mut client, &Request::new(2, "subscribe", None))
+            .await
+            .unwrap();
+        protocol::write_message(&mut client, &Request::new(3, "ping", None))
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(2), protocol::read_frame(&mut client))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Response>(&frame).unwrap().id,
+            Some(3)
+        );
+        drop(blocked);
+        for id in 1..=2 {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(2), protocol::read_frame(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            let mut response: Response = serde_json::from_slice(&frame).unwrap();
+            while response.id.is_none() {
+                let frame = protocol::read_frame(&mut client).await.unwrap().unwrap();
+                response = serde_json::from_slice(&frame).unwrap();
+            }
+            assert_eq!(response.id, Some(id));
+            assert!(response.error.is_none());
+        }
+        for method in [
+            "agent.send_input",
+            "agent.key",
+            "agent.spawn",
+            "agent.stop",
+            "viewport.set",
+            "agent.transcript_watch",
+        ] {
+            assert!(!independent_read(method), "{method}");
+        }
+        drop(client);
+        task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn running_daemon_rebinds_and_broadcasts_without_dropping_existing_stream() {

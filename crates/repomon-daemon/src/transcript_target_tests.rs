@@ -2,6 +2,7 @@
 use super::round5_tests::{context, lane_source, user_record};
 use super::*;
 use crate::conn::ConnKind;
+use repomon_core::SessionBackend;
 use repomon_core::agent::WindowMeta;
 
 #[tokio::test]
@@ -90,11 +91,9 @@ async fn explicit_window_rejects_foreign_sessions_for_every_kind_before_fallback
         backend.metas.lock().unwrap().last_mut().unwrap().session = None;
         let mut mismatch = params.clone();
         mismatch.session_id = Some("foreign-claude".into());
+        let unresolved = resolve_source(&ctx, &mismatch, false).await.unwrap();
         assert!(
-            matches!(
-                resolve_source(&ctx, &mismatch, false).await,
-                Err(TranscriptError::InvalidParams(_))
-            ),
+            unresolved.path.is_none() && unresolved.session.is_none(),
             "{kind}"
         );
         let mut window_only = params;
@@ -110,7 +109,7 @@ async fn explicit_window_rejects_foreign_sessions_for_every_kind_before_fallback
 }
 
 #[tokio::test]
-async fn null_window_session_uses_its_kind_ledger_identity_and_validates_supplied_id() {
+async fn bound_window_session_uses_its_kind_ledger_identity_and_validates_supplied_id() {
     let dir = tempfile::tempdir().unwrap();
     let (ctx, _) = context(dir.path()).await;
     let file = dir.path().join("agy.jsonl");
@@ -354,4 +353,52 @@ async fn old_identical_prompt_and_composer_draft_do_not_consume_new_input() {
         states[&id], "consumed",
         "observed consumption survives scrolling off pane"
     );
+}
+
+#[tokio::test]
+async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
+    for kind in ["claude-code", "codex", "antigravity", "opencode"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, backend) = context(dir.path()).await;
+        let file = dir.path().join("old.jsonl");
+        std::fs::write(&file, user_record(1, kind)).unwrap();
+        let mut p = lane_source(&ctx, dir.path(), kind, &file, "old-session").await;
+        p.window = Some(TmuxRuntime::window_name(p.lane_id));
+        *backend.pane.lock().unwrap() = "Live pane only".into();
+        // The ledger's session start is older than this new window, even with a bad stamp.
+        *backend.started.lock().unwrap() =
+            Some(Some(chrono::Utc::now() + chrono::Duration::seconds(1)));
+        let source = resolve_source(&ctx, &p, false).await.unwrap();
+        assert!(source.path.is_none(), "{kind}");
+        let client = ctx.open_session(ConnKind::Local).await;
+        let page = watch(&ctx, &client, p.clone()).await.unwrap();
+        assert!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["kind"] == "terminal_block")
+        );
+        assert!(page["next_before"].is_null());
+        unwatch_all(&ctx, &client).await;
+        if kind == "claude-code" {
+            let record = json!({"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"old history"}});
+            std::fs::write(&file, format!("{record}\n")).unwrap();
+            assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+            assert!(
+                backend.metas.lock().unwrap()[0].session.is_none(),
+                "bad stamp must heal"
+            );
+            backend
+                .set_window_session(p.window.as_deref().unwrap(), "old-session")
+                .unwrap();
+        }
+        // No creation evidence is also a successful pane fallback, even with a supplied ID.
+        *backend.started.lock().unwrap() = Some(None);
+        assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+        // A fresh ledger row still cannot identify a window with no bound session.
+        *backend.started.lock().unwrap() = Some(Some(chrono::DateTime::UNIX_EPOCH));
+        backend.metas.lock().unwrap()[0].session = None;
+        assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+    }
 }

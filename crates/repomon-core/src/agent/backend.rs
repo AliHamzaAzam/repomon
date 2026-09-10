@@ -156,7 +156,8 @@ pub trait SessionBackend: Send + Sync {
         Ok(None)
     }
 
-    /// Earliest eligible transcript start for an unbound live window.
+    /// Creation time for transcript identity checks, including already-bound windows.
+    /// None means the caller must not infer transcript ownership from lane history.
     fn window_started_at(&self, _window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         None
     }

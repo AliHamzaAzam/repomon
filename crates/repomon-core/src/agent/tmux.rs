@@ -656,11 +656,30 @@ impl TmuxRuntime {
                 command,
             ])?;
         }
+        self.stamp_window_started(&window, chrono::Utc::now())?;
         self.configure();
         // A fresh window can inherit a tiny session grid; set a usable initial size before the
         // agent’s first paint.
         let _ = self.resize_named(&window, DEFAULT_PANE_COLS, DEFAULT_PANE_ROWS);
         Ok(window)
+    }
+
+    // Record a conservative creation boundary after tmux acknowledges the new window.
+    // Pre-existing windows without this stamp keep unknown age across daemon upgrades.
+    fn stamp_window_started(
+        &self,
+        window: &str,
+        started: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        self.run_allow_absent(&[
+            "set-option",
+            "-w",
+            "-t",
+            &self.exact_target(window),
+            "@repomon_started_at",
+            &started.to_rfc3339(),
+        ])?;
+        Ok(())
     }
 
     /// Capture the pane's text, including ANSI color escapes (`-e`).
@@ -1105,6 +1124,7 @@ impl TmuxRuntime {
                 &cwd,
             ])?;
         }
+        self.stamp_window_started(name, chrono::Utc::now())?;
         self.configure();
         Ok(self.target_named(name))
     }
@@ -1144,6 +1164,7 @@ impl TmuxRuntime {
                 command,
             ])?;
         }
+        self.stamp_window_started(name, chrono::Utc::now())?;
         self.configure();
         Ok(self.exact_target(name))
     }
@@ -1333,9 +1354,17 @@ impl SessionBackend for TmuxRuntime {
     fn window_started_at(&self, window: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         let target = self.exact_target(window);
         let raw = self
-            .run_allow_absent(&["display-message", "-p", "-t", &target, "#{window_created}"])
+            .run_allow_absent(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{@repomon_started_at}",
+            ])
             .ok()?;
-        chrono::DateTime::from_timestamp(raw.trim().parse().ok()?, 0)
+        chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|at| at.with_timezone(&chrono::Utc))
     }
 
     fn list_windows_meta(&self) -> Result<Vec<WindowMeta>> {
@@ -2204,8 +2233,12 @@ while True:
         let cwd = std::env::temp_dir();
         let lane: LaneId = 1;
 
+        let before = chrono::Utc::now();
         rt.spawn(lane, &cwd, "sh -c 'echo HELLO_REPOMON; sleep 30'")
             .unwrap();
+        let started =
+            SessionBackend::window_started_at(&rt, &TmuxRuntime::window_name(lane)).unwrap();
+        assert!(started >= before && started <= chrono::Utc::now());
         assert!(rt.has_window(lane));
 
         std::thread::sleep(std::time::Duration::from_millis(400));
