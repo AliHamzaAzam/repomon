@@ -53,6 +53,8 @@ export default function AttachmentComposer(props: {
   const [files, setFiles] = createSignal<ChatAttachment[]>([]);
   const [staging, setStaging] = createSignal(false);
   const [error, setError] = createSignal<string>();
+  const [dragging, setDragging] = createSignal(false);
+  let dragDepth = 0;
   let field!: HTMLTextAreaElement;
   const resize = () => {
     if (!field) return;
@@ -95,14 +97,14 @@ export default function AttachmentComposer(props: {
     } catch { setError("Could not attach files. Try choosing them again."); }
     finally { setStaging(false); }
   }
-  async function paste(event: ClipboardEvent) {
-    const pasted = Array.from(event.clipboardData?.files ?? []);
-    if (!pasted.length) return;
-    event.preventDefault();
-    if (locked()) return;
+  // The one pipeline pasted and dropped bytes both go through: saved into the same app-data
+  // attachments directory paste already used, then handed to add() for the same caret marker and
+  // chip treatment. Neither caller does its own staging or path handling.
+  async function stageFiles(incoming: File[]) {
+    if (!incoming.length || locked()) return;
     setStaging(true); setError(undefined);
     try {
-      for (const file of pasted) {
+      for (const file of incoming) {
         if (file.size > 20 * 1024 * 1024) throw new Error("Choose an attachment smaller than 20 MB.");
         const path = await invoke<string>("save_chat_attachment", { name: file.name, bytes: Array.from(new Uint8Array(await file.arrayBuffer())) });
         add([{ path, name: file.name }]);
@@ -110,14 +112,47 @@ export default function AttachmentComposer(props: {
     } catch (cause) { setError(`Could not save attachment. ${String(cause)}`); }
     finally { setStaging(false); }
   }
+  function paste(event: ClipboardEvent) {
+    const pasted = Array.from(event.clipboardData?.files ?? []);
+    if (!pasted.length) return;
+    event.preventDefault();
+    void stageFiles(pasted);
+  }
+  function hasFiles(event: DragEvent) {
+    return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  }
+  function dragEnter(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    setDragging(true);
+  }
+  function dragOver(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+  }
+  function dragLeave(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDragging(false);
+  }
+  function drop(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    setDragging(false);
+    void stageFiles(Array.from(event.dataTransfer?.files ?? []));
+  }
   async function send() {
     if (locked() || (!text().trim() && !files().length)) return;
     if (await props.onSend(attachmentPrompt(text(), files()))) { setText(""); setFiles([]); setError(undefined); }
   }
   return <form class="conversation-compose" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-    <div class="conversation-reply rounded">
+    <div class="conversation-reply rounded" classList={{ "is-drag-target": dragging() }}
+      onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
+      <Show when={dragging()}><div class="conversation-reply-drop" aria-hidden="true">Drop to attach</div></Show>
       <textarea ref={field} aria-label={`Reply to ${props.kind}`} placeholder={props.disabled ? "Answer the prompt first" : "Ask a question or describe a change…"} disabled={props.disabled || props.busy} value={text()} rows={1}
-        onPaste={(event) => void paste(event)} onInput={(event) => setText(event.currentTarget.value)}
+        onPaste={(event) => paste(event)} onInput={(event) => setText(event.currentTarget.value)}
         onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); } }} />
       <div class="composer-actions">
         <div class="composer-leading">

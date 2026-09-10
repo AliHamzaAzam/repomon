@@ -37,6 +37,29 @@ describe("chat attachments", () => {
     fireEvent.click(screen.getByRole("button", {name:"Send reply"}));
     await waitFor(() => expect(send).toHaveBeenCalledWith('Attached file: "/stable/attachment-image.png"'));
   });
+  it("routes a dropped image through the same save/marker pipeline as paste, with a visible drop target", async () => {
+    vi.mocked(invoke).mockResolvedValue("/stable/dropped-image.png");
+    const send = vi.fn().mockResolvedValue(true);
+    const result = render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const dropZone = result.container.querySelector(".conversation-reply")!;
+    const file = { name:"dropped.png", size:3, arrayBuffer:async () => new Uint8Array([9,9,9]).buffer };
+    fireEvent.dragEnter(dropZone, { dataTransfer:{ types:["Files"] } });
+    expect(dropZone).toHaveClass("is-drag-target");
+    expect(screen.getByText("Drop to attach")).toBeInTheDocument();
+    fireEvent.drop(dropZone, { dataTransfer:{ types:["Files"], files:[file] } });
+    expect(dropZone).not.toHaveClass("is-drag-target");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_chat_attachment", { name:"dropped.png", bytes:[9,9,9] }));
+    await screen.findByText("dropped.png");
+    expect(screen.getByRole("textbox")).toHaveValue("[Image #1]");
+    fireEvent.click(screen.getByRole("button", { name:"Send reply" }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Attached file: "/stable/dropped-image.png"'));
+  });
+  it("ignores a drag that carries no files, such as reordering an attachment chip", () => {
+    const result = render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    const dropZone = result.container.querySelector(".conversation-reply")!;
+    fireEvent.dragEnter(dropZone, { dataTransfer:{ types:["text/plain"] } });
+    expect(dropZone).not.toHaveClass("is-drag-target");
+  });
   it("keeps typed content and offers recovery when paste staging fails", async () => {
     vi.mocked(invoke).mockRejectedValue(new Error("Disk full"));
     render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
