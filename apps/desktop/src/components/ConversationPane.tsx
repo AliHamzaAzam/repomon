@@ -296,10 +296,12 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     <Show when={!following()}><button class="conversation-latest focus-ring" onClick={() => { setFollowing(true); scroll.scrollTop = scroll.scrollHeight; }}>Latest output</button></Show>
     <Show when={pendingRows().length}>
       <div class="conversation-pending-queue" aria-label="Not yet read by the agent">
+        <div class="conversation-pending-inner">
         <For each={pendingRows()}>{(row) => <div class="conversation-row conversation-user conversation-pending-row" data-transcript-id={row.key}>
           <div class="conversation-gutter"><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
           <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} /></div>
         </div>}</For>
+        </div>
       </div>
     </Show>
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>

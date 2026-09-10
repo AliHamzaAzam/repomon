@@ -82,9 +82,16 @@
 /* Mirrors the TUI's own split: a message the agent has not read yet is not seated in the
    transcript as though delivered - it stays pinned here, above the composer, until consumption
    moves it into the ordinary ledger. */
-.conversation-pending-queue { flex:none; max-width:900px; margin-inline:auto; padding:10px 28px 0; background:var(--raised); }
-.conversation-pending-row { margin-bottom:10px; }
-.conversation-pending-row:last-child { margin-bottom:14px; }
+/* margin-inline:auto on the flex item itself (conversation-main is a column flex container)
+   suppresses cross-axis stretch per the flex box spec, so the outer block would shrink to its
+   content instead of taking the full row width the ledger gets by being centered one level
+   further in. The inner wrapper centers at the ledger's own max-width/padding instead, from a
+   parent (the outer queue block) that is always full width, so both sides compute the same
+   right edge the same way. */
+.conversation-pending-queue { flex:none; background:var(--raised); }
+.conversation-pending-inner { max-width:900px; margin-inline:auto; padding:6px 28px 10px; }
+.conversation-pending-row { margin-top:6px; }
+.conversation-pending-row:first-child { margin-top:0; }
 .conversation-context { display:none; overflow:auto; }
 @container (min-width:1200px) {
   .conversation-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; }
@@ -98,6 +105,7 @@
   .conversation-footer { padding:0 20px 16px; }
   .conversation-empty { padding-left:64px; }
   .composer-trailing { max-width:45%; }
+  .conversation-pending-inner { padding:6px 20px 10px; }
 }
 
 .conversation-images { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; margin-bottom:8px; }
