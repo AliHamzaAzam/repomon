@@ -32,6 +32,7 @@ import {
   IconClose,
   IconCpu,
   IconHide,
+  IconHome,
   IconLayers,
   IconPin,
   IconPlay,
@@ -837,6 +838,26 @@ export default function FleetSidebar(props: FleetSidebarProps) {
             <IconPlus size={13} />
           </button>
         </div>
+      </div>
+
+      <div class="border-b border-line px-2 py-1.5">
+        <button
+          type="button"
+          class={`fleet-row focus-ring ${props.fleet.homeSelected() ? "is-selected" : ""}`}
+          onClick={() => props.fleet.selectHome()}
+          aria-current={props.fleet.homeSelected() ? "true" : undefined}
+        >
+          <span class="flex size-3 shrink-0 items-center justify-center">
+            <IconHome size={12} />
+          </span>
+          <span
+            class={`min-w-0 flex-1 truncate text-left text-xs ${
+              props.fleet.homeSelected() ? "font-semibold text-foreground" : "font-medium text-foreground/90"
+            }`}
+          >
+            Home
+          </span>
+        </button>
       </div>
 
       {/* Keep the controller reachable regardless of ordinary fleet filters. */}

@@ -11,6 +11,7 @@ pub mod mail;
 pub mod notify_watch;
 pub mod path_env;
 pub mod pubsub;
+pub mod pull_requests;
 pub mod push;
 pub mod reap;
 pub mod remote;
@@ -327,6 +328,13 @@ pub struct Ctx {
     pub file_indices: Arc<Mutex<HashMap<LaneId, CachedIndex>>>,
     /// Active worktree filesystem watchers, keyed by lane id.
     pub lane_watchers: Mutex<HashMap<LaneId, worktree_watch::WorktreeWatcher>>,
+    /// The home screen's lane-title cache: each lane's transcript headline (from the usage
+    /// ledger's already-parsed sessions), TTL'd so many clients rendering the home screen at
+    /// once don't each re-run the session query. See `usage_query::lane_headline`.
+    pub headline_cache: Mutex<HashMap<LaneId, (Instant, Option<String>)>>,
+    /// The home screen's PR-strip cache: one `gh pr list` pass across tracked repos, TTL'd
+    /// because `gh` shells out per repo. See `pull_requests::list`.
+    pub pr_cache: Mutex<Option<(Instant, Vec<repomon_core::model::PullRequestSummary>)>>,
     pub shutdown: Notify,
 }
 
@@ -473,6 +481,8 @@ impl Ctx {
             mail_eligible_windows: Mutex::new(HashSet::new()),
             file_indices: Arc::new(Mutex::new(HashMap::new())),
             lane_watchers: Mutex::new(HashMap::new()),
+            headline_cache: Mutex::new(HashMap::new()),
+            pr_cache: Mutex::new(None),
             shutdown: Notify::new(),
         })
     }

@@ -16,6 +16,7 @@ import RightPanelHost, {
 } from "./components/RightPanelHost";
 import { ResizableSplit } from "./components/ResizableSplit";
 import TerminalWorkspace from "./components/TerminalWorkspace";
+import HomeScreen from "./components/HomeScreen";
 import UpdateBanner from "./components/UpdateBanner";
 import ConnectionTrouble from "./components/ConnectionTrouble";
 import { daemonDiagnostics, openDaemonLog } from "./ipc/boot";
@@ -164,6 +165,10 @@ function App(props: AppProps) {
     if (connection().phase === "connected" && !fleetStarted) {
       fleetStarted = true;
       fleet.start();
+      // `?home=1` is read only by the qa/ screenshot harness (vite.screenshot.config.ts), to
+      // land on the home screen instead of the auto-selected first lane; an ordinary launch
+      // never carries it.
+      if (new URLSearchParams(location.search).get("home") === "1") fleet.selectHome();
       void daemonCall("config.get")
         .then((config) => {
           if (config.theme && typeof config.theme === "string") {
@@ -365,6 +370,7 @@ function App(props: AppProps) {
       case "layout.focused": workspace.chooseLayout("focused"); break;
       case "layout.split": workspace.chooseLayout("split"); break;
       case "layout.grid": workspace.chooseLayout("grid"); break;
+      case "fleet.home": fleet.selectHome(); break;
       case "fleet.filter": searchInput?.focus(); break;
       case "fleet.urgent": fleet.setUrgentOnly(!fleet.urgentOnly()); break;
       case "fleet.refresh": void fleet.refresh(); break;
@@ -765,20 +771,24 @@ function App(props: AppProps) {
             aria-hidden={extensionsOpen() || workspace.editorWorkspace() ? "true" : undefined}
             inert={extensionsOpen() || workspace.editorWorkspace()}
           >
-            <TerminalWorkspace
-              fleet={fleet}
-              actions={actions}
-              workspace={workspace}
-              editor={editor}
-              onEnsureEditorOpen={() => {
-                if (!isEditorActive()) {
-                  workspace.setMultitasking(false);
-                  setRepomindOpen(false);
-                  persistRepomindOpen(false);
-                  workspace.setEditorWorkspace(true);
-                }
-              }}
-            />
+            {/* Multitasking spans the whole fleet rather than one lane, so it keeps its own view
+                regardless of selection; the home screen only replaces the single-lane empty state. */}
+            <Show when={workspace.multitasking() || fleet.selectedLaneId() !== null} fallback={<HomeScreen fleet={fleet} />}>
+              <TerminalWorkspace
+                fleet={fleet}
+                actions={actions}
+                workspace={workspace}
+                editor={editor}
+                onEnsureEditorOpen={() => {
+                  if (!isEditorActive()) {
+                    workspace.setMultitasking(false);
+                    setRepomindOpen(false);
+                    persistRepomindOpen(false);
+                    workspace.setEditorWorkspace(true);
+                  }
+                }}
+              />
+            </Show>
           </div>
           <Show when={extensionsOpen()}>
             <div class="absolute inset-0 z-10 bg-background">

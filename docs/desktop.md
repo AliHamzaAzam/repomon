@@ -202,6 +202,7 @@ cannot be remapped from Settings and do not appear if you search the overlay wit
 
 | Chord | Action |
 |---|---|
+| `mod+shift+o` | Open the home screen |
 | `mod+/` | Filter the fleet |
 | `mod+u` | Show only lanes needing attention |
 | `mod+r` | Refresh |

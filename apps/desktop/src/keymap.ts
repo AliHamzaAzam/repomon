@@ -77,6 +77,7 @@ export const BINDINGS: Binding[] = [
     platform: "Not mod+shift+3 on any platform: that chord is reserved for the macOS screenshot tool, so mod+shift+0 is used everywhere instead.",
   },
 
+  { id: "fleet.home", chord: "mod+shift+o", label: "Open the home screen", section: "Fleet" },
   { id: "fleet.filter", chord: "mod+/", label: "Filter the fleet", section: "Fleet" },
   { id: "fleet.urgent", chord: "mod+u", label: "Show only lanes needing attention", section: "Fleet" },
   { id: "fleet.refresh", chord: "mod+r", label: "Refresh", section: "Fleet" },

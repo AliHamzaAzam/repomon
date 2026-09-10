@@ -28,6 +28,7 @@ import type {
   PendingDialog,
   Playbook,
   PolicyAction,
+  PullRequestSummary,
   RatesStatus,
   Repo,
   RepomindStatus,
@@ -250,6 +251,9 @@ interface RpcMap {
     result: { repo_id: number; bytes: number; path: string };
   };
   "repo.discover": { params: { root: string; max_depth?: number }; result: string[] };
+  // Every open PR across tracked repos, for the home screen's PR strips. Empty when `gh` is not
+  // on PATH; never an error.
+  "repo.pull_requests": { params: undefined; result: PullRequestSummary[] };
   "lane.list": { params: undefined; result: Lane[] };
   "lane.create": {
     params: {
@@ -261,6 +265,8 @@ interface RpcMap {
     };
     result: Lane;
   };
+  // The home screen's strip title: the lane's transcript headline, cached in the daemon.
+  "lane.headline": { params: { lane_id: number }; result: string | null };
   "lane.delete": { params: { lane_id: number; also_delete_branch?: boolean }; result: null };
   "lane.focus": { params: { lane_id: number }; result: { path: string } };
   "lane.merge": { params: { lane_id: number; into?: string }; result: { message: string } };
@@ -322,7 +328,7 @@ interface RpcMap {
   "agent.add": { params: { name: string; command: string }; result: null };
   "agent.remove": { params: { name: string }; result: null };
   "agent.set_default": { params: { name: string | null }; result: null };
-  "agent.spawn": { params: { lane_id: number; agent: string; task?: string }; result: { lane_id: number; window: string; spawn_warnings?: string[] } };
+  "agent.spawn": { params: { lane_id: number; agent: string; task?: string; model?: string }; result: { lane_id: number; window: string; spawn_warnings?: string[] } };
   "agent.adopt": { params: { lane_id: number; session_id?: string; agent?: string }; result: { lane_id: number; window: string } };
   "agent.stop": { params: { lane_id: number; window?: string }; result: null };
   "agent.capture": { params: { lane_id: number; window?: string; lines?: number }; result: { content: string } };
