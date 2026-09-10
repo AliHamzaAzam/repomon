@@ -282,7 +282,12 @@ const scenario = query.get("case") ?? "rich";
 const defects = scenario.startsWith("defect-");
 if (defects) localStorage.setItem("repomon.workspace.layout", "focused");
 const defectRepo = repo(505, "repomind");
-const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenario === "no-source" ? "opencode" : scenario === "operator" || defects ? "claude-code" : "codex", session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : [])] });
+// "no-source" models Hermes: no SourceKind scanner exists for it, so the UI's per-kind fallback
+// note and the daemon's deliberate terminal_block-from-capture item are what's on screen.
+// "antigravity" models one of the daemon's four scanned kinds rendering an ordinary transcript,
+// the state the operator's broken capture should reach once C1 round 5's daemon half lands.
+const scenarioAgent = scenario === "no-source" ? "hermes" : scenario === "antigravity" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex";
+const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : [])] });
 const fixtureRepos = defects ? [defectRepo] : fleetMode === "operator" || scenario === "operator" || defects ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
 const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
@@ -330,7 +335,13 @@ function transcriptItems(): TranscriptItem[] {
     ...(scenario === "defect-images" ? [item("echo", "assistant", 'Attached file: "/fixture/attachments/screen.png"\n\nI can see the layout in this image.'), item("attached-user", "user", 'It is doing this sometimes. Please check the input too.\n\nAttached file: "/fixture/attachments/screen.png"\n\nAttached file: "/fixture/attachments/notes.md"\n\nAttached file: "/fixture/attachments/missing.png"')] : []),
   ];
   if (scenario === "operator") return operatorItems;
-  if (scenario === "no-source") return [item("pane:lane-10", "terminal_block", "$ opencode\nWaiting for input.\n› ", { at:null })];
+  if (scenario === "no-source") return [item("pane:lane-10", "terminal_block", "$ hermes\nWaiting for input.\n› ", { at:null })];
+  if (scenario === "antigravity") return [
+    item("u1", "user", "Update the regional pricing rules to include the new EU tax bands."),
+    item("t1", "tool_call", "Found the pricing table and its existing tax mapping.", { name:"exec_command", input_summary:"rg tax_bands src/pricing", result_summary:"1 matching file", status:"ok" }),
+    item("a1", "assistant", "The EU tax bands are in place, using the existing pricing table so no schema change was needed. Checkout totals now include the new bands for EU carts.", { model:"gemini-3-pro" }),
+  ];
+  if (scenario === "long-history") return Array.from({ length: 40 }, (_, i) => item(`h${i}`, i % 6 === 0 ? "user" : "assistant", i % 6 === 0 ? `Round ${i / 6 + 1}: keep going on the migration.` : `Batch ${i} of the migration is done; the existing schema stayed untouched.`));
   if (scenario === "dull" || scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
   if (scenario === "broken") return brokenItems;
   if (scenario === "dialog") return richItems.slice(0, -2);
@@ -343,7 +354,7 @@ function transcriptItems(): TranscriptItem[] {
     item("usage", "status", "Usage limit reached for this account.", { status_kind:"usage_limit" })];
   return richItems;
 }
-const initialPage = () => ({ items:transcriptItems(), next_before: scenario === "rich" ? 120 : null });
+const initialPage = () => ({ items:transcriptItems(), next_before: scenario === "rich" ? 120 : scenario === "long-history" ? 40 : null, remaining_before: scenario === "long-history" ? 57 : undefined });
 let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"}, agent_status_rows:query.has("notices") ? {codex:["rate_limit", "usage_limit"]} : {} };
 if (query.get("focus") === "reply") {
   const focusReply = setInterval(() => {
@@ -382,6 +393,28 @@ if (scenario === "defect-excerpt-open" || scenario === "broken") {
     if (button) { button.click(); clearInterval(timer); }
   }, 100);
 }
+if (scenario === "long-history" && query.has("load")) {
+  const timer = setInterval(() => {
+    const button = document.querySelector<HTMLButtonElement>(".conversation-older");
+    if (!button) return;
+    button.click();
+    clearInterval(timer);
+    // The loaded evidence (the older rows, the beginning-of-conversation marker) lives at the
+    // top of the ledger, not wherever "following the latest output" left the scrollTop - wait
+    // for the fixture's single-page load to actually exhaust history (the button's own removal)
+    // before scrolling there, so a screenshot shows the settled state, not a mid-flight one.
+    const settle = setInterval(() => {
+      const stillLoading = document.querySelector(".conversation-older");
+      const scroll = document.querySelector<HTMLElement>(".conversation-scroll");
+      if (stillLoading || !scroll) return;
+      clearInterval(settle);
+      // older()'s own scroll-preservation runs in a requestAnimationFrame right after the load
+      // resolves; force scrollTop after that frame has had a chance to run, not before, or the
+      // two writes race and whichever lands last wins unpredictably.
+      requestAnimationFrame(() => requestAnimationFrame(() => { scroll.scrollTop = 0; }));
+    }, 50);
+  }, 50);
+}
 if (query.has("notices")) {
   const timer = setInterval(() => {
     const section = document.querySelector<HTMLElement>('[aria-label="Conversation detail"]');
@@ -410,11 +443,13 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "config.get": () => fixtureConfig,
   "config.set": (params) => (fixtureConfig = params as typeof fixtureConfig),
   "lane.set_view": () => null,
-  "agent.capture": () => ({ content: scenario === "broken" ? "Error: Cannot find module './collections'\nBuild exited with code 1.\n› " : scenario === "no-source" ? "$ opencode\nWaiting for input.\n› " : scenario === "streaming" ? "Checking collection filters\nBuild running\n› " : "Build completed in 1.4s\nReady for your review\n› " }),
+  "agent.capture": () => ({ content: scenario === "broken" ? "Error: Cannot find module './collections'\nBuild exited with code 1.\n› " : scenario === "no-source" ? "$ hermes\nWaiting for input.\n› " : scenario === "streaming" ? "Checking collection filters\nBuild running\n› " : "Build completed in 1.4s\nReady for your review\n› " }),
   "agent.prompt": () => ({ dialog: scenario === "dialog" && !promptAnswered ? fixtureDialog : null }),
   "agent.answer": () => { promptAnswered = true; return { answered:"Yes", sent:["Enter"] }; },
   "agent.send_input": () => null,
-  "agent.transcript_page": () => ({ items:[item("older:1", "user", "Use the existing brand styles for the collection filter.")], next_before:null }),
+  "agent.transcript_page": () => scenario === "long-history"
+    ? { items: Array.from({ length: 57 }, (_, i) => item(`older${i}`, i % 6 === 0 ? "user" : "assistant", i === 0 ? "Round 0: start the migration off the legacy schema." : `Setup step ${i} of the migration.`)), next_before: null, remaining_before: null }
+    : { items:[item("older:1", "user", "Use the existing brand styles for the collection filter.")], next_before:null },
   "agent.transcript_watch": (params) => {
     const target = params as { lane_id:number; window:string; on:boolean };
     watchTimers.get(target.window)?.forEach(clearTimeout);
