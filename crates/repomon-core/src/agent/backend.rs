@@ -241,6 +241,21 @@ pub trait SessionBackend: Send + Sync {
     /// Forward `ticks` mouse-wheel events (up or down) to the window's app.
     fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()>;
 
+    /// Forward only when the live target can handle application scrolling. Backends with
+    /// negotiated mouse protocols override this to snapshot the protocol and pane together.
+    fn scroll_if_active_named(&self, window: &str, mut event: ScrollEvent) -> Result<bool> {
+        if event.ticks == 0 || !self.alternate_on_named(window) {
+            return Ok(false);
+        }
+        let Some((cols, rows)) = self.size_named(window) else {
+            return Ok(false);
+        };
+        event.col = event.col.clamp(1, cols.max(1));
+        event.row = event.row.clamp(1, rows.max(1));
+        self.scroll_wheel_named(window, event)?;
+        Ok(true)
+    }
+
     /// Send a literal string (no trailing Enter) - one keystroke's worth of input.
     fn send_literal_named(&self, window: &str, text: &str) -> Result<()>;
 

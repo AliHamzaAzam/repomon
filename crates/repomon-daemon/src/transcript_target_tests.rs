@@ -1,0 +1,357 @@
+//! Selector regressions use one multi-kind lane with backend identities, including null sessions.
+use super::round5_tests::{context, lane_source, user_record};
+use super::*;
+use crate::conn::ConnKind;
+use repomon_core::agent::WindowMeta;
+
+#[tokio::test]
+async fn parsed_cache_isolates_windows_with_null_provider_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let file = dir.path().join("source.jsonl");
+    std::fs::write(&file, user_record(1, "codex")).unwrap();
+    let base = lane_source(&ctx, dir.path(), "codex", &file, "ledger-session").await;
+    let mut sources = Vec::new();
+    for slot in [2, 3] {
+        let window = format!("lane-{}-{slot}", base.lane_id);
+        backend.metas.lock().unwrap().push(WindowMeta {
+            name: window.clone(),
+            wid: slot,
+            session: None,
+            agent_kind: Some("codex".into()),
+        });
+        let params: Params =
+            serde_json::from_value(json!({"lane_id":base.lane_id,"window":window})).unwrap();
+        let source = resolve_source(&ctx, &params, false).await.unwrap();
+        assert_eq!(source.window, window);
+        sources.push(source);
+    }
+    // Even identical inferred files/provider IDs cannot merge two live windows.
+    assert_eq!(sources[0].path, sources[1].path);
+    assert_eq!(sources[0].session, sources[1].session);
+    let first = ctx.transcript_cache.entry(&sources[0]);
+    let shared = ctx.transcript_cache.entry(&sources[0]);
+    let other = ctx.transcript_cache.entry(&sources[1]);
+    assert!(Arc::ptr_eq(&first, &shared));
+    assert!(!Arc::ptr_eq(&first, &other));
+    for source in [&sources[0], &sources[0], &sources[1]] {
+        read_page(&ctx, source.clone(), None).await.unwrap();
+    }
+    assert_eq!(ctx.transcript_cache.scans.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn explicit_window_rejects_foreign_sessions_for_every_kind_before_fallback_or_watch_replacement()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let file = dir.path().join("source.jsonl");
+    std::fs::write(&file, user_record(1, "claude-code")).unwrap();
+    let base = lane_source(&ctx, dir.path(), "claude-code", &file, "claude-session").await;
+    let client = ctx.open_session(ConnKind::Local).await;
+    for (slot, kind) in ["claude-code", "codex", "antigravity", "opencode", "hermes"]
+        .into_iter()
+        .enumerate()
+    {
+        let window = format!("lane-{}-{}", base.lane_id, slot + 2);
+        let own = format!("{kind}-own");
+        backend.metas.lock().unwrap().push(WindowMeta {
+            name: window.clone(),
+            wid: slot as u64 + 2,
+            session: Some(own.clone()),
+            agent_kind: Some(kind.into()),
+        });
+        for method in ["agent.transcript_page", "agent.transcript_watch"] {
+            let error = crate::rpc::dispatch(
+                &ctx,
+                &client,
+                method,
+                Some(json!({"lane_id":base.lane_id,"window":window,"session_id":"foreign-claude"})),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, -32602, "{kind} {method}: {error:?}");
+            assert!(client.transcript_watches.lock().await.is_empty());
+        }
+        let params: Params = serde_json::from_value(
+            json!({"lane_id":base.lane_id,"window":window,"session_id":own}),
+        )
+        .unwrap();
+        let actual = resolve_source(&ctx, &params, false).await.unwrap();
+        assert_eq!(actual.kind, kind);
+        assert_eq!(actual.session.as_deref(), Some(own.as_str()));
+        let mut wrong_kind = params.clone();
+        wrong_kind.kind = Some("other-kind".into());
+        assert!(matches!(
+            resolve_source(&ctx, &wrong_kind, false).await,
+            Err(TranscriptError::InvalidParams(_))
+        ));
+        // With no stamped session, a foreign id must not select a different lane session.
+        backend.metas.lock().unwrap().last_mut().unwrap().session = None;
+        let mut mismatch = params.clone();
+        mismatch.session_id = Some("foreign-claude".into());
+        assert!(
+            matches!(
+                resolve_source(&ctx, &mismatch, false).await,
+                Err(TranscriptError::InvalidParams(_))
+            ),
+            "{kind}"
+        );
+        let mut window_only = params;
+        window_only.session_id = None;
+        assert_eq!(
+            resolve_source(&ctx, &window_only, false)
+                .await
+                .unwrap()
+                .kind,
+            kind
+        );
+    }
+}
+
+#[tokio::test]
+async fn null_window_session_uses_its_kind_ledger_identity_and_validates_supplied_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, _) = context(dir.path()).await;
+    let file = dir.path().join("agy.jsonl");
+    std::fs::write(&file, "{}\n").unwrap();
+    let mut p = lane_source(&ctx, dir.path(), "antigravity", &file, "agy-session").await;
+    p.window = Some(TmuxRuntime::window_name(p.lane_id));
+    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    assert_eq!(src.session.as_deref(), Some("agy-session"));
+    assert_eq!(src.path, Some(file));
+    p.session_id = Some("claude-session".into());
+    assert!(matches!(
+        resolve_source(&ctx, &p, false).await,
+        Err(TranscriptError::InvalidParams(_))
+    ));
+    p.session_id = None;
+    assert_eq!(
+        resolve_source(&ctx, &p, false)
+            .await
+            .unwrap()
+            .session
+            .as_deref(),
+        Some("agy-session")
+    );
+}
+
+/// Reads only the explicitly supplied live file, never copies or ingests its directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual read-only real corpus benchmark; C1_REAL_TRANSCRIPT must be explicit"]
+async fn real_corpus_first_watch_benchmark() {
+    let path = PathBuf::from(std::env::var("C1_REAL_TRANSCRIPT").expect("explicit read-only file"));
+    let session = path.file_stem().unwrap().to_str().unwrap();
+    let snapshot = std::fs::metadata(&path).unwrap().len();
+    let source = Source {
+        window: "lane-1".into(),
+        kind: "claude-code".into(),
+        path: Some(path.clone()),
+        session: Some(session.into()),
+    };
+    let mut scan_times = Vec::new();
+    let mut watch_times = Vec::new();
+    for trial in 0..6 {
+        let start = std::time::Instant::now();
+        let parsed = scan_page(&source, Some(snapshot)).unwrap();
+        let page_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = context(dir.path()).await;
+        let mut p = lane_source(&ctx, dir.path(), "claude-code", &path, session).await;
+        p.window = Some(TmuxRuntime::window_name(p.lane_id));
+        let client = ctx.open_session(ConnKind::Local).await;
+        let before = std::fs::metadata(&path).unwrap().len();
+        let start = std::time::Instant::now();
+        let first = watch(&ctx, &client, p).await.unwrap();
+        let watch_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let after = std::fs::metadata(&path).unwrap().len();
+        println!(
+            "REAL_FIRST_WATCH trial={trial} file={} snapshot_bytes={snapshot} before_bytes={before} after_bytes={after} page_ms={page_ms:.3} watch_ms={watch_ms:.3} page_start={} scanned_bytes={} items={} next_before={}",
+            path.file_name().unwrap().to_string_lossy(),
+            parsed.start,
+            parsed.end - parsed.start,
+            first["items"].as_array().unwrap().len(),
+            first["next_before"]
+        );
+        if trial > 0 {
+            scan_times.push(page_ms);
+            watch_times.push(watch_ms);
+        }
+        unwatch_all(&ctx, &client).await;
+    }
+    scan_times.sort_by(f64::total_cmp);
+    watch_times.sort_by(f64::total_cmp);
+    println!(
+        "REAL_MEDIAN bytes={snapshot} page_ms={:.3} watch_ms={:.3}",
+        scan_times[2], watch_times[2]
+    );
+}
+
+#[tokio::test]
+async fn claude_pane_queue_tracks_each_input_then_reuses_ids_on_durable_consumption() {
+    use super::round5_tests::transcript_event;
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let file = dir.path().join("queue.jsonl");
+    std::fs::write(&file, "").unwrap();
+    let p = lane_source(&ctx, dir.path(), "claude-code", &file, "queue-session").await;
+    let window = TmuxRuntime::window_name(p.lane_id);
+    let client = ctx.open_session(ConnKind::Local).await;
+    let mut events = ctx.events.subscribe();
+    watch(&ctx, &client, p.clone()).await.unwrap();
+    let texts = [
+        "First message",
+        "Second message",
+        "Third message",
+        "Still waiting\n\nAttached file: \"/a path/file.png\"",
+    ];
+    for text in texts {
+        crate::rpc::dispatch(
+            &ctx,
+            &client,
+            "agent.send_input",
+            Some(json!({"lane_id":p.lane_id,"window":window,"text":text,"enter":true})),
+        )
+        .await
+        .unwrap();
+    }
+    *backend.pane.lock().unwrap() =
+        include_str!("../../repomon-core/src/agent/fixtures/claude_queue_operator_2026_09_10.txt")
+            .into();
+    let queued = transcript_event(&mut events, |v| {
+        v["input_states"].as_object().is_some_and(|s| {
+            s.values().filter(|v| **v == "consumed").count() == 3
+                && s.values().filter(|v| **v == "queued").count() == 1
+        })
+    })
+    .await;
+    assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+    let ids: Vec<_> = queued["input_states"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(ids.len(), 4);
+    let items = queued["items"].as_array().unwrap();
+    assert!(items.iter().all(|row| row["role"] != "assistant"
+        || !row["text"].as_str().unwrap().contains("Still waiting")));
+    let assistant = items.iter().find(|r| r["role"] == "assistant").unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let order = queued["order"].as_array().unwrap();
+    for id in &ids {
+        if queued["input_states"][id] == "consumed" {
+            assert!(
+                order.iter().position(|v| v == id).unwrap()
+                    < order.iter().position(|v| v == assistant).unwrap()
+            );
+        }
+    }
+    let records = texts
+        .iter()
+        .map(|text| format!("{}\n", json!({"type":"user","message":{"content":text}})))
+        .collect::<String>();
+    std::fs::write(&file, records).unwrap();
+    *backend.pane.lock().unwrap() = String::new();
+    let consumed = transcript_event(&mut events, |v| {
+        v["input_states"].as_object().is_some_and(|s| s.is_empty())
+            && v["items"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().filter(|r| r["role"] == "user").count() == 4)
+    })
+    .await;
+    for id in ids {
+        assert!(
+            consumed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == id && r["partial"] != true)
+        );
+    }
+    unwatch_all(&ctx, &client).await;
+}
+
+#[tokio::test]
+async fn invalid_selector_preserves_existing_watch_and_historical_session_only_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let file = dir.path().join("source.jsonl");
+    std::fs::write(&file, user_record(1, "claude-code")).unwrap();
+    let mut p = lane_source(&ctx, dir.path(), "claude-code", &file, "old-session").await;
+    // Historical/session-only source is still accepted without a live window selector.
+    assert_eq!(
+        page(&ctx, &p).await.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    p.window = Some(TmuxRuntime::window_name(p.lane_id));
+    let client = ctx.open_session(ConnKind::Local).await;
+    watch(&ctx, &client, p.clone()).await.unwrap();
+    let tag = backend.senders.lock().unwrap()[p.window.as_ref().unwrap()].0;
+    p.session_id = Some("foreign".into());
+    assert!(matches!(
+        watch(&ctx, &client, p.clone()).await,
+        Err(TranscriptError::InvalidParams(_))
+    ));
+    assert_eq!(client.transcript_watches.lock().await.len(), 1);
+    assert_eq!(
+        backend.senders.lock().unwrap()[p.window.as_ref().unwrap()].0,
+        tag
+    );
+    p.session_id = Some(format!("win:{}", p.window.as_ref().unwrap()));
+    assert!(resolve_source(&ctx, &p, false).await.is_ok());
+    p.session_id = Some("win:lane-999".into());
+    assert!(matches!(
+        resolve_source(&ctx, &p, false).await,
+        Err(TranscriptError::InvalidParams(_))
+    ));
+    unwatch_all(&ctx, &client).await;
+}
+
+#[tokio::test]
+async fn old_identical_prompt_and_composer_draft_do_not_consume_new_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let file = dir.path().join("source.jsonl");
+    std::fs::write(&file, "").unwrap();
+    let p = lane_source(&ctx, dir.path(), "claude-code", &file, "session").await;
+    let window = TmuxRuntime::window_name(p.lane_id);
+    *backend.pane.lock().unwrap() = "❯ Repeat\n⏺ Old answer\n────\n❯ Repeat\n────".into();
+    let ticket = prepare_input(&ctx, p.lane_id, &window, "Repeat")
+        .await
+        .unwrap();
+    ctx.transcript_inputs.sent(&ctx, &window, ticket);
+    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    let mut rows = Vec::new();
+    let mut order = Vec::new();
+    let states = ctx.transcript_inputs.append(
+        &window,
+        &src,
+        &backend.pane.lock().unwrap(),
+        &mut rows,
+        &mut order,
+    );
+    let id = rows[0].id.clone().unwrap();
+    assert_eq!(states[&id], "sent");
+    *backend.pane.lock().unwrap() =
+        "❯ Repeat\n⏺ Old answer\n❯ Repeat\n⏺ New answer\n────\n❯ \n────".into();
+    let states = ctx.transcript_inputs.append(
+        &window,
+        &src,
+        &backend.pane.lock().unwrap(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    assert_eq!(states[&id], "consumed");
+    let states = ctx
+        .transcript_inputs
+        .append(&window, &src, "", &mut Vec::new(), &mut Vec::new());
+    assert_eq!(
+        states[&id], "consumed",
+        "observed consumption survives scrolling off pane"
+    );
+}

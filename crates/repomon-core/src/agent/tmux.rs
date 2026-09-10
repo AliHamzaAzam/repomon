@@ -829,16 +829,70 @@ impl TmuxRuntime {
     /// its own history (the mediated pane can't otherwise - alternate-screen apps keep no tmux
     /// scrollback). Sends SGR wheel sequences (button 64 = up, 65 = down) at the pointer cell.
     pub fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
+        self.scroll_if_active_named(window, event).map(|_| ())
+    }
+
+    /// Snapshot the actual pane, alternate-screen state and mouse encoding in one probe.
+    /// A window's active pane or the application's modes may change between gestures.
+    pub fn scroll_if_active_named(&self, window: &str, mut event: ScrollEvent) -> Result<bool> {
         if event.ticks == 0 {
-            return Ok(());
+            return Ok(false);
         }
-        let button = if event.up { 64 } else { 65 };
-        let col = event.col.max(1);
-        let row = event.row.max(1);
-        let seq = format!("\x1b[<{button};{col};{row}M").repeat(event.ticks as usize);
-        let target = self.exact_target(window);
-        self.run_allow_absent(&["send-keys", "-t", &target, "-l", &seq])?;
-        Ok(())
+        let state = self.run_allow_absent(&["display-message", "-p", "-t", &self.exact_target(window), "-F",
+            "#{pane_id}|#{alternate_on}|#{mouse_standard_flag}|#{mouse_button_flag}|#{mouse_any_flag}|#{mouse_sgr_flag}|#{mouse_utf8_flag}|#{pane_width}|#{pane_height}|#{pane_in_mode}"])?;
+        let fields: Vec<_> = state.trim().split('|').collect();
+        if fields.len() != 10
+            || fields[1] != "1"
+            || fields[9] != "0"
+            || !fields[2..5].contains(&"1")
+        {
+            return Ok(false);
+        }
+        let pane = fields[0];
+        if pane
+            .strip_prefix('%')
+            .is_none_or(|id| id.parse::<u64>().is_err())
+        {
+            return Ok(false);
+        }
+        let cols: u16 = fields[7].parse().unwrap_or(1);
+        let rows: u16 = fields[8].parse().unwrap_or(1);
+        event.col = event.col.clamp(1, cols.max(1));
+        event.row = event.row.clamp(1, rows.max(1));
+        let button = if event.up { 64u16 } else { 65 };
+        let sequence = if fields[5] == "1" {
+            format!("\x1b[<{button};{};{}M", event.col, event.row).into_bytes()
+        } else if fields[6] == "1" {
+            let mut sequence = String::from("\x1b[M");
+            for value in [
+                button + 32,
+                event.col.min(2015) + 32,
+                event.row.min(2015) + 32,
+            ] {
+                sequence.push(char::from_u32(value.into()).expect("bounded mouse coordinate"));
+            }
+            sequence.into_bytes()
+        } else {
+            vec![
+                27,
+                b'[',
+                b'M',
+                (button + 32) as u8,
+                (event.col.min(223) + 32) as u8,
+                (event.row.min(223) + 32) as u8,
+            ]
+        };
+        // Hex input preserves legacy non-UTF8 coordinate bytes. Pin to the probed pane id,
+        // not the window's possibly changed active pane. Target loss is an error, not success.
+        let hex: Vec<_> = sequence
+            .repeat(event.ticks.min(40) as usize)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut args = vec!["send-keys", "-t", pane, "-H"];
+        args.extend(hex.iter().map(String::as_str));
+        self.run(&args)?;
+        Ok(true)
     }
 
     /// Streams raw pane output to an existing FIFO, replacing any previous pipe; open the reader
@@ -1353,6 +1407,9 @@ impl SessionBackend for TmuxRuntime {
 
     fn scroll_wheel_named(&self, window: &str, event: ScrollEvent) -> Result<()> {
         TmuxRuntime::scroll_wheel_named(self, window, event)
+    }
+    fn scroll_if_active_named(&self, window: &str, event: ScrollEvent) -> Result<bool> {
+        TmuxRuntime::scroll_if_active_named(self, window, event)
     }
 
     fn send_literal_named(&self, window: &str, text: &str) -> Result<()> {
@@ -1913,6 +1970,129 @@ mod tests {
             assert!(output.status.success(), "{command}");
             assert_eq!(output.stdout, task.as_bytes(), "{command}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scroll_wheel_respects_current_mouse_protocol() {
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let rt = TmuxRuntime::isolated(format!("repomon-c1-scroll-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        for (index, (sgr, utf8)) in [(false, false), (true, false), (false, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let window = format!("lane-1-{}", index + 1);
+            let output = dir.path().join(&window);
+            let expected = if sgr {
+                b"\x1b[<64;200;4M".to_vec()
+            } else if utf8 {
+                vec![27, b'[', b'M', 96, 195, 168, 36]
+            } else {
+                vec![27, b'[', b'M', 96, 232, 36]
+            };
+            let script = "import os,sys,tty,time; tty.setraw(0); print('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006'+sys.argv[3]+'\\x1b[?1005'+sys.argv[4]+'READY',flush=True); data=b''\nwhile len(data)<int(sys.argv[2]): data+=os.read(0,65536)\nopen(sys.argv[1],'wb').write(data)\ntime.sleep(30)";
+            let spec = SpawnSpec::new("python3", dir.path())
+                .arg("-c")
+                .arg(script)
+                .arg(output.to_string_lossy())
+                .arg(expected.len().to_string())
+                .arg(if sgr { "h" } else { "l" })
+                .arg(if utf8 { "h" } else { "l" });
+            SessionBackend::spawn_named(&rt, &window, &spec).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !rt.capture_named(&window, None).unwrap().contains("READY") {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(rt.alternate_on_named(&window));
+            println!("SCROLL_MODE sgr={sgr} utf8={utf8} flags={}",rt.run(&["display-message","-p","-t",&rt.exact_target(&window),"#{alternate_on}|#{mouse_standard_flag}|#{mouse_button_flag}|#{mouse_any_flag}|#{mouse_sgr_flag}|#{mouse_utf8_flag}"]).unwrap().trim());
+            rt.scroll_wheel_named(
+                &window,
+                ScrollEvent {
+                    up: true,
+                    ticks: 1,
+                    col: 200,
+                    row: 4,
+                },
+            )
+            .unwrap();
+            while std::fs::metadata(&output).map_or(true, |m| m.len() < expected.len() as u64) {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let actual = std::fs::read(output).unwrap();
+            println!("SCROLL_BYTES sgr={sgr} utf8={utf8} actual={actual:?} expected={expected:?}");
+            assert_eq!(
+                actual, expected,
+                "alternate screen alone does not imply SGR mouse encoding"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scrolling_rechecks_modes_and_does_not_claim_a_missing_target() {
+        if !TmuxRuntime::available() {
+            return;
+        }
+        let rt = TmuxRuntime::isolated(format!("repomon-c1-scroll-modes-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("bytes");
+        let script = r#"import os,sys,tty
+
+tty.setraw(0)
+def mode(m):
+ print('\x1b[?1049'+('l' if m=='O' else 'h')+'\x1b[?1000'+('l' if m=='N' else 'h')+'\x1b[?1006'+('h' if m=='S' else 'l')+'MODE_'+m,flush=True)
+mode('S')
+while True:
+ data=os.read(0,4096)
+ if data in [b'S',b'L',b'O',b'N']: mode(data.decode())
+ else:
+  with open(sys.argv[1],'ab') as f: f.write(data)
+"#;
+        let spec = SpawnSpec::new("python3", dir.path())
+            .arg("-c")
+            .arg(script)
+            .arg(output.to_string_lossy());
+        SessionBackend::spawn_named(&rt, "lane-1", &spec).unwrap();
+        let event = ScrollEvent {
+            up: false,
+            ticks: 1,
+            col: 3,
+            row: 4,
+        };
+        let mut expected = Vec::new();
+        for mode in ['S', 'L', 'N', 'O'] {
+            if mode != 'S' {
+                rt.send_literal_named("lane-1", &mode.to_string()).unwrap();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !rt
+                .capture_named("lane-1", None)
+                .unwrap()
+                .contains(&format!("MODE_{mode}"))
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let forwarded = rt.scroll_if_active_named("lane-1", event).unwrap();
+            assert_eq!(forwarded, matches!(mode, 'S' | 'L'));
+            match mode {
+                'S' => expected.extend_from_slice(b"\x1b[<65;3;4M"),
+                'L' => expected.extend_from_slice(&[27, b'[', b'M', 97, 35, 36]),
+                _ => {}
+            }
+            while std::fs::read(&output).unwrap_or_default() != expected {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        assert!(!rt.scroll_if_active_named("lane-1-2", event).unwrap());
+        rt.kill_named("lane-1").unwrap();
+        assert!(!rt.scroll_if_active_named("lane-1", event).unwrap());
     }
 
     #[test]

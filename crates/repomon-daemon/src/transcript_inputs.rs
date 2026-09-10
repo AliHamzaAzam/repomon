@@ -18,9 +18,35 @@ pub struct Ticket {
     source: Option<Source>,
     floor: u64,
     item: TranscriptItem,
+    prior_prompts: Option<Vec<String>>,
+    consumed: bool,
 }
 
 pub async fn prepare_input(ctx: &Ctx, lane: LaneId, window: &str, text: &str) -> Option<Ticket> {
+    if repomon_core::usage_ledger::scan::strip_injected_blocks(text)
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    let backend = ctx.backend.clone();
+    let target = window.to_string();
+    let pane =
+        tokio::task::spawn_blocking(move || backend.capture_named(&target, CaptureOpts::last(100)))
+            .await
+            .ok()
+            .and_then(Result::ok);
+    prepare_input_from_pane(ctx, lane, window, text, pane.as_deref()).await
+}
+
+/// Verified injection already captured the pane; do not add a second observation to its sequence.
+pub async fn prepare_input_from_pane(
+    ctx: &Ctx,
+    lane: LaneId,
+    window: &str,
+    text: &str,
+    pane: Option<&str>,
+) -> Option<Ticket> {
     let cleaned = repomon_core::usage_ledger::scan::strip_injected_blocks(text);
     if cleaned.trim().is_empty() {
         return None;
@@ -44,12 +70,17 @@ pub async fn prepare_input(ctx: &Ctx, lane: LaneId, window: &str, text: &str) ->
                 .map_or(0, |m| m.len())
         }
     });
+    let prior_prompts = source.as_ref().zip(pane).map(|(s, pane)| {
+        repomon_core::agent::conversation_queue::pane_inputs(&s.kind, pane).consumed
+    });
     let mut item = TranscriptItem::new("user", cleaned.trim(), Some(chrono::Utc::now()));
     item.partial = Some(true);
     Some(Ticket {
         source,
         floor,
         item,
+        prior_prompts,
+        consumed: false,
     })
 }
 impl Inputs {
@@ -132,11 +163,13 @@ impl Inputs {
         items: &mut Vec<TranscriptItem>,
         order: &mut Vec<String>,
     ) -> Value {
-        let windows = self.windows.lock().unwrap();
+        let mut windows = self.windows.lock().unwrap();
         let mut states = serde_json::Map::new();
-        if let Some(window) = windows.get(window) {
-            let queued = queue_indicator(&source.kind, pane);
-            for ticket in &window.pending {
+        let observed = repomon_core::agent::conversation_queue::pane_inputs(&source.kind, pane);
+        let mut matched = HashMap::<String, usize>::new();
+        let mut queued_text = observed.queued.clone();
+        if let Some(window) = windows.get_mut(window) {
+            for ticket in &mut window.pending {
                 if ticket
                     .source
                     .as_ref()
@@ -145,7 +178,31 @@ impl Inputs {
                     continue;
                 }
                 let id = ticket.item.id.clone().unwrap();
-                states.insert(id.clone(), json!(if queued { "queued" } else { "sent" }));
+                let text = repomon_core::agent::conversation_queue::normalized(&ticket.item.text);
+                let queued = if let Some(index) = queued_text.iter().position(|row| row == &text) {
+                    queued_text.remove(index);
+                    true
+                } else {
+                    false
+                };
+                let prior = ticket
+                    .prior_prompts
+                    .as_ref()
+                    .map(|prompts| prompts.iter().filter(|s| *s == &text).count());
+                let current = observed.consumed.iter().filter(|s| *s == &text).count();
+                let used = matched.entry(text).or_default();
+                if !queued && prior.is_some_and(|prior| current > prior + *used) {
+                    ticket.consumed = true;
+                    *used += 1;
+                }
+                let state = if ticket.consumed {
+                    "consumed"
+                } else if queued || (source.kind == "codex" && observed.queue_reported) {
+                    "queued"
+                } else {
+                    "sent"
+                };
+                states.insert(id.clone(), json!(state));
                 order.push(id);
                 items.push(ticket.item.clone());
             }
@@ -153,5 +210,3 @@ impl Inputs {
         Value::Object(states)
     }
 }
-
-use repomon_core::agent::conversation_activity::queue_indicator;

@@ -267,7 +267,14 @@ pub async fn verified_send_with_timeout(
 
     let pending = match &payload {
         Payload::Line(text) | Payload::VerifiedLine { text, .. } => {
-            crate::transcript::prepare_input(ctx, seed.lane_id, &seed.window, text).await
+            crate::transcript::prepare_input_from_pane(
+                ctx,
+                seed.lane_id,
+                &seed.window,
+                text,
+                Some(&pane_text),
+            )
+            .await
         }
         Payload::Keys(_) => None,
     };

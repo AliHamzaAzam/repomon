@@ -1,0 +1,16 @@
+❯ First message
+Read 2 files
+❯ Second message
+Ran 9 shell commands
+❯ Third message
+Called repomon, ran 1 shell command
+⏺ Answer in progress
+* Boondoggling… (4m 50s · ↓ 9.8k tokens)
+  Tip: Use /theme to change the color theme
+❯ Still waiting
+
+  Attached file: "/a path/file.png"
+────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt

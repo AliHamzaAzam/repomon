@@ -4490,22 +4490,15 @@ pub async fn dispatch(
             // it can scroll itself. A plain shell would just get junk on its command line; the
             // caller falls back to the capture-based scroll when `forwarded` is false.
             let forwarded = tokio::task::spawn_blocking(move || -> repomon_core::Result<bool> {
-                if tmux.alternate_on_named(&window) {
-                    let (max_col, max_row) =
-                        tmux.size_named(&window).unwrap_or((u16::MAX, u16::MAX));
-                    tmux.scroll_wheel_named(
-                        &window,
-                        ScrollEvent {
-                            up,
-                            ticks,
-                            col: col.clamp(1, max_col.max(1)),
-                            row: row.clamp(1, max_row.max(1)),
-                        },
-                    )?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+                tmux.scroll_if_active_named(
+                    &window,
+                    ScrollEvent {
+                        up,
+                        ticks,
+                        col,
+                        row,
+                    },
+                )
             })
             .await
             .map_err(internal)?
@@ -4680,13 +4673,15 @@ pub async fn dispatch(
         // for native full-history scrolling without putting an unbounded transcript in xterm.
         "agent.transcript_page" => {
             let p: crate::transcript::Params = parse(params)?;
-            crate::transcript::page(ctx, &p).await.map_err(internal)
+            crate::transcript::page(ctx, &p)
+                .await
+                .map_err(crate::transcript::TranscriptError::rpc)
         }
         "agent.transcript_watch" => {
             let p: crate::transcript::Params = parse(params)?;
             crate::transcript::watch(ctx, sess, p)
                 .await
-                .map_err(internal)
+                .map_err(crate::transcript::TranscriptError::rpc)
         }
         "lane.set_view" => {
             #[derive(Deserialize)]

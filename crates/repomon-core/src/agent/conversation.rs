@@ -1,5 +1,5 @@
 //! Pane previews and stable reconciliation between live output and durable transcript rows.
-use super::{conversation_activity, prompt, text::strip_ansi};
+use super::{conversation_activity, prompt};
 use crate::model::{ToolCallStatus, TranscriptItem};
 use std::collections::{HashMap, HashSet};
 
@@ -27,7 +27,7 @@ fn codex_chrome(line: &str) -> bool {
 
 /// Preserve excerpt content while removing the same structured status decorations as prose.
 pub fn pane_content(kind: &str, pane: &str) -> String {
-    strip_ansi(pane)
+    super::conversation_queue::without_queue(kind, pane)
         .lines()
         .filter(|line| {
             !conversation_activity::queue_indicator(kind, line)
@@ -40,7 +40,7 @@ pub fn pane_content(kind: &str, pane: &str) -> String {
 
 /// Strip only recognized CLI decorations. Unknown kinds preserve the raw plain pane tail.
 pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
-    let plain = strip_ansi(pane);
+    let plain = super::conversation_queue::without_queue(kind, pane);
     let supported = matches!(kind, "claude-code" | "codex");
     let mut prose = Vec::new();
     let mut tools: Vec<TranscriptItem> = Vec::new();
@@ -261,6 +261,12 @@ pub struct ConversationStream {
     settled_tools: HashSet<(Option<String>, Option<String>)>,
 }
 impl ConversationStream {
+    pub fn is_partial_assistant(&self, id: &str) -> bool {
+        self.previous
+            .get(id)
+            .is_some_and(|r| r.role == "assistant" && r.partial == Some(true))
+    }
+
     /// A fast CLI may persist a user row before the verified send acknowledges it. Remove the
     /// earlier source identity once when the shared input registry resolves its submission id.
     pub fn forget_replaced_user(&mut self, id: &str) -> bool {

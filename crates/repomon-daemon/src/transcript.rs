@@ -27,7 +27,7 @@ use std::time::Duration;
 
 #[path = "transcript_inputs.rs"]
 mod inputs;
-pub use inputs::{Inputs, prepare_input};
+pub use inputs::{Inputs, prepare_input, prepare_input_from_pane};
 
 pub const TOPIC: &str = "event.agent.transcript";
 static NEXT_WATCH: AtomicU64 = AtomicU64::new(1 << 63);
@@ -51,6 +51,47 @@ fn watch_on() -> bool {
     true
 }
 
+/// Selector failures must remain invalid_params on the wire, not successful pane fallbacks.
+#[derive(Debug)]
+pub enum TranscriptError {
+    InvalidParams(String),
+    Internal(String),
+}
+impl From<String> for TranscriptError {
+    fn from(value: String) -> Self {
+        Self::Internal(value)
+    }
+}
+impl std::fmt::Display for TranscriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidParams(s) | Self::Internal(s) => f.write_str(s),
+        }
+    }
+}
+impl TranscriptError {
+    pub fn rpc(self) -> repomon_core::protocol::RpcError {
+        match self {
+            Self::InvalidParams(s) => repomon_core::protocol::RpcError::invalid_params(s),
+            Self::Internal(s) => repomon_core::protocol::RpcError::internal(s),
+        }
+    }
+}
+
+fn check_window_session(p: &Params, resolved: Option<&str>) -> Result<(), TranscriptError> {
+    if let (Some(window), Some(requested)) = (&p.window, &p.session_id) {
+        if requested == &format!("win:{window}") {
+            return Ok(());
+        }
+        if Some(requested.as_str()) != resolved {
+            return Err(TranscriptError::InvalidParams(format!(
+                "session_id does not belong to window {window}; omit session_id to address this window"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub struct Watch {
     lane: LaneId,
     reference: u64,
@@ -63,6 +104,8 @@ pub fn deliver_to(value: &Value, connection: u64) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Source {
+    // Live window identity is independent of nullable provider IDs and lane slot IDs.
+    window: String,
     kind: String,
     path: Option<PathBuf>,
     session: Option<String>,
@@ -263,10 +306,10 @@ impl Cache {
     }
 }
 
-async fn source(ctx: &Arc<Ctx>, p: &Params) -> Result<Source, String> {
+async fn source(ctx: &Arc<Ctx>, p: &Params) -> Result<Source, TranscriptError> {
     resolve_source(ctx, p, true).await
 }
-async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source, String> {
+async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source, TranscriptError> {
     let cwd = ctx
         .lanes
         .focus(p.lane_id)
@@ -279,40 +322,74 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|m| m.id == p.lane_id)
-        .ok_or("lane not found")?;
+        .ok_or_else(|| TranscriptError::InvalidParams("lane not found".into()))?;
     let window = p
         .window
         .clone()
         .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+    if p.window.is_some()
+        && TmuxRuntime::parse_lane_window(&window).is_none_or(|(lane, _)| lane != p.lane_id)
+    {
+        return Err(TranscriptError::InvalidParams(
+            "window does not belong to lane_id".into(),
+        ));
+    }
     let backend = ctx.backend.clone();
+    let target_window = window.clone();
     let (win, started) = tokio::task::spawn_blocking(move || {
-        let started = backend.window_started_at(&window);
+        let started = backend.window_started_at(&target_window);
         let meta = backend
             .list_windows_meta()
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())?
             .into_iter()
-            .find(|w| w.name == window);
-        (meta, started)
+            .find(|w| w.name == target_window);
+        Ok::<_, String>((meta, started))
     })
     .await
-    .map_err(|e| e.to_string())?;
-    let kind = p
-        .kind
-        .clone()
-        .or_else(|| win.as_ref().and_then(|w| w.agent_kind.clone()))
-        .or(meta.agent_kind)
-        .unwrap_or_else(|| "claude-code".into());
-    let session = p
-        .session_id
-        .clone()
-        .filter(|s| !s.starts_with("win:"))
-        .or_else(|| win.and_then(|w| w.session));
+    .map_err(|e| e.to_string())??;
+    if p.window.is_some() && win.is_none() {
+        return Err(TranscriptError::InvalidParams(
+            "window is not available".into(),
+        ));
+    }
+    let window_kind = win.as_ref().and_then(|w| w.agent_kind.clone());
+    if p.window.is_some()
+        && p.kind
+            .as_ref()
+            .zip(window_kind.as_ref())
+            .is_some_and(|(requested, actual)| requested != actual)
+    {
+        return Err(TranscriptError::InvalidParams(
+            "kind does not match window".into(),
+        ));
+    }
+    let kind = if p.window.is_some() {
+        window_kind.or(p.kind.clone())
+    } else {
+        p.kind.clone().or(window_kind)
+    }
+    .or(meta.agent_kind)
+    .unwrap_or_else(|| "claude-code".into());
+    let bound_session = win.and_then(|w| w.session);
+    if p.window.is_some() && bound_session.is_some() {
+        check_window_session(p, bound_session.as_deref())?;
+    }
+    let session = if p.window.is_some() {
+        bound_session
+    } else {
+        p.session_id
+            .clone()
+            .filter(|s| !s.starts_with("win:"))
+            .or(bound_session)
+    };
     let started = if session.is_some() { None } else { started };
     if !matches!(
         kind.as_str(),
         "claude-code" | "codex" | "antigravity" | "opencode"
     ) {
+        check_window_session(p, session.as_deref())?;
         return Ok(Source {
+            window,
             kind,
             path: None,
             session,
@@ -324,14 +401,18 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         .await
         .map_err(|e| e.to_string())?;
     if let Some((path, session)) = known.filter(|(path, _)| PathBuf::from(path).is_file()) {
+        check_window_session(p, Some(&session))?;
         return Ok(Source {
+            window,
             kind,
             path: Some(path.into()),
             session: Some(session),
         });
     }
     if !discover {
+        check_window_session(p, session.as_deref())?;
         return Ok(Source {
+            window,
             kind,
             path: None,
             session,
@@ -392,7 +473,9 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     let (path, session) = found.map_or((None, selected_session), |(path, session)| {
         (Some(path), session)
     });
+    check_window_session(p, session.as_deref())?;
     Ok(Source {
+        window,
         kind,
         path,
         session,
@@ -561,12 +644,12 @@ async fn read_page(ctx: &Arc<Ctx>, source: Source, before: Option<u64>) -> Resul
     )
 }
 
-pub async fn page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
+pub async fn page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, TranscriptError> {
     let src = source(ctx, p).await?;
     if src.path.is_none() && p.before.is_none() {
         let mut p = p.clone();
         p.kind = Some(src.kind);
-        return capture_page(ctx, &p).await;
+        return capture_page(ctx, &p).await.map_err(Into::into);
     }
     let mut value = read_page(ctx, src.clone(), p.before).await?;
     let window = p
@@ -610,6 +693,7 @@ async fn capture_page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
 // up. Keep its existing pending row until this watch can upsert the durable alias, with no gap.
 fn retain_pending_until_consumed(
     previous: &[TranscriptItem],
+    previous_states: &Value,
     update: &mut repomon_core::agent::conversation::Update,
     states: &mut Value,
 ) {
@@ -620,7 +704,10 @@ fn retain_pending_until_consumed(
         if !update.order.contains(id) {
             update.order.push(id.clone());
             update.items.push(item.clone());
-            states[id] = json!("sent");
+            states[id] = previous_states
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| json!("sent"));
         }
     }
 }
@@ -634,11 +721,20 @@ pub async fn unwatch_all(ctx: &Ctx, sess: &ConnSession) {
     }
 }
 
-pub async fn watch(ctx: &Arc<Ctx>, sess: &Arc<ConnSession>, p: Params) -> Result<Value, String> {
+pub async fn watch(
+    ctx: &Arc<Ctx>,
+    sess: &Arc<ConnSession>,
+    p: Params,
+) -> Result<Value, TranscriptError> {
     let window = p
         .window
         .clone()
         .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+    let resolved = if p.on {
+        Some(resolve_source(ctx, &p, false).await?)
+    } else {
+        None
+    };
     let mut watches = sess.transcript_watches.lock().await;
     let targets: Vec<_> = watches
         .iter()
@@ -661,7 +757,7 @@ pub async fn watch(ctx: &Arc<Ctx>, sess: &Arc<ConnSession>, p: Params) -> Result
     if !p.on {
         return Ok(Value::Null);
     }
-    let mut initial_source = resolve_source(ctx, &p, false).await?;
+    let mut initial_source = resolved.expect("on watch resolved above");
     let mut source_cache = ctx.transcript_cache.entry(&initial_source);
     let initial_signature = fingerprint(&initial_source);
     let initial_cost_revision = source_cache.cost_revision.load(Ordering::Relaxed);
@@ -827,8 +923,14 @@ pub async fn watch(ctx: &Arc<Ctx>, sess: &Arc<ConnSession>, p: Params) -> Result
                     let mut update = state.update(finals, live, active);
                     update.removed_ids.extend(replaced);
                     let mut input_states = task_ctx.transcript_inputs.append(&task_window, &initial_source, &pane, &mut update.items, &mut update.order);
+                    if let Some(anchor) = update.order.iter().find(|id| state.is_partial_assistant(id)).cloned() {
+                        let consumed: Vec<_> = update.order.iter().filter(|id| input_states[*id] == "consumed").cloned().collect();
+                        update.order.retain(|id| !consumed.contains(id));
+                        let position = update.order.iter().position(|id| id == &anchor).unwrap();
+                        update.order.splice(position..position, consumed);
+                    }
                     if input_source == initial_source {
-                        retain_pending_until_consumed(&previous_pending, &mut update, &mut input_states);
+                        retain_pending_until_consumed(&previous_pending, &previous_inputs, &mut update, &mut input_states);
                     }
                     previous_pending = update.items.iter().filter(|r| r.role == "user" && r.partial == Some(true)).cloned().collect();
                     input_source = initial_source.clone();
@@ -879,6 +981,7 @@ mod tests {
     pub(super) struct ScriptedBackend {
         opens: AtomicU64,
         pub(super) pane: StdMutex<String>,
+        pub(super) metas: StdMutex<Vec<repomon_core::agent::WindowMeta>>,
         pub(super) senders:
             StdMutex<HashMap<String, (u64, tokio::sync::mpsc::UnboundedSender<ByteStreamEvent>)>>,
     }
@@ -896,7 +999,30 @@ mod tests {
             OwnerState::Owned
         }
         fn list_windows(&self) -> repomon_core::Result<Vec<String>> {
-            Ok(vec![])
+            Ok(self
+                .metas
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|m| m.name.clone())
+                .collect())
+        }
+        fn list_windows_meta(&self) -> repomon_core::Result<Vec<repomon_core::agent::WindowMeta>> {
+            Ok(self.metas.lock().unwrap().clone())
+        }
+        fn set_window_agent_kind(&self, window: &str, kind: &str) -> repomon_core::Result<()> {
+            let mut metas = self.metas.lock().unwrap();
+            if let Some(meta) = metas.iter_mut().find(|m| m.name == window) {
+                meta.agent_kind = Some(kind.into());
+            } else {
+                metas.push(repomon_core::agent::WindowMeta {
+                    name: window.into(),
+                    wid: 1,
+                    session: None,
+                    agent_kind: Some(kind.into()),
+                });
+            }
+            Ok(())
         }
         fn list_windows_with_activity(&self) -> repomon_core::Result<Vec<WindowActivity>> {
             Ok(vec![])
@@ -1237,6 +1363,7 @@ mod tests {
             }
             std::fs::write(&path, body).unwrap();
             let source = Source {
+                window: "lane-1".into(),
                 kind: kind.into(),
                 path: Some(path),
                 session: None,
@@ -1275,6 +1402,7 @@ mod tests {
                 .join("../repomon-core/src/usage_ledger/fixtures")
                 .join(fixture);
             let source = Source {
+                window: "lane-1".into(),
                 kind: kind.into(),
                 path: Some(path.clone()),
                 session: None,
@@ -1357,6 +1485,7 @@ mod benchmarks {
                     Arc::new(super::tests::ScriptedBackend::default()),
                 );
                 let source = Source {
+                    window: "lane-1".into(),
                     kind: if kind == "claude" {
                         "claude-code"
                     } else {
@@ -1407,3 +1536,7 @@ mod benchmarks {
 #[cfg(test)]
 #[path = "transcript_tests.rs"]
 mod round5_tests;
+
+#[cfg(test)]
+#[path = "transcript_target_tests.rs"]
+mod target_tests;

@@ -7,7 +7,7 @@ use repomon_core::{ByteStreamEvent, Config, Store};
 use std::io::Write;
 use std::path::Path;
 
-async fn context(dir: &Path) -> (Arc<Ctx>, Arc<ScriptedBackend>) {
+pub(super) async fn context(dir: &Path) -> (Arc<Ctx>, Arc<ScriptedBackend>) {
     let mut config = Config::default();
     config.usage.refresh_prices = false;
     config.repomind.home = dir.join("repomind").to_string_lossy().into_owned();
@@ -22,7 +22,13 @@ async fn context(dir: &Path) -> (Arc<Ctx>, Arc<ScriptedBackend>) {
     );
     (ctx, backend)
 }
-async fn lane_source(ctx: &Arc<Ctx>, dir: &Path, kind: &str, path: &Path, session: &str) -> Params {
+pub(super) async fn lane_source(
+    ctx: &Arc<Ctx>,
+    dir: &Path,
+    kind: &str,
+    path: &Path,
+    session: &str,
+) -> Params {
     let repo = ctx
         .store
         .add_repo(dir.into(), session.into(), None)
@@ -58,9 +64,12 @@ async fn lane_source(ctx: &Arc<Ctx>, dir: &Path, kind: &str, path: &Path, sessio
         }])
         .await
         .unwrap();
+    ctx.backend
+        .set_window_agent_kind(&TmuxRuntime::window_name(lane), kind)
+        .unwrap();
     serde_json::from_value(json!({"lane_id":lane,"session_id":session,"kind":kind})).unwrap()
 }
-fn user_record(n: usize, kind: &str) -> String {
+pub(super) fn user_record(n: usize, kind: &str) -> String {
     let text = format!("message {n} {} ü", "x".repeat(100));
     let row = if kind == "claude-code" {
         json!({"type":"user","message":{"content":text}})
@@ -79,6 +88,7 @@ async fn cache_is_shared_and_fingerprint_invalidates_append_replacement_and_trun
     let path = dir.path().join("source.jsonl");
     std::fs::write(&path, user_record(1, "codex")).unwrap();
     let source = Source {
+        window: "lane-1".into(),
         kind: "codex".into(),
         path: Some(path.clone()),
         session: None,
@@ -138,6 +148,7 @@ async fn bounded_pages_seek_and_preserve_every_user_record() {
         )
         .unwrap();
         let source = Source {
+            window: "lane-1".into(),
             kind: kind.into(),
             path: Some(path),
             session: None,
@@ -273,6 +284,7 @@ async fn opencode_pages_keep_timestamp_ties_and_filter_sessions() {
         .unwrap();
     }
     let src = Source {
+        window: "lane-1".into(),
         kind: "opencode".into(),
         path: Some(path),
         session: Some("first".into()),
@@ -519,7 +531,7 @@ async fn terminal_byte_latency_open_versus_closed() {
     }
 }
 
-async fn transcript_event(
+pub(super) async fn transcript_event(
     events: &mut tokio::sync::broadcast::Receiver<Value>,
     predicate: impl Fn(&Value) -> bool,
 ) -> Value {
@@ -797,14 +809,14 @@ async fn one_subscription_consuming_input_does_not_remove_it_from_a_lagging_subs
         ctx.transcript_inputs
             .append(&window, &source, "", &mut slow.items, &mut slow.order);
     assert!(slow.items.is_empty());
-    retain_pending_until_consumed(&pending, &mut slow, &mut states);
+    retain_pending_until_consumed(&pending, &Value::Null, &mut slow, &mut states);
     assert_eq!(slow.items[0].id.as_deref(), Some(id.as_str()));
     assert_eq!(states[&id], "sent");
     // Once its durable upsert arrives, no pending duplicate remains.
     slow.items = serde_json::from_value(fast["items"].clone()).unwrap();
     slow.order = vec![id.clone()];
     let mut states = json!({});
-    retain_pending_until_consumed(&pending, &mut slow, &mut states);
+    retain_pending_until_consumed(&pending, &Value::Null, &mut slow, &mut states);
     assert_eq!(slow.items.len(), 1);
     assert_ne!(slow.items[0].partial, Some(true));
     assert!(states.as_object().unwrap().is_empty());

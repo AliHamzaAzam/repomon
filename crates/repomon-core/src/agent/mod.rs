@@ -226,3 +226,5 @@ mod tests {
         assert!(AiderMonitor.summary_for(dir.path()).is_none());
     }
 }
+
+pub mod conversation_queue;

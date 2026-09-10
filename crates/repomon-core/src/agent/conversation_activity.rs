@@ -73,7 +73,8 @@ pub(super) fn timed_line(kind: &str, line: &str) -> Option<Activity> {
             return None;
         }
         // A timer plus token counter distinguishes a rotating activity label from prose.
-        let mut fields = counters.split(", ");
+        let normalized_counters = counters.replace(" · ", ", ").replace(" • ", ", ");
+        let mut fields = normalized_counters.split(", ");
         activity.elapsed_seconds = Some(duration(fields.next()?)?);
         activity.token_count = Some(tokens(fields.next()?)?);
         for field in fields {
@@ -158,7 +159,7 @@ pub fn queue_indicator(kind: &str, pane: &str) -> bool {
                 let words: Vec<_> = tail.split_whitespace().collect();
                 matches!(words.as_slice(), [n, "question" | "questions"] if n.parse::<u32>().is_ok())
             }),
-            "claude-code" => line.strip_prefix("Queued message").is_some_and(|tail| tail.is_empty() || tail.starts_with(':'))
+            "claude-code" => line == "Press up to edit queued messages" || line.strip_prefix("Queued message").is_some_and(|tail| tail.is_empty() || tail.starts_with(':'))
                 || line.strip_suffix(" queued messages").or_else(|| line.strip_suffix(" queued message")).is_some_and(|n| n.parse::<u32>().is_ok()),
             _ => false,
         }
