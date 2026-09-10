@@ -178,6 +178,7 @@ fn config_json(cfg: &repomon_core::config::Config) -> Value {
         "supervision": cfg.supervision,
     });
     value["agent_views"] = json!(cfg.agent_views);
+    value["agent_status_rows"] = json!(cfg.agent_status_rows);
     value["message_hop_refresh_senders"] = json!(cfg.message_hop_refresh_senders);
     value["usage_enabled"] = json!(cfg.usage.enabled);
     value["usage_refresh_prices"] = json!(cfg.usage.refresh_prices);
@@ -998,6 +999,8 @@ struct ConfigSet {
     agent_icons: Option<HashMap<String, String>>,
     #[serde(default)]
     agent_views: Option<HashMap<String, String>>,
+    #[serde(default)]
+    agent_status_rows: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     supervision: Option<repomon_core::agent::supervision::SupervisionConfig>,
     #[serde(default)]
@@ -3338,6 +3341,20 @@ pub async fn dispatch(
                     "view must be terminal or conversation",
                 ));
             }
+            if p.agent_status_rows.as_ref().is_some_and(|kinds| {
+                kinds.values().flatten().any(|row| {
+                    !matches!(
+                        row.as_str(),
+                        "turn_started"
+                            | "turn_finished"
+                            | "turn_cost"
+                            | "rate_limit"
+                            | "usage_limit"
+                    )
+                })
+            }) {
+                return Err(RpcError::invalid_params("unknown conversation status kind"));
+            }
             // Validate the entire rate patch before mutating any live configuration.
             if p.usage_price_override_upsert.is_some() && p.usage_price_override_reset.is_some() {
                 return Err(RpcError::invalid_params(
@@ -3515,6 +3532,9 @@ pub async fn dispatch(
                 }
                 if let Some(m) = p.orchestrator_model {
                     cfg.orchestrator_model = (!m.is_empty()).then_some(m);
+                }
+                if let Some(rows) = p.agent_status_rows {
+                    cfg.agent_status_rows = rows;
                 }
                 if let Some(views) = p.agent_views {
                     cfg.agent_views = views;

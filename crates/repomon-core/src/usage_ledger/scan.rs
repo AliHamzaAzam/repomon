@@ -182,7 +182,7 @@ pub fn scan_claude_transcript_with_options(
     // still open at the end of the read is the message that may not be finished.
     let mut open: Option<usize> = None;
     let mut session_id: Option<String> = None;
-    let mut pick = HeadlinePick::default();
+    let mut pick = HeadlinePick::from_offset(from_offset);
 
     let mut transcript = options
         .collect_transcript
@@ -392,7 +392,7 @@ pub fn scan_codex_rollout_with_options(
     let mut model = String::new();
     let mut meta_model: Option<String> = None;
     let mut pending_model_backfill: Vec<usize> = Vec::new();
-    let mut pick = HeadlinePick::default();
+    let mut pick = HeadlinePick::from_offset(from_offset);
     let mut turns = 0u32;
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut last_at: Option<DateTime<Utc>> = None;
@@ -551,7 +551,7 @@ pub fn scan_antigravity_transcript(
         .and_then(Path::file_name)
         .map(|s| s.to_string_lossy().to_string());
     let mut events = Vec::new();
-    let mut pick = HeadlinePick::default();
+    let mut pick = HeadlinePick::from_offset(from_offset);
     let mut turns = 0u32;
     let mut tool_calls = 0u32;
     let mut first_at: Option<DateTime<Utc>> = None;
@@ -740,13 +740,16 @@ pub fn scan_opencode_db(path: &Path, after_ms: u64) -> Result<SourceScan> {
 }
 
 /// Tags the CLIs wrap around text they injected into a turn. Whatever sits between an opening tag
-/// and its closing tag is the tool talking to the agent, never the operator, so a headline is read
-/// from what is left once these are gone.
+/// and its closing tag is harness context. Headlines and conversation user prose share this filter.
 const INJECTED_TAGS: &[&str] = &[
     "local-command-caveat",
     "system-reminder",
     "USER_REQUEST",
     "task-notification",
+    "task-id",
+    "tool-use",
+    "tool-use-id",
+    "output-file",
     "agent-message",
 ];
 
@@ -761,10 +764,10 @@ const INJECTED_PREAMBLES: &[(&str, &[&str])] = &[(
     ],
 )];
 
-/// Bump this whenever the extraction rules above change. A session digest's stored
+/// Bump this whenever the extraction rules change. A session digest's stored
 /// `headline_version` (see `UsageSessionMeta`) lags behind after a bump, and ingest re-digests it
 /// from its source, a bounded batch per tick, until every session reflects the current rules.
-pub const HEADLINE_VERSION: u32 = 2;
+pub const HEADLINE_VERSION: u32 = 5;
 
 /// How many characters a headline keeps, ellipsis included.
 const HEADLINE_MAX_CHARS: usize = 80;
@@ -784,23 +787,94 @@ pub const UNTITLED_SESSION: &str = "untitled session";
 /// only shows up for a session with no model information anywhere in its source.
 pub const UNKNOWN_MODEL: &str = "unknown";
 
+/// Recognize the complete harness dimension/coordinate note, without treating other image
+/// descriptions as injections. Whitespace may wrap, and dimensions/scales are not fixed values.
+fn is_image_dimension_note(note: &str) -> bool {
+    fn digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    fn dimensions(s: &str) -> bool {
+        s.split_once('x')
+            .is_some_and(|(width, height)| digits(width) && digits(height))
+    }
+    let words: Vec<_> = note.split_whitespace().collect();
+    let [
+        "[Image:",
+        "original",
+        original,
+        "displayed",
+        "at",
+        displayed,
+        "Multiply",
+        "coordinates",
+        "by",
+        scale,
+        "to",
+        "map",
+        "to",
+        "original",
+        "image.]",
+    ] = words.as_slice()
+    else {
+        return false;
+    };
+    original.strip_suffix(',').is_some_and(dimensions)
+        && displayed.strip_suffix('.').is_some_and(dimensions)
+        && scale.split_once('.').map_or_else(
+            || digits(scale),
+            |(whole, fraction)| digits(whole) && digits(fraction),
+        )
+}
+
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
-fn strip_injected_blocks(raw: &str) -> String {
+pub(super) fn strip_injected_blocks(raw: &str) -> String {
     let mut text = raw.to_string();
     loop {
         let mut cut: Option<(usize, usize)> = None;
         for tag in INJECTED_TAGS {
             let open = format!("<{tag}");
-            let Some(start) = text.find(&open) else {
+            // Match a whole tag name: <tool-use-id> must not be treated as an unclosed
+            // <tool-use>, and ordinary names such as <output-file-format> must survive.
+            let Some(start) = text.match_indices(&open).find_map(|(start, _)| {
+                text[start + open.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || matches!(c, '>' | '/'))
+                    .then_some(start)
+            }) else {
                 continue;
             };
             let close = format!("</{tag}>");
-            let end = match text[start..].find(&close) {
-                Some(rel) => start + rel + close.len(),
-                None => text.len(),
+            let opening_end = text[start..].find('>').map(|rel| start + rel + 1);
+            let end = if let Some(end) = opening_end.filter(|end| text[start..*end].ends_with("/>"))
+            {
+                end
+            } else {
+                text[start..]
+                    .find(&close)
+                    .map_or(text.len(), |rel| start + rel + close.len())
             };
             if cut.is_none_or(|(previous, _)| start < previous) {
+                cut = Some((start, end));
+            }
+        }
+        if let Some(start) = text.find("[Image: source:") {
+            let end = text[start..]
+                .find(']')
+                .map_or(text.len(), |rel| start + rel + 1);
+            if cut.is_none_or(|(previous, _)| start < previous) {
+                cut = Some((start, end));
+            }
+        }
+        for (start, _) in text.match_indices("[Image:") {
+            let Some(relative_end) = text[start..].find(']') else {
+                continue;
+            };
+            let end = start + relative_end + 1;
+            if is_image_dimension_note(&text[start..end])
+                && cut.is_none_or(|(previous, _)| start < previous)
+            {
                 cut = Some((start, end));
             }
         }
@@ -836,6 +910,12 @@ fn first_sentence(line: &str) -> &str {
         if !matches!(byte, b'.' | b'!' | b'?') {
             continue;
         }
+        if *byte == b'.'
+            && (index.checked_sub(1).and_then(|i| bytes.get(i)) == Some(&b'.')
+                || bytes.get(index + 1) == Some(&b'.'))
+        {
+            continue;
+        }
         let ends_here = match (bytes.get(index + 1), bytes.get(index + 2)) {
             (None, _) => true,
             (Some(space), next) if space.is_ascii_whitespace() => {
@@ -868,48 +948,464 @@ fn cap_chars(text: &str, max: usize) -> String {
     format!("{}...", head.trim_end())
 }
 
-/// Extracts a bounded first-sentence headline after removing injected commands and blank lines,
-/// returning None for empty content.
-pub fn headline_from_text(raw: &str) -> Option<String> {
-    let stripped = strip_injected_blocks(raw);
-    let line = stripped
+/// The first substantive line, ignoring CLI injections and command-only turns. A rejected
+/// candidate must not cause a search through later lines for something that merely looks better.
+fn headline_candidate(stripped: &str) -> Option<&str> {
+    stripped
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('/'))?;
-    let sentence = first_sentence(line).trim();
-    if sentence.is_empty() {
+        .find(|line| !line.is_empty() && !line.starts_with('/'))
+}
+
+fn opaque_identifier(token: &str) -> bool {
+    let token = token
+        .rsplit(['=', ':'])
+        .next()
+        .unwrap_or(token)
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    // UUIDs and long hexadecimal session/review IDs, independent of their particular value.
+    let mut hex = token.bytes().filter(|b| *b != b'-');
+    hex.clone().count() >= 16 && hex.all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Return a stable diagnostic for rejected openings. Explicit requests, descriptive title
+/// phrases, and statements naming a problem can all describe work; conversational status cannot.
+fn task_opening_rejection(line: &str) -> Option<&'static str> {
+    let lower = line.to_lowercase();
+    let text = lower.trim_start_matches(['#', '>', '*', '`', ' ']);
+    if text.starts_with("[repomail") {
+        return Some("mail_frame");
+    }
+    let opaque_bytes: usize = text
+        .split_whitespace()
+        .filter(|word| opaque_identifier(word))
+        .map(str::len)
+        .sum();
+    if opaque_bytes > 0 && opaque_bytes * 3 >= text.len() {
+        return Some("opaque_identifier");
+    }
+    let text = text.strip_prefix("please ").unwrap_or(text);
+    let text = [
+        "can you ",
+        "could you ",
+        "would you ",
+        "i want you to ",
+        "i need you to ",
+    ]
+    .iter()
+    .find_map(|prefix| text.strip_prefix(prefix))
+    .unwrap_or(text);
+    let text = text.strip_prefix("please ").unwrap_or(text);
+    let verb = text.split_whitespace().next().unwrap_or("");
+    let object = text.strip_prefix(verb).unwrap_or("").trim_start();
+    if [
+        "the task ",
+        "the brief ",
+        "the instructions ",
+        "the plan in ",
+        "part ",
+    ]
+    .iter()
+    .any(|prefix| object.starts_with(prefix))
+    {
+        return Some("controller_workflow");
+    }
+    // Reading an assignment pointer is controller workflow, not a description of the work.
+    if matches!(
+        verb,
+        "read" | "follow" | "open" | "load" | "execute" | "do" | "complete"
+    ) && (text.contains(".md")
+        || [
+            "task file",
+            "your task",
+            "the task",
+            "the brief",
+            "part a",
+            "part b",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker)))
+    {
+        return Some("controller_workflow");
+    }
+    if matches!(verb, "review" | "assess" | "evaluate")
+        && [
+            "this session",
+            "the session",
+            "this transcript",
+            "the following",
+            "agent history",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        return Some("session_review");
+    }
+    const REQUEST_VERBS: &[&str] = &[
+        "add",
+        "audit",
+        "build",
+        "change",
+        "check",
+        "clean",
+        "compare",
+        "configure",
+        "connect",
+        "convert",
+        "create",
+        "debug",
+        "design",
+        "document",
+        "enable",
+        "explain",
+        "find",
+        "finish",
+        "fix",
+        "help",
+        "implement",
+        "improve",
+        "investigate",
+        "make",
+        "migrate",
+        "move",
+        "optimize",
+        "port",
+        "read",
+        "rebuild",
+        "refactor",
+        "remove",
+        "rename",
+        "repair",
+        "replace",
+        "research",
+        "restore",
+        "resume",
+        "review",
+        "rewrite",
+        "set",
+        "ship",
+        "show",
+        "simplify",
+        "support",
+        "test",
+        "trace",
+        "translate",
+        "update",
+        "upgrade",
+        "use",
+        "validate",
+        "verify",
+        "wire",
+        "write",
+    ];
+    const REQUEST_PREFIXES: &[&str] = &[
+        "i want ",
+        "i need ",
+        "i would like ",
+        "i'd like ",
+        "i am working on ",
+        "i'm working on ",
+        "we need ",
+        "how do i ",
+        "how can i ",
+        "why does ",
+        "why is ",
+        "what causes ",
+    ];
+    // Routing and review metadata must not become titles just because they contain feature nouns.
+    if text.starts_with("you own ")
+        || text.starts_with("your task ")
+        || text.starts_with("your assignment ")
+        || (text.starts_with("phase ")
+            && ["brief ", "lane-", "task file", "your full task"]
+                .iter()
+                .any(|s| text.contains(s)))
+    {
+        return Some("controller_workflow");
+    }
+    if text.split_once(':').is_some_and(|(label, _)| {
+        ["session id", "session_id", "session-id"]
+            .iter()
+            .any(|s| label.ends_with(s))
+    }) {
+        return Some("session_review");
+    }
+    if text.split_whitespace().count() >= 3
+        && (REQUEST_VERBS.contains(&verb)
+            || REQUEST_PREFIXES
+                .iter()
+                .any(|prefix| text.starts_with(prefix)))
+    {
         return None;
     }
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let first = words.first().copied().unwrap_or("");
+    if ["yes", "okay", "ok", "thanks", "agreed", "understood"].contains(&first)
+        || [
+            "thank you",
+            "nice work",
+            "great work",
+            "good job",
+            "that is correct",
+            "that's correct",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return Some("acknowledgment");
+    }
+    if [
+        " is correct",
+        " are correct",
+        " looks correct",
+        " looks good",
+        " is sound",
+        " are sound",
+        " is fine",
+        " are fine",
+        "working as expected",
+        "works as expected",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+        || words
+            .last()
+            .is_some_and(|word| ["correct", "sound"].contains(word))
+    {
+        return Some("correctness_commentary");
+    }
+    if [
+        "i will ", "i'll ", "we will ", "we'll ", "i have ", "i've ", "we have ", "we've ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+        || [
+            "implemented",
+            "completed",
+            "finished",
+            "verified",
+            "reviewed",
+            "confirmed",
+            "done",
+        ]
+        .contains(&first)
+        || [
+            " now pass",
+            " now works",
+            "tests passed",
+            "all tests pass",
+            "no issues found",
+            "no findings",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+        || [
+            " is ",
+            " are ",
+            " was ",
+            " were ",
+            " has been ",
+            " have been ",
+        ]
+        .iter()
+        .any(|copula| {
+            text.split_once(copula).is_some_and(|(_, rest)| {
+                [
+                    "complete",
+                    "completed",
+                    "done",
+                    "ready",
+                    "finished",
+                    "implemented",
+                    "fixed",
+                    "verified",
+                    "passing",
+                    "green",
+                    "deployed",
+                    "merged",
+                    "resolved",
+                ]
+                .contains(
+                    &rest
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches(['.', ',', ':']),
+                )
+            })
+        })
+        || words
+            .last()
+            .is_some_and(|word| ["complete", "completed", "done", "finished"].contains(word))
+    {
+        return Some("progress_update");
+    }
+    // Unscoped replies do not name an artifact or defect. Use grammatical shape rather than a
+    // list of product nouns so unfamiliar features (e.g. shared shopping lists) can still qualify.
+    const FUNCTION_WORDS: &[&str] = &[
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "with",
+        "without",
+        "for",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "by",
+        "from",
+        "after",
+        "before",
+        "when",
+        "then",
+        "but",
+        "as",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "does",
+        "do",
+        "did",
+        "it",
+        "its",
+        "this",
+        "that",
+        "those",
+        "these",
+        "there",
+        "everything",
+        "something",
+        "nothing",
+        "thing",
+        "things",
+        "now",
+        "again",
+    ];
+    let content_words = words
+        .iter()
+        .filter(|word| !FUNCTION_WORDS.contains(word) && word.chars().any(char::is_alphabetic))
+        .count();
+    if content_words < 2
+        || ["i", "we", "you", "he", "she", "they", "my", "our", "your"].contains(&first)
+    {
+        return Some("no_task_description");
+    }
+    // A finite clause needs an explicit symptom; a noun/title phrase does not need a verb.
+    let problem = words.iter().any(|word| {
+        [
+            "broken",
+            "fails",
+            "fail",
+            "failing",
+            "failure",
+            "crash",
+            "crashes",
+            "crashing",
+            "missing",
+            "lost",
+            "disappear",
+            "disappears",
+            "blank",
+            "empty",
+            "stuck",
+            "slow",
+            "timeout",
+            "timeouts",
+            "incorrect",
+            "wrong",
+            "cannot",
+            "not",
+            "no",
+            "can't",
+            "doesn't",
+            "won't",
+            "isn't",
+            "aren't",
+        ]
+        .contains(word)
+    });
+    let finite_clause = words.iter().any(|word| {
+        [
+            "am", "is", "are", "was", "were", "has", "have", "had", "will", "would", "should",
+            "can", "could", "does", "did", "seems", "looks",
+        ]
+        .contains(word)
+    });
+    if problem || !finite_clause {
+        None
+    } else {
+        Some("no_task_description")
+    }
+}
+
+/// Extracts a bounded first-sentence task headline, or None when the candidate is machine
+/// chatter, controller workflow, a continuation, or otherwise lacks a task description.
+pub fn headline_from_text(raw: &str) -> Option<String> {
+    let stripped = strip_injected_blocks(raw);
+    let line = headline_candidate(&stripped)?;
+    if task_opening_rejection(line).is_some() {
+        return None;
+    }
+    let sentence = first_sentence(line).trim();
     Some(cap_chars(sentence, HEADLINE_MAX_CHARS))
 }
 
-/// The first usable user text of a session, with the first assistant text as a fallback. Whichever
-/// wins also supplies the raw text a tooltip shows, so the operator can see what was cleaned away.
+/// Only the first substantive user turn may name a session. Assistant prose is never a task
+/// title; keep raw text even for a rejected candidate so the tooltip can explain the fallback.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct HeadlinePick {
-    user: Option<(String, String)>,
-    assistant: Option<(String, String)>,
+    user: Option<(Option<String>, String)>,
+    raw: Option<String>,
+    skip: bool,
 }
 
 impl HeadlinePick {
+    fn from_offset(offset: u64) -> Self {
+        Self {
+            skip: offset != 0,
+            ..Self::default()
+        }
+    }
+
     fn offer_user(&mut self, raw: &str) {
-        if self.user.is_none() {
-            self.user = headline_from_text(raw).map(|head| (head, raw_excerpt(raw)));
+        if self.skip || self.user.is_some() {
+            return;
+        }
+        if !raw.trim().is_empty() && self.raw.is_none() {
+            self.raw = Some(raw_excerpt(raw));
+        }
+        if headline_candidate(&strip_injected_blocks(raw)).is_some() {
+            self.user = Some((headline_from_text(raw), raw_excerpt(raw)));
         }
     }
 
     fn offer_assistant(&mut self, raw: &str) {
-        if self.assistant.is_none() {
-            self.assistant = headline_from_text(raw).map(|head| (head, raw_excerpt(raw)));
+        if !self.skip && self.raw.is_none() && !raw.trim().is_empty() {
+            self.raw = Some(raw_excerpt(raw));
         }
     }
 
-    /// The headline and the raw text behind it. Both are `None` when the session had neither, so
-    /// an incremental re-scan that saw no text keeps whatever an earlier scan already stored.
+    /// Suffix scans return neither field, preserving the opening title and its tooltip in the
+    /// store. Full scans retain rejected raw candidates; versioned redigests can clear old titles.
     fn resolve(self) -> (Option<String>, Option<String>) {
-        match self.user.or(self.assistant) {
-            Some((head, raw)) => (Some(head), Some(raw)),
-            None => (None, None),
+        match self.user {
+            Some((head, raw)) => (head, Some(raw)),
+            None => (None, self.raw),
         }
     }
 }
@@ -941,6 +1437,71 @@ fn message_text(message: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headline_quality_gate_handles_real_fleet_titles_and_request_classes() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/headline_quality_v0.json")).unwrap();
+        let mut accepted = 0;
+        let mut rejected = 0;
+        for case in cases {
+            let raw = case["text"].as_str().unwrap();
+            let stripped = strip_injected_blocks(raw);
+            let rejection = task_opening_rejection(headline_candidate(&stripped).unwrap());
+            assert_eq!(rejection, case["rejection"].as_str(), "reason for {raw}");
+            if let Some(reason) = rejection {
+                rejected += 1;
+                println!("REJECT [{reason}] {}", raw.replace('\n', " "));
+            } else {
+                accepted += 1;
+                println!("ACCEPT {}", raw.replace('\n', " "));
+            }
+            assert_eq!(
+                headline_from_text(raw).as_deref(),
+                case["headline"].as_str(),
+                "{}: {raw}",
+                case["kind"]
+            );
+            let mut pick = HeadlinePick::from_offset(0);
+            pick.offer_user(raw);
+            pick.offer_assistant("Build a different feature after the review.");
+            pick.offer_user("Add a follow-up change to the parser.");
+            let (headline, tooltip) = pick.resolve();
+            assert_eq!(
+                headline.as_deref(),
+                case["headline"].as_str(),
+                "a later turn must not replace the opening decision: {}",
+                case["kind"]
+            );
+            assert_eq!(tooltip, Some(raw_excerpt(raw)), "retain raw tooltip text");
+        }
+        println!(
+            "HEADLINE_COUNTS accepted={accepted} rejected={rejected} total={}",
+            accepted + rejected
+        );
+    }
+
+    #[test]
+    fn suffix_scans_cannot_promote_followup_requests_to_session_titles() {
+        let mut pick = HeadlinePick::from_offset(120);
+        pick.offer_user("Fix the follow-up issue from the review.");
+        pick.offer_assistant("Implement the suggested change now.");
+        assert_eq!(
+            pick.resolve(),
+            (None, None),
+            "keep the stored opening and tooltip"
+        );
+    }
+
+    #[test]
+    fn an_assistant_request_shaped_sentence_is_still_not_a_user_task() {
+        let mut pick = HeadlinePick::from_offset(0);
+        pick.offer_assistant("Fix the failing tests before merging.");
+        assert_eq!(
+            pick.resolve(),
+            (None, Some("Fix the failing tests before merging.".into()))
+        );
+    }
 
     fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         let p = dir.join(name);
@@ -1081,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn a_headline_falls_back_to_the_first_assistant_sentence() {
+    fn assistant_continuations_never_supply_a_headline() {
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             dir.path(),
@@ -1092,8 +1653,8 @@ mod tests {
         let s = scan.sessions.first().expect("one session");
         assert_eq!(
             s.headline.as_deref(),
-            Some("I compacted the transcript and kept the plan"),
-            "the synthetic error turn is not a headline"
+            None,
+            "neither synthetic errors nor assistant continuations describe the user's task"
         );
     }
 
@@ -1324,7 +1885,13 @@ mod tests {
             s.headline, None,
             "an all-synthetic reviewer turn has no real first sentence"
         );
-        assert_eq!(s.headline_raw, None);
+        assert!(
+            s.headline_raw
+                .as_deref()
+                .unwrap()
+                .starts_with("The following is the Codex agent history"),
+            "the rejected source remains available to the tooltip"
+        );
     }
 
     #[test]
