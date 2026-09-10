@@ -2,6 +2,7 @@ import { createEffect, createSignal, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon, type ActivitySnapshot, type TranscriptTarget, type TranscriptUpdate } from "../ipc/rpc";
+import { getCachedTranscriptPage, setCachedTranscriptPage } from "./transcriptCache";
 
 export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean; paneExcerpt?: boolean }
 const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block"]);
@@ -69,7 +70,7 @@ export function createTranscript(target: () => TranscriptTarget | null) {
   let lastOrderKey: string | undefined;
   const orderKeyOf = (order: string[]) => order.join(" ");
 
-  const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false, order?: string[]) => {
+  const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false, order?: string[]): boolean => {
     const structural = prepend || removed.length > 0 || rows.some((row) => !indexByKey.has(row.key));
     // A metadata-only push (activity or input_states ticking with no row content changed) calls
     // apply([]) with an unchanged order; skip the revision bump so the follow-scroll effect below
@@ -93,7 +94,36 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       }
     }
     if (changed) setRevision((n) => n + 1);
+    return changed;
   };
+  // Snapshots the loaded page under the identity currently active, so a future mount of this
+  // exact (lane, window, session, kind) can paint from it immediately instead of blanking out
+  // while its own watch re-attaches. Read by `getCachedTranscriptPage` on the next fresh mount.
+  const persistPage = () => {
+    if (!historyTarget) return;
+    // Plain copies, not the store's own reactive proxies: this snapshot outlives the store that
+    // produced it (read back by a future, unrelated `createTranscript` instance), so it must not
+    // carry a reference into this one's reactivity graph.
+    const rows = state.rows.map((row) => ({ key: row.key, fallback: row.fallback, paneExcerpt: row.paneExcerpt, item: { ...row.item } }));
+    setCachedTranscriptPage(historyTarget, { rows, nextBefore: nextBefore(), remaining: remaining() });
+  };
+  // The daemon could not resolve this window's transcript identity (e.g. a session id that no
+  // longer matches the window's current occupant). Rather than a permanent error banner, fall
+  // back to the same live-pane-excerpt device already used for kinds with no transcript source:
+  // one collapsed terminal_block row built from a fresh capture, replacing whatever rows were
+  // showing (including anything seeded from a stale cache entry) so the pane never shows another
+  // agent's history under this window's name. Returns null when the capture itself also fails,
+  // leaving the caller to report the original error.
+  async function captureFallbackRow(params: TranscriptTarget): Promise<ConversationRow | null> {
+    try {
+      const capture = await daemonCall("agent.capture", { lane_id: params.lane_id, window: params.window });
+      if (!capture?.content) return null;
+      const key = `pane:${params.lane_id}:${params.window ?? ""}`;
+      return transcriptRow({ id: key, kind: "terminal_block", role: "tools", text: capture.content, at: null }, key);
+    } catch {
+      return null;
+    }
+  }
 
   createEffect(() => {
     const params = target();
@@ -108,11 +138,15 @@ export function createTranscript(target: () => TranscriptTarget | null) {
     if (!retained) {
       historyTarget = identity;
       paged = false;
-      setState("rows", []);
-      indexByKey = new Map();
+      // A pane opened for the first time this mount still might not be the first time this exact
+      // identity was ever watched this session - paint from what it last showed while the watch
+      // re-attaches, instead of the blank "Opening conversation…" wait.
+      const cachedPage = getCachedTranscriptPage(identity);
+      setState("rows", cachedPage?.rows ?? []);
+      indexByKey = new Map((cachedPage?.rows ?? []).map((row, i) => [row.key, i]));
       lastOrderKey = undefined;
-      setNextBefore(null);
-      setRemaining(null);
+      setNextBefore(cachedPage?.nextBefore ?? null);
+      setRemaining(cachedPage?.remaining ?? null);
       setPagedOnce(false);
       setActivity(null);
       setInputStates({});
@@ -120,10 +154,11 @@ export function createTranscript(target: () => TranscriptTarget | null) {
     setLoading(true);
     setError(null);
     const update = (value: TranscriptUpdate) => {
-      apply(value.items.map((item, index) => transcriptRow(item, `event:${run}:${index}`)), value.removed_ids, false, value.order);
+      const changed = apply(value.items.map((item, index) => transcriptRow(item, `event:${run}:${index}`)), value.removed_ids, false, value.order);
       if (!paged) { setNextBefore(value.next_before); setRemaining(value.older_message_count ?? null); }
       if (value.activity !== undefined) setActivity(value.activity);
       if (value.input_states !== undefined) setInputStates(value.input_states);
+      if (changed) persistPage();
     };
     lifecycle = lifecycle.catch(() => undefined).then(async () => {
       if (disposed) return;
@@ -135,19 +170,37 @@ export function createTranscript(target: () => TranscriptTarget | null) {
           if (!initialized) buffered.push(value); else update(value);
         });
         if (disposed) { unsubscribe(); return; }
-        const page = await daemonCall("agent.transcript_watch", { ...params, on: true });
-        if (disposed || run !== epoch) return;
-        if (!page) throw new Error("The transcript watch returned no page. Open terminal or retry.");
-        const incoming = page.items.map((item, index) => transcriptRow(item, `page:latest:${index}`));
-        const present = new Set(incoming.map((row) => row.key));
-        const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
-        apply(incoming, staleLive, false, page.order);
-        if (!paged) { setNextBefore(page.next_before); setRemaining(page.older_message_count ?? null); }
-        if (page.activity !== undefined) setActivity(page.activity);
-        if (page.input_states !== undefined) setInputStates(page.input_states);
-        initialized = true;
-        buffered.forEach(update);
-        setRevision((n) => n + 1);
+        try {
+          const page = await daemonCall("agent.transcript_watch", { ...params, on: true });
+          if (disposed || run !== epoch) return;
+          if (!page) throw new Error("The transcript watch returned no page. Open terminal or retry.");
+          const incoming = page.items.map((item, index) => transcriptRow(item, `page:latest:${index}`));
+          const present = new Set(incoming.map((row) => row.key));
+          const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
+          apply(incoming, staleLive, false, page.order);
+          if (!paged) { setNextBefore(page.next_before); setRemaining(page.older_message_count ?? null); }
+          if (page.activity !== undefined) setActivity(page.activity);
+          if (page.input_states !== undefined) setInputStates(page.input_states);
+          initialized = true;
+          buffered.forEach(update);
+          persistPage();
+          setRevision((n) => n + 1);
+        } catch (cause) {
+          if (disposed || run !== epoch) return;
+          // The daemon could not resolve this window's identity (e.g. a stale session id). Show
+          // this window's own live pane content instead of a hard error or another agent's
+          // cached history, and never surface the error banner when that fallback succeeds.
+          const fallback = await captureFallbackRow(params);
+          if (disposed || run !== epoch) return;
+          if (!fallback) throw cause;
+          apply([fallback], state.rows.map((row) => row.key), false);
+          setNextBefore(null);
+          setRemaining(null);
+          initialized = true;
+          buffered.forEach(update);
+          persistPage();
+          setRevision((n) => n + 1);
+        }
       } catch (cause) {
         if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
@@ -182,6 +235,7 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       apply(ordered, page.removed_ids ?? [], true);
       setNextBefore(page.next_before);
       setRemaining(page.older_message_count ?? null);
+      persistPage();
       return page.items.length;
     } catch (cause) {
       if (run === epoch) setError(cause instanceof Error ? cause.message : String(cause));

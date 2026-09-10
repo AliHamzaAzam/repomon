@@ -158,7 +158,7 @@ function TurnWork(props: { rows: ConversationRow[]; detail: string; kind: string
 // became visible so the ledger never mounts more than what is either recent or requested.
 const RENDER_CAP = 250;
 
-export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; shown?: boolean; kind: string; lane?: Lane; onFiles?: () => void; detail?: TranscriptDetail; onTerminal: () => void }) {
+export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; shown?: boolean; kind: string; lane?: Lane; onFiles?: () => void; onFocusAgent?: (window: string) => void; detail?: TranscriptDetail; onTerminal: () => void }) {
   // `visible` is pane-level (is this window still relevant at all); `shown` (defaulting to
   // visible for callers that don't distinguish the two) is specifically "chat is the displayed
   // view right now" and gates cosmetic, display-only work that would otherwise run against an
@@ -211,24 +211,56 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   let scroll!: HTMLDivElement;
   let pendingScroll = 0;
   let refreshPrompt: (() => Promise<void>) | undefined;
+  // The daemon already folds a synthesized "dialog" item into this same transcript watch (see
+  // conversation.rs's detect_dialog pass), so the latest one in the loaded rows is this window's
+  // current pending prompt with no extra round trip. `agent.prompt` below only backs that up for
+  // whatever gap remains (the moment before any watch event has landed, and any source the scan
+  // pass cannot reach), polled far less eagerly than every visible pane once a second used to.
+  const transcriptDialog = createMemo<PendingDialog | null>(() => {
+    const rows = transcript.rows();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (row.item.kind === "dialog" && validDialog(row.item.dialog)) return row.item.dialog;
+    }
+    return null;
+  });
+  // Additive only: a transcript-sourced dialog latches immediately, but its absence never clears
+  // one - that stays the poll's job (and `answer()`'s own optimistic clear), since a scan pass
+  // that has not run yet is not evidence the prompt is gone.
+  createEffect(() => { const found = transcriptDialog(); if (found) setDialog(found); });
   createEffect(() => {
-    if (!props.visible) return;
+    // Only a pane that is both visible and actually on the chat view is worth a live RPC poll; a
+    // mounted-but-backgrounded Terminal-view or off-screen pane relies on the transcript-derived
+    // dialog above alone.
+    if (!props.visible || !displayed()) return;
     const target = { lane_id: props.target.lane_id, window: props.target.window };
     let disposed = false;
     let polling = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (disposed) return;
+      // Nothing running means a new dialog can only appear alongside transcript activity this
+      // effect will already react to; back off to an occasional safety-net poll instead of once
+      // a second so a quiet, fully idle pane stops costing the daemon's single connection.
+      timer = setTimeout(() => void poll(), transcript.activity() ? 1000 : 8000);
+    };
     const poll = async () => {
       if (polling || disposed) return;
       polling = true;
       try {
-        const result = await daemonCall("agent.prompt", target);
-        if (!disposed) setDialog(validDialog(result.dialog) ? result.dialog : null);
+        // The transcript already has an authoritative answer; do not let a slower RPC's result
+        // land afterwards and clobber it back to null.
+        if (!transcriptDialog()) {
+          const result = await daemonCall("agent.prompt", target);
+          if (!disposed && !transcriptDialog()) setDialog(validDialog(result.dialog) ? result.dialog : null);
+        }
       } catch { /* Keep the last known prompt until the next refresh. */ }
       polling = false;
+      schedule();
     };
     refreshPrompt = poll;
     void poll();
-    const interval = setInterval(() => void poll(), 1000);
-    onCleanup(() => { disposed = true; clearInterval(interval); refreshPrompt = undefined; });
+    onCleanup(() => { disposed = true; if (timer !== undefined) clearTimeout(timer); refreshPrompt = undefined; });
   });
   const followLatest = () => {
     if (displayed() && following()) {
@@ -238,6 +270,24 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   };
   createEffect(() => { transcript.revision(); followLatest(); });
   onCleanup(() => cancelAnimationFrame(pendingScroll));
+  // Counts ledger rows that arrived while scrolled away from the bottom, for the Latest output
+  // pill's badge. Keyed, not counted per revision: a streamed partial's repeated token upserts
+  // reuse one key and must not inflate the count, only a genuinely new row should. History the
+  // operator explicitly paged in with older() is excluded via loadingOlder - that is older output
+  // they asked for, not new output that arrived, even though it lands while scrolled away.
+  const [unreadKeys, setUnreadKeys] = createSignal<ReadonlySet<string>>(new Set());
+  let seenKeys = new Set<string>();
+  let loadingOlder = false;
+  createEffect(() => {
+    const keys = new Set(ledgerRows().map((row) => row.key));
+    if (following() || loadingOlder) {
+      if (!loadingOlder && unreadKeys().size) setUnreadKeys(new Set<string>());
+    } else {
+      const added = [...keys].filter((key) => !seenKeys.has(key));
+      if (added.length) setUnreadKeys((prev) => new Set<string>([...prev, ...added]));
+    }
+    seenKeys = keys;
+  });
   // Claude TUI's own behaviour: a text selection over transcript content copies itself, no
   // explicit copy step. Scoped to the ledger and the pending-decision body so it never fires for
   // the composer textarea, whose own selection is not part of window.getSelection() anyway.
@@ -255,10 +305,26 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     const height = scroll.scrollHeight;
     const top = scroll.scrollTop;
     setFollowing(false);
+    loadingOlder = true;
     const hidden = hiddenLoaded();
     if (hidden > 0) setRevealed((n) => n + hidden);
     else { const fetched = await transcript.loadOlder(); if (fetched) setRevealed((n) => n + fetched); }
+    loadingOlder = false;
     requestAnimationFrame(() => { scroll.scrollTop = top + scroll.scrollHeight - height; });
+  }
+  // Re-armed only by leaving the near-top zone (older()'s own anchor-preserving scroll jump does
+  // this on a successful load, since the newly prepended content pushes scrollTop back down) - so
+  // a continuous scroll-up gesture that stalls right at the top cannot fire a second auto-load.
+  let autoLoadArmed = true;
+  const NEAR_TOP_PX = 64;
+  function onLedgerScroll() {
+    setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48);
+    const scrollable = scroll.scrollHeight > scroll.clientHeight;
+    const nearTop = scrollable && scroll.scrollTop < NEAR_TOP_PX;
+    if (!nearTop) { autoLoadArmed = true; return; }
+    if (!autoLoadArmed || transcript.loading() || !hasOlder()) return;
+    autoLoadArmed = false;
+    void older();
   }
   async function answer(choice: number) {
     const current = dialog();
@@ -280,20 +346,36 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   return <section class="conversation" aria-label="Conversation" onMouseUp={copySelectionToClipboard} onKeyUp={copySelectionToClipboard}>
     <div class="conversation-layout">
     <div class="conversation-main">
-    <div class="conversation-scroll" ref={scroll} onScroll={() => setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48)}>
+    <div class="conversation-scroll-area">
+    <div class="conversation-scroll" ref={scroll} onScroll={onLedgerScroll}>
       <div class="conversation-ledger">
         <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">{agentKindDisplayName(props.kind)} sends its output straight to the terminal; there is no saved chat transcript to read here. A live excerpt appears below, or open the live terminal to follow along.</p></Show>
         <Show when={hasOlder()} fallback={<Show when={transcript.pagedOnce()}><p class="conversation-history-boundary">Beginning of conversation</p></Show>}>
           <button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>{olderLabel()}</button>
         </Show>
         <Show when={transcript.error()}><p class="text-fault text-xs" role="alert">{transcript.error()} <button class="underline focus-ring" onClick={props.onTerminal}>Open terminal</button></p></Show>
-        <Show when={!transcript.rows().length}><div class="conversation-empty"><p>{transcript.loading() ? "Opening conversation…" : "No conversation yet"}</p><p class="text-xs text-muted">{transcript.loading() ? "Connecting to this agent's output." : "Replies will appear here as the agent writes. The terminal is available below."}</p></div></Show>
+        <Show when={!transcript.rows().length}>
+          <Show when={transcript.loading()} fallback={<div class="conversation-empty"><p>No conversation yet</p><p class="text-xs text-muted">Replies will appear here as the agent writes. The terminal is available below.</p></div>}>
+            <div class="conversation-skeleton" role="status" aria-label="Opening conversation">
+              <For each={[0, 1, 2]}>{() => <div class="conversation-skeleton-row"><div class="conversation-skeleton-line" style={{ width: "35%" }} /><div class="conversation-skeleton-line" style={{ width: "88%" }} /><div class="conversation-skeleton-line" style={{ width: "62%" }} /></div>}</For>
+            </div>
+          </Show>
+        </Show>
         <For each={ledgerRows().filter((row) => !work().hidden.has(row.key))}>
           {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} onResize={followLatest} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
         </For>
       </div>
     </div>
-    <Show when={!following()}><button class="conversation-latest focus-ring" onClick={() => { setFollowing(true); scroll.scrollTop = scroll.scrollHeight; }}>Latest output</button></Show>
+    <Show when={!following()}>
+      <div class="conversation-latest-anchor">
+        <button class="conversation-latest focus-ring" onClick={() => { setFollowing(true); scroll.scrollTop = scroll.scrollHeight; }}>
+          <IconChevronDown size={12} />
+          <span>Latest output</span>
+          <Show when={unreadKeys().size}>{(count) => <span class="conversation-latest-count">{count()}</span>}</Show>
+        </button>
+      </div>
+    </Show>
+    </div>
     <Show when={pendingRows().length}>
       <div class="conversation-pending-queue" aria-label="Not yet read by the agent">
         <div class="conversation-pending-inner">
@@ -316,7 +398,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       <AttachmentComposer kind={props.kind} model={model()} disabled={!!dialog()} busy={busy()} onSend={send} />
     </footer>
     </div>
-    <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} />}</Show>
+    <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} onFocusAgent={props.onFocusAgent} />}</Show>
     </div>
   </section>;
 }
