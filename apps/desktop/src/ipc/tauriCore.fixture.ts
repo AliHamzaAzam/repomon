@@ -215,9 +215,40 @@ const PULL_REQUESTS = [
   },
 ];
 
+// Synthetic ordinary fleet, selected with ?fleet=ordinary. No transcript headlines or PRs,
+// repeated main branches, mostly quiet lanes. Wire sources: AgentStatus::as_str in
+// core/model.rs; rpc.rs::status_reason (idle = "no output for Nm", ended = "process gone");
+// usage_query.rs::lane_headline returns None when no ledger session supplies a headline.
+// No private database or live fleet was copied to construct this fixture.
+const ORDINARY_REPOS = [
+  repo(21, "repomon"), repo(22, "deneblondon"), repo(23, "SAAS"), repo(24, "Mira"),
+  repo(25, "portfolio"), repo(26, "TinyAgent"), repo(27, "customer-portal", "Customer portal"),
+];
+const ORDINARY_LANES = Array.from({ length: 16 }, (_, index) => {
+  const target = ORDINARY_REPOS[index % ORDINARY_REPOS.length];
+  const id = 200 + index;
+  const branch = index < 7 ? "main" : ["fix/login", "main", "chore/dependencies", "feat/account-settings-and-notification-preferences"][index % 4];
+  const minutes = [3, 18, 42, 70, 120, 180, 240, 300, 420, 600, 720, 900, 1440, 2880, 4320, 5760][index];
+  return lane({
+    id, repo: target, branch, last_activity_at: ago(minutes),
+    agent_sessions: index % 3 === 2 ? [] : [agentSession({
+      id: id * 10, repo_id: target.id, worktree_id: id,
+      agent: index % 2 ? "claude-code" : "codex",
+      session_id: `s${id}`, tmux_window: `lane-${id}`,
+      last_activity_at: ago(minutes),
+      status: index === 0 ? "running" : index === 6 ? "ended" : "idle",
+      ended_at: index === 6 ? ago(minutes) : null,
+      status_reason: index === 0 ? "transcript still being written" : index === 6 ? "process gone" : `no output for ${minutes}m`,
+    })],
+  });
+});
+const ordinary = new URLSearchParams(location.search).get("fleet") === "ordinary";
+const fixtureRepos = ordinary ? ORDINARY_REPOS : REPOS;
+const fixtureLanes = ordinary ? ORDINARY_LANES : LANES;
+
 const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
-  "repo.list": () => REPOS,
-  "lane.list": () => LANES,
+  "repo.list": () => fixtureRepos,
+  "lane.list": () => fixtureLanes,
   "usage.get": () => [],
   "terminal.list_all": () => [],
   // Carries no `theme`/`accent` so App.tsx's config.get handler leaves the `?theme=` query
@@ -231,8 +262,8 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
     unpriced_models: [],
   }),
   "agent.detect": () => AGENT_CHOICES,
-  "lane.headline": (params) => HEADLINES[(params as { lane_id: number }).lane_id] ?? null,
-  "repo.pull_requests": () => PULL_REQUESTS,
+  "lane.headline": (params) => ordinary ? null : HEADLINES[(params as { lane_id: number }).lane_id] ?? null,
+  "repo.pull_requests": () => ordinary ? [] : PULL_REQUESTS,
   "repomind.status": () => null,
   "message.list": () => ({ messages: [], next_before: null }),
 };
@@ -243,7 +274,7 @@ const CONNECTED_STATUS = {
   message: null,
   hint: null,
   log_path: null,
-  daemon: { uptime_secs: 3600, repos: REPOS.length, lanes: LANES.length, db_size_bytes: 0, version: "fixture" },
+  daemon: { uptime_secs: 3600, repos: fixtureRepos.length, lanes: fixtureLanes.length, db_size_bytes: 0, version: "fixture" },
 };
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

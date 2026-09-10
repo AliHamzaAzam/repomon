@@ -83,7 +83,7 @@ export function uniqueBranchName(headline: string, existingBranches: Iterable<st
 /// branch name, else the worktree name for a detached lane. `headline` is `undefined` while the
 /// `lane.headline` RPC is still in flight, in which case the fallback shows rather than a blank.
 export function laneTitle(lane: Lane, headline: string | null | undefined): string {
-  return headline || lane.worktree.branch || lane.worktree.name;
+  return headline?.trim() || lane.worktree.branch || lane.worktree.name;
 }
 
 /// The strip board's compact age column: no "ago" suffix, so it fits the mock's narrow fixed
@@ -102,10 +102,28 @@ export function formatStripAge(iso: string, now: number = Date.now()): string {
 }
 
 /// Which SVG mark and tone a strip's status column shows, from the same state vocabulary the
-/// sidebar reads. A lane with no agents at all reads as idle, same as one that is merely quiet.
-export function stripMark(state: AgentState | null): { icon: "bolt" | "play" | "stop" | "check"; tone: LaneTone } {
+/// sidebar reads. Empty rosters, quiet sessions and exited processes have distinct marks.
+export function stripMark(state: AgentState | null): { icon: "bolt" | "play" | "stop" | "check" | "idle" | "branch"; tone: LaneTone } {
+  if (state === null) return { icon: "branch", tone: "muted" };
+  if (state === "stalled" || state === "limited") return { icon: "bolt", tone: "fault" };
   if (state !== null && isUrgentState(state)) return { icon: "bolt", tone: "attention" };
   if (state === "running" || state === "inferred") return { icon: "play", tone: "signal" };
-  if (state === "exited") return { icon: "check", tone: "muted" };
-  return { icon: "stop", tone: "muted" };
+  if (state === "exited") return { icon: "stop", tone: "muted" };
+  return { icon: "idle", tone: "muted" };
+}
+
+/// Exited means the process is gone, not that the task succeeded. A check requires the
+/// daemon's explicit end-of-turn classification; keep shared urgency and sorting unchanged.
+export function stripStatus(lane: Lane): ReturnType<typeof stripMark> & { label: string } {
+  const state = laneState(lane);
+  const sessions = lane.agent_sessions.filter((agent) => agentStateIn(lane, agent) === state);
+  if (state === "needs-you" && sessions.length > 0 && sessions.every((agent) =>
+    !agent.pending_dialog && !agent.pending_prompt
+    && (agent.attention_kind === "end_of_turn" || agent.attention_kind === "done_candidate")
+  )) return { icon: "check", tone: "attention", label: "Turn complete" };
+  const labels: Record<AgentState, string> = {
+    decision: "Decision", stalled: "Stalled", limited: "Limited", "needs-you": "Needs you",
+    external: "External", running: "Running", inferred: "Activity", idle: "Idle", exited: "Exited",
+  };
+  return { ...stripMark(state), label: state === null ? "No agent" : labels[state] };
 }

@@ -487,6 +487,15 @@ export function IconStop(props: IconProps): JSX.Element {
   );
 }
 
+export function IconIdle(props: IconProps): JSX.Element {
+  return (
+    <svg width={props.size ?? 16} height={props.size ?? 16} viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" stroke-width={props.strokeWidth ?? 1.75} class={props.class} aria-hidden="true">
+      <circle cx="12" cy="12" r="7" />
+    </svg>
+  );
+}
+
 export function IconChevronDown(props: IconProps): JSX.Element {
   const s = () => props.size ?? 12;
   return (

@@ -553,7 +553,58 @@ summary:focus-visible,
 /* narrow: the fleet sidebar gives up a fifth of its width and the right rail is capped to 40% of
    the window so the terminal bay always keeps the larger share, whatever width the rail was last
    dragged to. */
+/* Home strip board: repo and branch stay together when headlines are absent. */
+.home-board {
+  width: 100%;
+  max-width: 64rem;
+}
+.home-strip {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 96px 40px;
+  align-items: center;
+  column-gap: 12px;
+  width: 100%;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.home-strip:hover, .home-strip:focus-visible { background: var(--raised); }
+.home-strip:active { background: var(--surface); }
+.home-strip.is-urgent { padding-block: 14px; row-gap: 6px; }
+.home-state-mark { display: flex; align-items: center; justify-content: center; }
+.home-identity { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.home-repo {
+  flex: 0 0 144px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.home-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; }
+.home-title.is-branch { color: var(--muted); font: 12px var(--font-mono); }
+.home-title svg { flex-shrink: 0; }
+.home-state { font-size: 11px; text-align: right; white-space: nowrap; }
+.home-age { display: flex; justify-content: flex-end; font: 11px var(--font-mono); color: var(--muted); }
+.home-question {
+  grid-column: 2 / -1;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  color: var(--muted);
+  font: 12px var(--font-mono);
+}
+.home-needs-you { margin-left: auto; flex-shrink: 0; color: var(--attention); font: 11px var(--font-sans); }
+.home-quiet { display: flex; align-items: center; gap: 12px; padding: 18px 24px; font-size: 13px; }
+.home-quiet svg { color: var(--muted); }
+.home-quiet-detail { color: var(--muted); font-size: 12px; }
+.home-attention-rule { height: 8px; border-top: 1px solid var(--muted); border-bottom: 1px solid var(--line); background: var(--raised); }
 @media (max-width: 1100px) {
+  .home-strip { grid-template-columns: 18px minmax(0, 1fr) 80px 32px; column-gap: 10px; padding-inline: 20px; }
+  .home-repo { flex-basis: 112px; }
+  .home-title { font-size: 13px; }
+  .home-identity { gap: 10px; }
+
   .mission-grid {
     grid-template-columns: 15rem minmax(0, 1fr) 0;
   }
