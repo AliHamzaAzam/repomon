@@ -23,7 +23,7 @@ async fn parsed_cache_isolates_windows_with_null_provider_sessions() {
         });
         let params: Params =
             serde_json::from_value(json!({"lane_id":base.lane_id,"window":window})).unwrap();
-        let source = resolve_source(&ctx, &params, false).await.unwrap();
+        let source = resolve_source(&ctx, &params, false, None).await.unwrap();
         assert_eq!(source.window, window);
         sources.push(source);
     }
@@ -78,20 +78,20 @@ async fn explicit_window_rejects_foreign_sessions_for_every_kind_before_fallback
             json!({"lane_id":base.lane_id,"window":window,"session_id":own}),
         )
         .unwrap();
-        let actual = resolve_source(&ctx, &params, false).await.unwrap();
+        let actual = resolve_source(&ctx, &params, false, None).await.unwrap();
         assert_eq!(actual.kind, kind);
         assert_eq!(actual.session.as_deref(), Some(own.as_str()));
         let mut wrong_kind = params.clone();
         wrong_kind.kind = Some("other-kind".into());
         assert!(matches!(
-            resolve_source(&ctx, &wrong_kind, false).await,
+            resolve_source(&ctx, &wrong_kind, false, None).await,
             Err(TranscriptError::InvalidParams(_))
         ));
         // With no stamped session, a foreign id must not select a different lane session.
         backend.metas.lock().unwrap().last_mut().unwrap().session = None;
         let mut mismatch = params.clone();
         mismatch.session_id = Some("foreign-claude".into());
-        let unresolved = resolve_source(&ctx, &mismatch, false).await.unwrap();
+        let unresolved = resolve_source(&ctx, &mismatch, false, None).await.unwrap();
         assert!(
             unresolved.path.is_none() && unresolved.session.is_none(),
             "{kind}"
@@ -99,7 +99,7 @@ async fn explicit_window_rejects_foreign_sessions_for_every_kind_before_fallback
         let mut window_only = params;
         window_only.session_id = None;
         assert_eq!(
-            resolve_source(&ctx, &window_only, false)
+            resolve_source(&ctx, &window_only, false, None)
                 .await
                 .unwrap()
                 .kind,
@@ -116,17 +116,17 @@ async fn bound_window_session_uses_its_kind_ledger_identity_and_validates_suppli
     std::fs::write(&file, "{}\n").unwrap();
     let mut p = lane_source(&ctx, dir.path(), "antigravity", &file, "agy-session").await;
     p.window = Some(TmuxRuntime::window_name(p.lane_id));
-    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    let src = resolve_source(&ctx, &p, false, None).await.unwrap();
     assert_eq!(src.session.as_deref(), Some("agy-session"));
     assert_eq!(src.path, Some(file));
     p.session_id = Some("claude-session".into());
     assert!(matches!(
-        resolve_source(&ctx, &p, false).await,
+        resolve_source(&ctx, &p, false, None).await,
         Err(TranscriptError::InvalidParams(_))
     ));
     p.session_id = None;
     assert_eq!(
-        resolve_source(&ctx, &p, false)
+        resolve_source(&ctx, &p, false, None)
             .await
             .unwrap()
             .session
@@ -302,10 +302,10 @@ async fn invalid_selector_preserves_existing_watch_and_historical_session_only_r
         tag
     );
     p.session_id = Some(format!("win:{}", p.window.as_ref().unwrap()));
-    assert!(resolve_source(&ctx, &p, false).await.is_ok());
+    assert!(resolve_source(&ctx, &p, false, None).await.is_ok());
     p.session_id = Some("win:lane-999".into());
     assert!(matches!(
-        resolve_source(&ctx, &p, false).await,
+        resolve_source(&ctx, &p, false, None).await,
         Err(TranscriptError::InvalidParams(_))
     ));
     unwatch_all(&ctx, &client).await;
@@ -324,7 +324,7 @@ async fn old_identical_prompt_and_composer_draft_do_not_consume_new_input() {
         .await
         .unwrap();
     ctx.transcript_inputs.sent(&ctx, &window, ticket);
-    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    let src = resolve_source(&ctx, &p, false, None).await.unwrap();
     let mut rows = Vec::new();
     let mut order = Vec::new();
     let states = ctx.transcript_inputs.append(
@@ -368,7 +368,7 @@ async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
         // The ledger's session start is older than this new window, even with a bad stamp.
         *backend.started.lock().unwrap() =
             Some(Some(chrono::Utc::now() + chrono::Duration::seconds(1)));
-        let source = resolve_source(&ctx, &p, false).await.unwrap();
+        let source = resolve_source(&ctx, &p, false, None).await.unwrap();
         assert!(source.path.is_none(), "{kind}");
         let client = ctx.open_session(ConnKind::Local).await;
         let page = watch(&ctx, &client, p.clone()).await.unwrap();
@@ -384,7 +384,13 @@ async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
         if kind == "claude-code" {
             let record = json!({"type":"user","timestamp":"2020-01-01T00:00:00Z","message":{"content":"old history"}});
             std::fs::write(&file, format!("{record}\n")).unwrap();
-            assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+            assert!(
+                resolve_source(&ctx, &p, true, None)
+                    .await
+                    .unwrap()
+                    .path
+                    .is_none()
+            );
             assert!(
                 backend.metas.lock().unwrap()[0].session.is_none(),
                 "bad stamp must heal"
@@ -395,11 +401,23 @@ async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
         }
         // No creation evidence is also a successful pane fallback, even with a supplied ID.
         *backend.started.lock().unwrap() = Some(None);
-        assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+        assert!(
+            resolve_source(&ctx, &p, true, None)
+                .await
+                .unwrap()
+                .path
+                .is_none()
+        );
         // A fresh ledger row still cannot identify a window with no bound session.
         *backend.started.lock().unwrap() = Some(Some(chrono::DateTime::UNIX_EPOCH));
         backend.metas.lock().unwrap()[0].session = None;
-        assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
+        assert!(
+            resolve_source(&ctx, &p, true, None)
+                .await
+                .unwrap()
+                .path
+                .is_none()
+        );
     }
 }
 
@@ -464,7 +482,7 @@ async fn delivered_mail_is_structured_and_durable_id_consumption_clears_pinned_s
             .await
             .unwrap();
         ctx.transcript_inputs.sent(&ctx, &window, ticket);
-        let src = resolve_source(&ctx, &p, false).await.unwrap();
+        let src = resolve_source(&ctx, &p, false, None).await.unwrap();
         let mut pending = Vec::new();
         let mut order = Vec::new();
         let states = ctx
@@ -530,7 +548,7 @@ async fn hermes_and_aider_resolve_bound_sources_and_render_real_fixture_messages
             (path, id)
         };
         let p = lane_source(&ctx, dir.path(), kind, &path, &id).await;
-        let src = resolve_source(&ctx, &p, false).await.unwrap();
+        let src = resolve_source(&ctx, &p, false, None).await.unwrap();
         assert_eq!(src.path.as_ref(), Some(&path));
         let first = page(&ctx, &p).await.unwrap();
         let rows = first["items"].as_array().unwrap();
@@ -704,7 +722,7 @@ async fn pane_echo_does_not_consume_pending_mail_without_provider_confirmation()
         .await
         .unwrap();
     ctx.transcript_inputs.sent(&ctx, &window, ticket);
-    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    let src = resolve_source(&ctx, &p, false, None).await.unwrap();
     let mut rows = fallback_items("hermes", envelope, &window, None);
     ctx.transcript_inputs.reconcile(&window, &src, &mut rows);
     assert!(!rows.iter().any(|row| row.mail.is_some()));

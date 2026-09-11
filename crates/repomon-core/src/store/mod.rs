@@ -111,6 +111,9 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Clone)]
 pub struct Store {
     tx: Sender<Job>,
+    /// FIRST-CHAT-OPEN INSTRUMENTATION. Jobs queued for the single store worker thread. Remove
+    /// with the rest of `chat_open_trace` once the first-open cause is found.
+    depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -136,6 +139,8 @@ impl Store {
     {
         let (init_tx, init_rx) = channel::<Result<()>>();
         let (tx, rx) = channel::<Job>();
+        let depth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_depth = depth.clone();
         thread::Builder::new()
             .name("repomon-store".into())
             .spawn(move || {
@@ -153,13 +158,20 @@ impl Store {
                 let _ = init_tx.send(Ok(()));
                 while let Ok(job) = rx.recv() {
                     job(&mut conn);
+                    worker_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
             })
             .map_err(Error::Io)?;
         init_rx
             .recv()
             .map_err(|_| Error::Other("store thread exited during init".into()))??;
-        Ok(Store { tx })
+        Ok(Store { tx, depth })
+    }
+
+    /// FIRST-CHAT-OPEN INSTRUMENTATION. How many jobs are waiting for the single store worker
+    /// thread right now, including the one it is running. Remove with `chat_open_trace`.
+    pub fn queue_depth(&self) -> usize {
+        self.depth.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Run a closure against the connection on the store thread and await its result.
@@ -169,11 +181,17 @@ impl Store {
         T: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        self.depth
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.tx
             .send(Box::new(move |c| {
                 let _ = tx.send(f(c));
             }))
-            .map_err(|_| Error::Other("store thread closed".into()))?;
+            .map_err(|_| {
+                self.depth
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Error::Other("store thread closed".into())
+            })?;
         rx.await
             .map_err(|_| Error::Other("store call dropped".into()))?
     }
