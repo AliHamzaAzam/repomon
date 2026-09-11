@@ -144,6 +144,45 @@ it("groups work by turn and renders the daemon cost text only once inside expand
   expect([...groupTurnWork(rows).groups.keys()]).toEqual(["start", "next-start"]);
 });
 
+describe("turn bookkeeping notices (round 8: hide Usage recorded)", () => {
+  const turnUsage = (id: string) => ({id,role:"tools",kind:"status",status_kind:"turn_usage",text:"Usage recorded",at:null});
+  it("keeps Turn started and Turn finished visible at verbose detail while never surfacing token-count bookkeeping rows", async () => {
+    items = [
+      {id:"u",role:"user",kind:"user",text:"Check it",at:null},
+      {id:"start",role:"tools",kind:"status",status_kind:"turn_started",text:"Turn started",at:null},
+      {id:"tool",role:"tools",kind:"tool_call",status:"ok",name:"Bash",text:"Done",at:null},
+      turnUsage("usage1"), turnUsage("usage2"), turnUsage("usage3"),
+      {id:"end",role:"tools",kind:"status",status_kind:"turn_finished",text:"Turn finished",at:null},
+    ];
+    const [detail, setDetail] = createSignal<"normal" | "verbose">("normal");
+    render(() => <ConversationPane target={target} kind="codex" visible detail={detail()} onTerminal={vi.fn()} />);
+    await screen.findByRole("button", {name:"Used 1 tool"});
+    expect(document.body.textContent).not.toContain("Usage recorded");
+    setDetail("verbose");
+    expect(await screen.findByText("Turn started")).toBeInTheDocument();
+    expect(screen.getByText("Turn finished")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Usage recorded");
+  });
+  it("renders no work row, and no stray separator, for a turn made only of hidden bookkeeping rows", async () => {
+    items = [
+      {id:"u",role:"user",kind:"user",text:"Check it",at:null},
+      turnUsage("usage1"), turnUsage("usage2"), turnUsage("usage3"),
+      {id:"a",role:"assistant",kind:"assistant",text:"Done, nothing to report.",at:null},
+    ];
+    const [detail, setDetail] = createSignal<"normal" | "verbose">("normal");
+    const result = render(() => <ConversationPane target={target} kind="codex" visible detail={detail()} onTerminal={vi.fn()} />);
+    await screen.findByText("Done, nothing to report.");
+    expect(document.body.textContent).not.toContain("Usage recorded");
+    expect(screen.queryByRole("button", {name:/tool|Turn details/})).not.toBeInTheDocument();
+    expect(result.container.querySelector(".conversation-work")).toBeNull();
+    setDetail("verbose");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.body.textContent).not.toContain("Usage recorded");
+    expect(result.container.querySelector(".conversation-work")).toBeNull();
+    expect(result.container.querySelectorAll(".conversation-ledger > article, .conversation-ledger > .conversation-work")).toHaveLength(2);
+  });
+});
+
 it("collapses a live pane excerpt beside real history and replaces it in place with the final answer", async () => {
   const pane = "Merge to main, yes or no?\nCogitated for 10m 39s\n› yes merge it\nauto mode on (shift+tab to cycle)";
   items = [row("history", "A real conversation"), {id:"live:2",kind:"terminal_block",role:"tools",text:pane,at:null,partial:true}];
