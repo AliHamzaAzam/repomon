@@ -195,7 +195,9 @@ it("collapses a live pane excerpt beside real history and replaces it in place w
   fireEvent.click(button);
   expect(screen.getByText(/Cogitated/)).toBeInTheDocument();
   update([row("live:2", "The merge is complete.")]);
-  expect(screen.getByText("The merge is complete.")).toBeInTheDocument();
+  // The message body's text is now coalesced to at most one paint per animation frame (round 8
+  // item 1's streaming-cost fix), so this settles async rather than in the same tick.
+  expect(await screen.findByText("The merge is complete.")).toBeInTheDocument();
   expect(result.container.querySelector('[data-transcript-id="live:2"]')).toBe(node);
   expect(screen.queryByRole("button", {name:/Terminal excerpt/})).not.toBeInTheDocument();
   expect(screen.getByText("A real conversation")).toBeInTheDocument();
@@ -391,6 +393,37 @@ describe("selecting transcript text copies it, Claude TUI style", () => {
     expect(writeText).not.toHaveBeenCalled();
     outside.remove();
   });
+  it("copies a selection whose anchor starts in the scroll wrapper's empty space but ends in real ledger text (round 8 item 3)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    items = [row("a1", "Copy this reply text.")];
+    const result = mount();
+    const node = await screen.findByText("Copy this reply text.");
+    const scrollWrapper = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    const range = document.createRange();
+    range.setStart(scrollWrapper, 0);
+    range.setEnd(node.firstChild!, 4);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    expect(selection.anchorNode).toBe(scrollWrapper);
+    fireEvent.mouseUp(result.container.querySelector(".conversation")!);
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+  });
+  it("surfaces a clipboard write failure instead of silently swallowing it (round 8 item 3)", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("NotAllowedError: Document is not focused."));
+    Object.assign(navigator, { clipboard: { writeText } });
+    items = [row("a1", "Copy this reply text.")];
+    const result = mount();
+    const node = await screen.findByText("Copy this reply text.");
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fireEvent.mouseUp(result.container.querySelector(".conversation")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Could not copy selection/);
+  });
 });
 
 describe("earlier-message pagination affordance", () => {
@@ -537,6 +570,77 @@ describe("Latest output pill: right-edge anchoring, unread count, and auto-pagin
   });
 });
 
+describe("scroll follow during a stream (round 8 item 1)", () => {
+  it("disengages follow on a genuine upward scroll even while the ledger's own growth keeps the gap under the follow threshold", async () => {
+    items = [{ id: "live:1", kind: "assistant", role: "assistant", text: "Start", at: null, partial: true }];
+    const result = mount();
+    await screen.findByText("Start");
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    // At the bottom, following.
+    stubScrollMetrics(scrollEl, { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+    fireEvent.scroll(scrollEl);
+    // The operator scrolls up 40px - short of the old 48px gap threshold, which a streamed
+    // update growing the ledger underneath them could hold indefinitely.
+    stubScrollMetrics(scrollEl, { scrollHeight: 1000, clientHeight: 400, scrollTop: 560 });
+    fireEvent.scroll(scrollEl);
+    expect(await screen.findByRole("button", { name: /Latest output/ })).toBeInTheDocument();
+    // A token lands right after: the old bug yanked scrollTop back to scrollHeight here.
+    update([{ id: "live:1", kind: "assistant", role: "assistant", text: "Start plus more", at: null, partial: true }]);
+    await screen.findByText("Start plus more");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(scrollEl.scrollTop).toBe(560);
+  });
+  it("re-engages follow once the operator scrolls back down themselves", async () => {
+    items = [{ id: "live:1", kind: "assistant", role: "assistant", text: "Start", at: null, partial: true }];
+    const result = mount();
+    await screen.findByText("Start");
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    stubScrollMetrics(scrollEl, { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 });
+    fireEvent.scroll(scrollEl);
+    stubScrollMetrics(scrollEl, { scrollHeight: 1000, clientHeight: 400, scrollTop: 400 });
+    fireEvent.scroll(scrollEl);
+    expect(await screen.findByRole("button", { name: /Latest output/ })).toBeInTheDocument();
+    stubScrollMetrics(scrollEl, { scrollHeight: 1000, clientHeight: 400, scrollTop: 590 });
+    fireEvent.scroll(scrollEl);
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Latest output/ })).not.toBeInTheDocument());
+  });
+});
+
+describe("eager backfill for a short, non-scrollable ledger (round 8 item 2)", () => {
+  it("pages in older history on its own when the loaded ledger cannot scroll, instead of requiring an impossible near-top gesture", async () => {
+    items = [row("live:1", "Recent reply")];
+    let pageCalls = 0;
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on ? { items, next_before: 10, older_message_count: 1 } : null;
+      if (method === "agent.transcript_page") { pageCalls += 1; return { items: [row("old:1", "Earlier context")], next_before: null }; }
+      return original(method, ...args);
+    });
+    const result = mount();
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    // Stubbed before the watch resolves: the whole loaded ledger fits inside the pane, so it can
+    // never become scrollable and the near-top gesture in onLedgerScroll can never fire.
+    stubScrollMetrics(scrollEl, { scrollHeight: 200, clientHeight: 400, scrollTop: 0 });
+    await screen.findByText("Earlier context");
+    expect(pageCalls).toBe(1);
+    expect(screen.queryByRole("button", { name: "Load 1 earlier message" })).not.toBeInTheDocument();
+  });
+  it("does not eagerly load once the ledger is already scrollable, leaving the near-top gesture in charge", async () => {
+    items = [row("live:1", "Recent reply")];
+    let pageCalls = 0;
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on ? { items, next_before: 10, older_message_count: 1 } : null;
+      if (method === "agent.transcript_page") { pageCalls += 1; return { items: [row("old:1", "Earlier context")], next_before: null }; }
+      return original(method, ...args);
+    });
+    const result = mount();
+    const scrollEl = result.container.querySelector(".conversation-scroll") as HTMLElement;
+    stubScrollMetrics(scrollEl, { scrollHeight: 2000, clientHeight: 400, scrollTop: 600 });
+    await screen.findByRole("button", { name: "Load 1 earlier message" });
+    expect(pageCalls).toBe(0);
+  });
+});
 
 describe("structured fleet mail", () => {
   it("shows sender and time and seats a consumed delivery outside the pinned queue", async () => {

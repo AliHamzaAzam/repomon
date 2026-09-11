@@ -56,9 +56,28 @@ function TextBody(props: { text: string; laneId: number }) {
   const parsed = createMemo(() => { try { return parseMarkdown(props.text); } catch { return null; } });
   return <ErrorBoundary fallback={<pre class="conversation-raw">{props.text}</pre>}><Show when={parsed()} fallback={<pre class="conversation-raw">{props.text}</pre>}>{(value) => <MarkdownRenderer ast={value().ast} laneId={props.laneId} />}</Show></ErrorBoundary>;
 }
+// Coalesces a rapidly-changing streamed string to at most one update per animation frame. Both
+// attachmentTextParts and parseMarkdown below re-scan the whole accumulated text from scratch on
+// every call, so calling them on every token re-parses a growing string from zero each time.
+// Measured (see qa report): an ~8.4k-character reply re-parsed on every 4-character token spiked
+// a single call past 35ms, well over one frame's budget, and over a second of total CPU time
+// across the turn. This bounds how often that full-length parse actually runs without changing
+// the settled result once a frame lands - a normal, slower-than-60fps stream never notices it.
+function useThrottledText(source: () => string): () => string {
+  const [display, setDisplay] = createSignal(source());
+  let frame: number | undefined;
+  createEffect(() => {
+    source();
+    if (frame !== undefined) return;
+    frame = requestAnimationFrame(() => { frame = undefined; setDisplay(source()); });
+  });
+  onCleanup(() => { if (frame !== undefined) cancelAnimationFrame(frame); });
+  return display;
+}
 function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: () => void }) {
   const [expanded, setExpanded] = createSignal(false);
-  const parts = createMemo(() => attachmentTextParts(props.row.item.text));
+  const throttledText = useThrottledText(() => props.row.item.text);
+  const parts = createMemo(() => attachmentTextParts(throttledText()));
   const pane = () => props.row.paneExcerpt;
   const images = createMemo(() => parts().flatMap((part) => "attachment" in part && isImageAttachment(part.attachment) ? [part.attachment] : []));
   return <Show when={props.row.fallback} fallback={
@@ -266,13 +285,49 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     onCleanup(() => { disposed = true; if (timer !== undefined) clearTimeout(timer); refreshPrompt = undefined; });
   });
   const followLatest = () => {
-    if (displayed() && following()) {
-      cancelAnimationFrame(pendingScroll);
-      pendingScroll = requestAnimationFrame(() => { if (scroll) scroll.scrollTop = scroll.scrollHeight; });
-    }
+    if (!displayed() || !following()) return;
+    cancelAnimationFrame(pendingScroll);
+    // Re-check on arrival, not just at schedule time: the operator can scroll away (disengaging
+    // following) in the gap between this rAF being requested and it actually firing, and an
+    // unconditional write here would yank the view back down anyway once it does.
+    pendingScroll = requestAnimationFrame(() => {
+      if (scroll && displayed() && following()) scroll.scrollTop = scroll.scrollHeight;
+    });
   };
   createEffect(() => { transcript.revision(); followLatest(); });
   onCleanup(() => cancelAnimationFrame(pendingScroll));
+  // A short, freshly opened ledger can never become scrollable, so the near-top scroll gesture in
+  // onLedgerScroll below can never fire - "loading messages" then requires a manual click every
+  // time instead of the same auto-load a longer conversation gets for free. Back it in eagerly
+  // instead, the same page a real near-top scroll would ask for, until either older history is
+  // exhausted or the ledger grows past its own viewport height (the scroll-triggered path then
+  // takes over, same as always).
+  createEffect(() => {
+    if (!displayed() || !props.visible) return;
+    if (transcript.loading() || loadingOlder) return;
+    if (!hasOlder()) return;
+    let cancelled = false;
+    let frame: number | undefined;
+    // clientHeight === 0 means the pane hasn't been laid out/measured yet (e.g. this exact render
+    // tick, right after the initial page resolves and before its layout has settled, or a test
+    // with no real layout at all) - not proof there is nothing to scroll. Retry across a few
+    // frames rather than deciding once and never looking again, the same way TerminalPane retries
+    // a zero-size warm pane until its grid is measurable.
+    const tryBackfill = (framesLeft: number) => {
+      if (cancelled || !scroll) return;
+      if (scroll.clientHeight === 0 && framesLeft > 0) {
+        frame = requestAnimationFrame(() => tryBackfill(framesLeft - 1));
+        return;
+      }
+      if (scroll.clientHeight === 0 || scroll.scrollHeight > scroll.clientHeight) return;
+      void older();
+    };
+    tryBackfill(30);
+    onCleanup(() => {
+      cancelled = true;
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    });
+  });
   // Counts ledger rows that arrived while scrolled away from the bottom, for the Latest output
   // pill's badge. Keyed, not counted per revision: a streamed partial's repeated token upserts
   // reuse one key and must not inflate the count, only a genuinely new row should. History the
@@ -299,10 +354,20 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     if (!selection || selection.isCollapsed) return;
     const text = selection.toString();
     if (!text) return;
-    const anchor = selection.anchorNode;
-    const element = anchor instanceof Element ? anchor : anchor?.parentElement;
-    if (!element?.closest(".conversation-ledger, .conversation-dialog")) return;
-    void navigator.clipboard.writeText(text).catch(() => undefined);
+    const scope = ".conversation-ledger, .conversation-dialog";
+    const inScope = (node: Node | null) => {
+      const element = node instanceof Element ? node : node?.parentElement;
+      return !!element?.closest(scope);
+    };
+    // A drag that starts in the scroll container's own empty space below the last message (or in
+    // one of the gutter-track wrapper elements around the ledger) and ends inside real text fails
+    // a closest() check on the anchor alone, even though the selection plainly covers ledger
+    // content - the anchor is the drag's start point, not necessarily where the text is. Check
+    // both ends before giving up.
+    if (!inScope(selection.anchorNode) && !inScope(selection.focusNode)) return;
+    // A permissions or focus failure here was previously invisible (.catch(() => undefined)); it
+    // now surfaces through the same error banner other footer actions use.
+    void navigator.clipboard.writeText(text).catch((cause) => setError(`Could not copy selection: ${String(cause)}`));
   }
   async function older() {
     const height = scroll.scrollHeight;
@@ -320,10 +385,25 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   // a continuous scroll-up gesture that stalls right at the top cannot fire a second auto-load.
   let autoLoadArmed = true;
   const NEAR_TOP_PX = 64;
+  // Tracks the ledger's own scrollTop across events so a genuine upward move can be told apart
+  // from the ledger growing underneath a stationary viewport (see onLedgerScroll).
+  let lastScrollTop = 0;
   function onLedgerScroll() {
-    setFollowing(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48);
+    const top = scroll.scrollTop;
+    const scrolledUp = top < lastScrollTop - 1;
+    lastScrollTop = top;
+    // While a turn streams, the ledger's own height keeps growing under a stationary scrollTop,
+    // which can hold the bottom gap inside the 48px threshold indefinitely - the operator scrolls
+    // up, the gap never clears 48px because new content is filling in just as fast, and the very
+    // next token's followLatest() yanks the view straight back to the bottom mid-gesture. A
+    // genuine upward move (scrollTop actually decreasing, which only ever happens from a real
+    // user gesture or paging in older history - programmatic follow only ever increases it)
+    // disengages follow immediately regardless of the gap; only scrolling back down, the Latest
+    // output pill, or sending a new message re-engages it.
+    if (scrolledUp) setFollowing(false);
+    else setFollowing(scroll.scrollHeight - top - scroll.clientHeight < 48);
     const scrollable = scroll.scrollHeight > scroll.clientHeight;
-    const nearTop = scrollable && scroll.scrollTop < NEAR_TOP_PX;
+    const nearTop = scrollable && top < NEAR_TOP_PX;
     if (!nearTop) { autoLoadArmed = true; return; }
     if (!autoLoadArmed || transcript.loading() || !hasOlder()) return;
     autoLoadArmed = false;

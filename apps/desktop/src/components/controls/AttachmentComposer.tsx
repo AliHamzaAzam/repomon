@@ -55,6 +55,11 @@ export default function AttachmentComposer(props: {
   const [staging, setStaging] = createSignal(false);
   const [error, setError] = createSignal<string>();
   const [dragging, setDragging] = createSignal(false);
+  // TUI-style history: Up/Down recall previously sent messages, oldest to newest, only ever
+  // starting from an empty composer so an in-progress draft can never be clobbered by an arrow
+  // press. Local to this mount, like the draft itself - a fresh pane starts with empty history.
+  const [history, setHistory] = createSignal<string[]>([]);
+  const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
   let dragDepth = 0;
   let field!: HTMLTextAreaElement;
   const resize = () => {
@@ -146,15 +151,52 @@ export default function AttachmentComposer(props: {
   }
   async function send() {
     if (locked() || (!text().trim() && !files().length)) return;
-    if (await props.onSend(attachmentPrompt(text(), files()))) { setText(""); setFiles([]); setError(undefined); }
+    const draft = text();
+    if (await props.onSend(attachmentPrompt(draft, files()))) {
+      if (draft.trim()) setHistory((current) => [...current, draft].slice(-50));
+      setText(""); setFiles([]); setError(undefined); setHistoryIndex(null);
+    }
+  }
+  function recallOlder() {
+    const items = history();
+    if (!items.length) return;
+    const current = historyIndex();
+    const next = current === null ? items.length - 1 : Math.max(0, current - 1);
+    setHistoryIndex(next);
+    setText(items[next]);
+  }
+  function recallNewer() {
+    const current = historyIndex();
+    if (current === null) return;
+    const items = history();
+    if (current >= items.length - 1) { setHistoryIndex(null); setText(""); return; }
+    setHistoryIndex(current + 1);
+    setText(items[current + 1]);
   }
   return <form class="conversation-compose" onSubmit={(event) => { event.preventDefault(); void send(); }}>
     <div class="conversation-reply rounded" classList={{ "is-drag-target": dragging() }}
       onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
       <Show when={dragging()}><div class="conversation-reply-drop" aria-hidden="true">Drop to attach</div></Show>
       <textarea ref={field} aria-label={`Reply to ${props.kind}`} placeholder={props.disabled ? "Answer the prompt first" : "Ask a question or describe a change…"} disabled={props.disabled || props.busy} value={text()} rows={1}
-        onPaste={(event) => paste(event)} onInput={(event) => setText(event.currentTarget.value)}
-        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); } }} />
+        onPaste={(event) => paste(event)}
+        onInput={(event) => { setText(event.currentTarget.value); if (historyIndex() !== null) setHistoryIndex(null); }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); return; }
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+          // Never steal the arrows while editing multiline text - a recalled entry that itself
+          // spans lines falls back to ordinary cursor movement the moment it's on screen.
+          if (text().includes("\n")) return;
+          if (event.key === "ArrowUp") {
+            if (text() !== "" && historyIndex() === null) return; // empty composer only
+            event.preventDefault();
+            recallOlder();
+          } else {
+            if (historyIndex() === null) return; // not browsing: normal cursor behavior
+            event.preventDefault();
+            recallNewer();
+          }
+        }} />
       <div class="composer-actions">
         <div class="composer-leading">
         <button class="focus-ring rounded composer-attach" type="button" aria-label="Attach images or files" title="Attach images or files. You can also paste an image." disabled={locked()} onClick={() => void pick()}><IconPlus size={16} /></button>

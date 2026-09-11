@@ -94,6 +94,68 @@ describe("inline image markers, positioned like Claude TUI", () => {
   });
 });
 
+describe("composer history, cycling previous sent messages like the TUI (round 8 item 4)", () => {
+  it("recalls the most recent sent message on ArrowUp from an empty composer, and ArrowDown returns to empty", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "first message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.input(field, { target: { value: "second message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("second message");
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("first message");
+    fireEvent.keyDown(field, { key: "ArrowUp" }); // clamps at the oldest entry
+    expect(field).toHaveValue("first message");
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveValue("second message");
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveValue("");
+  });
+  it("does not recall history when the composer already holds an unsent single-line draft", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "sent earlier" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.input(field, { target: { value: "in-progress draft" } });
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("in-progress draft");
+  });
+  it("never steals the arrows while editing multiline text, typed or recalled", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "line one\nline two" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("line one\nline two");
+    // The recalled entry is itself multiline: a further Up must not cycle again, it is ordinary
+    // cursor movement inside it now.
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("line one\nline two");
+  });
+  it("exits history mode the moment the operator edits a recalled entry, preserving that edit as an ordinary draft", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "sent message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("sent message");
+    fireEvent.input(field, { target: { value: "sent message, edited" } });
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveValue("sent message, edited");
+  });
+});
+
 it("shrinks after deleting text and after a successful send", async () => {
   render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn().mockResolvedValue(true)} />);
   const field = screen.getByRole("textbox") as HTMLTextAreaElement;
