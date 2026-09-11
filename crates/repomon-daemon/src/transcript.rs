@@ -1129,9 +1129,8 @@ pub async fn watch(
                     if !active { activity = None; }
                     let mut live = pane_items(&kind, &pane);
                     if active && live.is_empty() && !matches!(kind.as_str(), "claude-code" | "codex") {
-                        let mut item = TranscriptItem::new("terminal_block", pane_content(&kind, &pane), None);
-                        item.partial = Some(true);
-                        live.push(item);
+                        // No `partial` here either: the stream stamps it from the turn state.
+                        live.push(TranscriptItem::new("terminal_block", pane_content(&kind, &pane), None));
                     }
                     let mut finals = serde_json::from_value(cached["items"].clone()).unwrap_or_default();
                     if initial_source.path.is_none() {

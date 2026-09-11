@@ -43,15 +43,32 @@ fn codex_chrome(line: &str) -> bool {
     conversation_activity::model_line(line).is_some()
 }
 
+/// Antigravity draws a start-up banner (a half-block logo, the account, the model, the cwd) and
+/// a collapsed thinking disclosure above each answer. Its turn separators and prompt echoes are
+/// handled structurally alongside every other CLI's; these are the decorations left over, and
+/// none of them has a counterpart in the durable brain transcript.
+fn antigravity_chrome(line: &str) -> bool {
+    line.starts_with('▸')
+        // A banner row is the half-block logo on the left with the account, model or working
+        // directory printed to its right, so match the row by the glyph that opens it.
+        || line.starts_with(['▄', '▀', '█', '▌', '▐'])
+        || line.starts_with("Antigravity CLI ")
+}
+
+/// Decorations this CLI draws around its conversation, which are never content. One definition
+/// for both the excerpt and the prose parser, so the two can never disagree about a line.
+fn kind_chrome(kind: &str, line: &str) -> bool {
+    conversation_activity::queue_indicator(kind, line)
+        || conversation_activity::timed_line(kind, line).is_some()
+        || (kind == "codex" && codex_chrome(line.trim()))
+        || (kind == "antigravity" && antigravity_chrome(line.trim()))
+}
+
 /// Preserve excerpt content while removing the same structured status decorations as prose.
 pub fn pane_content(kind: &str, pane: &str) -> String {
     super::conversation_queue::without_queue(kind, pane)
         .lines()
-        .filter(|line| {
-            !conversation_activity::queue_indicator(kind, line)
-                && conversation_activity::timed_line(kind, line).is_none()
-                && !(kind == "codex" && codex_chrome(line.trim()))
-        })
+        .filter(|line| !kind_chrome(kind, line))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -64,7 +81,10 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
         .map(|row| row.text)
         .collect::<Vec<_>>()
         .join("\n");
-    let supported = matches!(kind, "claude-code" | "codex");
+    // Antigravity's pane is as structured as Codex's: a banner, rules between turns, a "> "
+    // prompt echo and a thinking disclosure. Parsing it is what stops a live preview from being
+    // a raw dump of the banner and every earlier answer.
+    let supported = matches!(kind, "claude-code" | "codex" | "antigravity");
     let mut prose = Vec::new();
     let mut tools: Vec<TranscriptItem> = Vec::new();
     let mut codex_tool_output = false;
@@ -72,10 +92,7 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
     for raw in plain.lines() {
         let line = raw.trim();
         if supported {
-            if conversation_activity::queue_indicator(kind, line)
-                || conversation_activity::timed_line(kind, line).is_some()
-                || (kind == "codex" && codex_chrome(line))
-            {
+            if kind_chrome(kind, line) {
                 continue;
             }
             if line.starts_with('╭') {
@@ -90,7 +107,10 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
             {
                 continue;
             }
-            if line.starts_with('❯') || line.starts_with('›') {
+            if line.starts_with('❯')
+                || line.starts_with('›')
+                || (kind == "antigravity" && line.starts_with('>'))
+            {
                 let input = line.chars().skip(1).collect::<String>();
                 let placeholder = kind == "codex"
                     && (input.trim().starts_with("Ask Codex ")
@@ -192,7 +212,7 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
     let text = prose.join("\n").trim().to_string();
     let mut items = Vec::new();
     if !text.is_empty() {
-        let mut item = if kind == "codex" {
+        let item = if kind == "codex" {
             super::codex_content::tool_item(&text)
         } else {
             None
@@ -208,7 +228,10 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
                 None,
             )
         });
-        item.partial = Some(true);
+        // `partial` is deliberately NOT set here. A pane parser cannot know whether the turn that
+        // produced this text is still running, and a flag minted unconditionally here can only be
+        // unset by a durable final row. `ConversationStream::update` owns the turn lifecycle and
+        // stamps the flag from it.
         items.push(item);
     }
     items.extend(tools);
@@ -284,10 +307,13 @@ pub struct ConversationStream {
     settled_tools: HashSet<(Option<String>, Option<String>)>,
 }
 impl ConversationStream {
+    /// Whether `id` is this window's live assistant preview, used to seat consumed input rows
+    /// just above the reply. Read from the pending previews themselves, not from the emitted
+    /// `partial` flag, so the ordering anchor survives a turn ending.
     pub fn is_partial_assistant(&self, id: &str) -> bool {
-        self.previous
-            .get(id)
-            .is_some_and(|r| r.role == "assistant" && r.partial == Some(true))
+        self.pending
+            .iter()
+            .any(|r| r.id.as_deref() == Some(id) && r.role == "assistant")
     }
 
     /// A fast CLI may persist a user row before the verified send acknowledges it. Remove the
@@ -337,9 +363,10 @@ impl ConversationStream {
                 && matches!(row.kind.as_deref(), Some("assistant" | "tool_call"))
             {
                 if let Some(index) = self.pending.iter().position(|p| {
+                    // Everything in `pending` is a pane preview by construction, so pairing a
+                    // preview with its durable row never needs to consult the streaming flag.
                     (p.kind == row.kind
-                        || (p.partial == Some(true)
-                            && p.kind.as_deref() == Some("terminal_block")
+                        || (p.kind.as_deref() == Some("terminal_block")
                             && row.kind.as_deref() == Some("assistant")))
                         && (p.kind.as_deref() != Some("tool_call")
                             || same_tool_name(p.name.as_deref(), row.name.as_deref()))
@@ -397,7 +424,14 @@ impl ConversationStream {
                 }
             }
         }
-        rows.extend(self.pending.clone());
+        // A preview reads "Writing..." only while its turn is running. Stamping the flag here,
+        // the one place that knows the turn lifecycle, is what keeps a partial from outliving its
+        // turn: a usage limit, an interrupt, an auth failure or a crash all end a turn by going
+        // quiet, and none of them writes the durable final row that reconciliation waits for.
+        rows.extend(self.pending.iter().cloned().map(|mut item| {
+            item.partial = active.then_some(true);
+            item
+        }));
         if active || self.was_active {
             let mut turn = TranscriptItem::new(
                 "status",
@@ -534,6 +568,77 @@ mod tests {
                 .all(|i| !i.text.contains('\u{1b}') && !i.text.contains("OpenAI Codex"))
         );
     }
+    /// The operator's screenshot: while a turn was in flight the Antigravity window showed a raw
+    /// excerpt carrying the CLI banner, the account, the model, the cwd, the thinking disclosure
+    /// and the answer a second time, next to the same answer as a proper message row. The pane is
+    /// the real one, captured read only from the live window; only the account address is
+    /// substituted. Everything the durable brain transcript does not record must be gone, and the
+    /// preview must contain the current turn only.
+    #[test]
+    fn real_antigravity_fixture_keeps_only_the_current_turn_and_drops_the_banner() {
+        let pane = include_str!("fixtures/antigravity_status_v0.ansi");
+        let items = pane_items("antigravity", pane);
+        let prose: Vec<_> = items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.kind.as_deref(),
+                    Some("assistant") | Some("terminal_block")
+                )
+            })
+            .collect();
+        assert_eq!(prose.len(), 1, "{items:#?}");
+        let preview = prose[0];
+        // A pane we can parse is a message, not an opaque terminal dump.
+        assert_eq!(preview.kind.as_deref(), Some("assistant"));
+        assert_eq!(
+            preview.text.trim(),
+            "Hello again! What would you like to work on tonight?"
+        );
+        for banned in [
+            "Antigravity CLI",
+            "example.invalid",
+            "Gemini 3.8 Flash",
+            "Developer/Github",
+            "Thought for",
+            "? for shortcuts",
+            // Earlier turns, including the answer that is already a seated message row.
+            "A spark ignites",
+            "Did you mean to type",
+            "Hello! How can I help you today?",
+        ] {
+            assert!(
+                !preview.text.contains(banned),
+                "preview still carries {banned:?}: {:?}",
+                preview.text
+            );
+        }
+        assert!(!preview.text.contains('\u{1b}'));
+        // pane_content backs the unbound-window excerpt; it strips the same decorations.
+        let excerpt = pane_content("antigravity", pane);
+        assert!(!excerpt.contains("Antigravity CLI"), "{excerpt}");
+        assert!(!excerpt.contains("Thought for"), "{excerpt}");
+    }
+
+    /// Mid turn, before the model has produced any answer, there is nothing to preview but the
+    /// current prompt's own progress. The banner and every earlier turn must already be gone,
+    /// which is the state the operator screenshotted.
+    #[test]
+    fn antigravity_in_flight_turn_previews_only_what_follows_its_own_prompt() {
+        let settled = include_str!("fixtures/antigravity_status_v0.ansi");
+        // Same real pane, cut where it stood while the last turn was still running.
+        let in_flight = settled
+            .split_once("Hello again! What would you like to work on tonight?")
+            .expect("fixture contains the final answer")
+            .0;
+        let items = pane_items("antigravity", in_flight);
+        for item in &items {
+            assert!(!item.text.contains("Antigravity CLI"), "{item:#?}");
+            assert!(!item.text.contains("A spark ignites"), "{item:#?}");
+            assert!(!item.text.contains("Thought for"), "{item:#?}");
+        }
+    }
+
     #[test]
     fn partial_updates_and_final_replace_one_identity_without_resurrection() {
         for kind in ["claude-code", "codex"] {
@@ -575,6 +680,80 @@ mod tests {
                 true,
             );
             assert!(!repeat.items.iter().any(|i| i.partial == Some(true)));
+        }
+    }
+    /// A turn can end without ever writing a durable assistant row: a usage limit, an interrupt,
+    /// an auth failure or an outright crash all just go quiet. Reconciliation against a final row
+    /// is therefore not a lifetime for the streaming flag, and the preview must stop claiming it
+    /// is still being written the moment the turn stops.
+    #[test]
+    fn a_turn_that_ends_with_no_durable_row_stops_claiming_it_is_still_writing() {
+        let endings = [
+            (
+                "usage limit",
+                "• The answer is forty two.\n• You've hit your usage limit. Try again at Sep 15th.",
+            ),
+            (
+                "interrupt",
+                "• The answer is forty two.\n• Interrupted by user",
+            ),
+            (
+                "auth failure",
+                "• The answer is forty two.\n• Authentication failed. Run /login to sign in again.",
+            ),
+            // A crash leaves the last frame on screen and the byte stream closed; the watch loop
+            // reports `active = false` with the pane unchanged.
+            ("crash", "• The answer is forty two."),
+        ];
+        for (ending, pane) in endings {
+            for kind in ["claude-code", "codex"] {
+                let mut stream = ConversationStream::default();
+                stream.update(Vec::new(), Vec::new(), false);
+                let streaming =
+                    stream.update(Vec::new(), pane_items(kind, "• The answer is"), true);
+                let id = streaming
+                    .items
+                    .iter()
+                    .find(|i| i.partial == Some(true))
+                    .unwrap_or_else(|| panic!("no preview while streaming: {kind} {ending}"))
+                    .id
+                    .clone();
+                // The turn ends. No durable row is written, and none ever will be.
+                let ended = stream.update(Vec::new(), pane_items(kind, pane), false);
+                assert!(
+                    !ended.items.iter().any(|i| i.partial == Some(true)),
+                    "{kind} still claims to be writing after a {ending}"
+                );
+                // The preview keeps its identity and its text: the answer stays seated, only the
+                // streaming claim is withdrawn.
+                let seated = ended
+                    .items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .unwrap_or_else(|| panic!("preview vanished on {ending} for {kind}"));
+                assert_eq!(seated.partial, None, "{kind} {ending}");
+                assert!(!seated.text.trim().is_empty(), "{kind} {ending}");
+                assert!(
+                    !ended.removed_ids.contains(id.as_ref().unwrap()),
+                    "{kind} {ending}"
+                );
+                // Still quiet on the next tick, and still not resurrected as streaming.
+                let quiet = stream.update(Vec::new(), pane_items(kind, pane), false);
+                assert!(
+                    !quiet.items.iter().any(|i| i.partial == Some(true)),
+                    "{kind} resurrected the writing marker after a {ending}"
+                );
+                // A new turn starts: the preview is allowed to stream again.
+                let resumed = stream.update(
+                    Vec::new(),
+                    pane_items(kind, "• A second answer begins"),
+                    true,
+                );
+                assert!(
+                    resumed.items.iter().any(|i| i.partial == Some(true)),
+                    "{kind} cannot stream again after a {ending}"
+                );
+            }
         }
     }
     #[test]
