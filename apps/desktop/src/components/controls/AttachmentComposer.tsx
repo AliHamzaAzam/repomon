@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { IconArrowUp, IconPlus } from "../icons";
+import { IconArrowUp, IconChevronDown, IconPlus } from "../icons";
 import AttachmentChip, { attachmentFromPath, isImageAttachment, type ChatAttachment } from "./AttachmentChip";
 
 export type { ChatAttachment } from "./AttachmentChip";
@@ -48,6 +48,7 @@ export function attachmentPrompt(text: string, files: ChatAttachment[]): string 
 export default function AttachmentComposer(props: {
   kind: string; model?: string; disabled: boolean; busy: boolean;
   onSend: (text: string) => Promise<boolean>;
+  onModel?: () => void;
 }) {
   const [text, setText] = createSignal("");
   const [files, setFiles] = createSignal<ChatAttachment[]>([]);
@@ -160,12 +161,16 @@ export default function AttachmentComposer(props: {
         <Show when={files().length}><ul class="attachment-list" aria-label="Attachments"><For each={files()}>{(file) => <li><AttachmentChip file={file} disabled={locked()} onRemove={() => removeFile(file)} /></li>}</For></ul></Show>
         </div>
         <div class="composer-trailing">
-        <span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>
+        <Show when={props.onModel} fallback={<span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>}>
+          <button type="button" class="composer-model focus-ring rounded" aria-label={`Change ${props.kind} model`} title={props.model ?? "Choose a model"} disabled={locked()} onClick={props.onModel}>
+            <span class="composer-agent">{props.model ?? props.kind}</span><IconChevronDown size={12} />
+          </button>
+        </Show>
         <button class="focus-ring rounded composer-send" type="submit" aria-label="Send reply" disabled={locked() || (!text().trim() && !files().length)}><IconArrowUp size={16} /></button>
         </div>
       </div>
     </div>
-    <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "Shift + Enter for a new line"}</p>
+    <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>
     <Show when={error()}><p class="text-xs text-fault" role="alert">{error()}</p></Show>
   </form>;
 }

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { FleetStore } from "../stores/fleet";
 import TerminalPane, { devicePixelAlignedInsets } from "./TerminalPane";
 
 const watchTerminalMock = vi.hoisted(() => vi.fn());
@@ -586,4 +587,33 @@ describe("Terminal / Chat", () => {
     await flushMicrotasks();
     expect(stopWatch).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it("reuses the mounted terminal for command controls and returns to the same chat draft", async () => {
+  watchTerminalMock.mockResolvedValue({ack:{cols:120,rows:32,generation:1,sequence:1},stop:vi.fn().mockResolvedValue(undefined)});
+  daemonCallMock.mockImplementation(async (method: string) => {
+    if (method === "agent.prompt") return {dialog:null};
+    if (method === "agent.transcript_watch") return {items:[],next_before:null};
+    return null;
+  });
+  const {container} = render(() => <TerminalPane laneId={7} window="lane-7-1" label="Claude" visible fleet={{lanes:()=>[{id:7,repo:{id:1,name:"fixture"},worktree:{branch:"main",name:"main",path:"/fixture"},state:{dirty:{staged:0,unstaged:0,untracked:0},ahead:0,behind:0},agent_sessions:[{tmux_window:"lane-7-1",agent:"claude-code",status:"idle"}]}]} as unknown as FleetStore} />);
+  await flushMicrotasks();
+  fireEvent.click(screen.getByRole("button", {name:"Chat"}));
+  await flushMicrotasks();
+  const draft = screen.getByRole("textbox", {name:"Reply to claude-code"});
+  fireEvent.input(draft,{target:{value:"Keep this draft"}});
+  const host = container.querySelector(".terminal-host");
+  fireEvent.click(screen.getByRole("button", {name:"Change claude-code model"}));
+  await flushMicrotasks();
+  expect(screen.getByRole("region", {name:"Agent command controls"})).toBeInTheDocument();
+  expect(host).toHaveAttribute("aria-hidden","false");
+  expect(daemonCallMock).toHaveBeenCalledWith("agent.send_input", {lane_id:7,window:"lane-7-1",text:"/model",enter:true});
+  expect(terminalInstances).toHaveLength(1);
+  expect(watchTerminalMock).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", {name:"Back to chat"}));
+  await flushMicrotasks();
+  expect(container.querySelector(".terminal-host")).toBe(host);
+  expect(host).toHaveAttribute("aria-hidden","true");
+  expect(draft).toHaveValue("Keep this draft");
 });

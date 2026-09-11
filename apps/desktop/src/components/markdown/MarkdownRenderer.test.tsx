@@ -188,3 +188,11 @@ describe("MarkdownRenderer & MarkdownPreview", () => {
     expect(scrollIntoViewMock).toHaveBeenCalled();
   });
 });
+
+
+it("preserves poem hard breaks and leaves soft wrapping as a space", () => {
+  const { ast } = parseMarkdown("A line of verse,  \nAnother line.\\\nOne last line.\nA soft wrap.");
+  const { container } = render(() => <MarkdownRenderer ast={ast} />);
+  expect(container.querySelectorAll("p br")).toHaveLength(2);
+  expect(container.querySelector("p")).toHaveTextContent("One last line. A soft wrap.");
+});

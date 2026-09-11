@@ -173,10 +173,16 @@ fn candidates(kind: &str, cwd: &Path, bound: Option<&str>, started: DateTime<Utc
                 }
             }
         }
-        "opencode" if bound.is_some() => add(
-            repomon_core::agent::opencode::database_path(),
-            bound.unwrap().into(),
-        ),
+        "opencode" => {
+            let path = repomon_core::agent::opencode::database_path();
+            if let Some(id) = bound {
+                add(path, id.into());
+            } else {
+                for id in repomon_core::agent::opencode::session_ids_since(cwd, started) {
+                    add(path.clone(), id);
+                }
+            }
+        }
         _ => {}
     }
     found
@@ -184,7 +190,7 @@ fn candidates(kind: &str, cwd: &Path, bound: Option<&str>, started: DateTime<Utc
 fn normalize(s: &str) -> String {
     crate::rpc::normalize_fingerprint(s)
 }
-fn evidence(scan: &SourceScan, pane: &str, started: DateTime<Utc>) -> bool {
+fn evidence(scan: &SourceScan, pane: &str, started: DateTime<Utc>, kind: &str) -> bool {
     let pane = normalize(pane);
     scan.transcript
         .iter()
@@ -197,6 +203,10 @@ fn evidence(scan: &SourceScan, pane: &str, started: DateTime<Utc>) -> bool {
         .any(|row| {
             crate::rpc::message_fingerprint(Some(&row.item.text))
                 .is_some_and(|needle| pane.contains(&needle))
+                // Sidebars interrupt wrapped prose in OpenCode's grid. A distinctive complete
+                // line is still evidence, subject to the same session and peer ambiguity checks.
+                || (kind == "opencode" && row.item.text.lines().any(|line| crate::rpc::message_fingerprint(Some(line))
+                    .is_some_and(|needle| pane.contains(&needle))))
         })
 }
 /// No newest-cwd fallback. Ambiguity between sessions or between live windows stays unresolved.
@@ -260,14 +270,14 @@ fn select(
             continue;
         }
         if bound.is_none() {
-            if !evidence(&parsed.scan, &pane, started) {
+            if !evidence(&parsed.scan, &pane, started, kind) {
                 continue;
             }
             if peers.iter().any(|peer| {
                 backend
                     .capture_named(&peer.name, CaptureOpts::last(500))
                     .ok()
-                    .is_none_or(|text| evidence(&parsed.scan, &text, started))
+                    .is_none_or(|text| evidence(&parsed.scan, &text, started, kind))
             }) {
                 continue;
             }
@@ -336,6 +346,67 @@ mod tests {
             kind: kind.into(),
             path: Some(path),
             session: Some(id.into()),
+        }
+    }
+    #[test]
+    fn database_sources_bind_from_distinctive_lines_even_with_sidebar_columns() {
+        for kind in ["opencode", "hermes"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let (id, answer) = if kind == "hermes" {
+                conn.execute_batch(include_str!(
+                    "../../repomon-core/src/usage_ledger/fixtures/hermes_conversation_v0.sql"
+                ))
+                .unwrap();
+                (
+                    "hermes-fixture",
+                    "The Hermes fixture repository inspection is complete",
+                )
+            } else {
+                conn.execute_batch(include_str!(
+                    "../../repomon-core/src/usage_ledger/fixtures/opencode_conversation_v0.sql"
+                ))
+                .unwrap();
+                conn.execute("UPDATE part SET data=?1 WHERE id='prose'", [r#"{"type":"text","text":"Code compiles, tests pass green,\nDeploy succeeds, the pipeline clean."}"#]).unwrap();
+                (
+                    "first",
+                    "Code compiles, tests pass green,         Context 1%\nDeploy succeeds, the pipeline clean.    MCP connected",
+                )
+            };
+            let backend = ScriptedBackend::default();
+            let start = DateTime::from_timestamp(0, 0).unwrap();
+            *backend.started.lock().unwrap() = Some(Some(start));
+            *backend.pane.lock().unwrap() = answer.into();
+            backend.metas.lock().unwrap().push(WindowMeta {
+                name: "lane-1".into(),
+                wid: 1,
+                session: None,
+                agent_kind: Some(kind.into()),
+            });
+            let src = Source {
+                window: String::new(),
+                kind: kind.into(),
+                path: Some(path),
+                session: Some(id.into()),
+            };
+            let request = || Request {
+                window: "lane-1",
+                kind,
+                cwd: dir.path(),
+                bound: None,
+                started: start,
+            };
+            assert_eq!(
+                select(&Cache::default(), &backend, request(), vec![src.clone()])
+                    .unwrap()
+                    .session
+                    .as_deref(),
+                Some(id)
+            );
+            backend.metas.lock().unwrap()[0].session = None;
+            *backend.pane.lock().unwrap() = "hi".into();
+            assert!(select(&Cache::default(), &backend, request(), vec![src]).is_none());
         }
     }
     #[test]

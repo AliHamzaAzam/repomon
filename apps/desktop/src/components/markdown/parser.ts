@@ -104,6 +104,7 @@ export interface ImageNode {
 
 export type InlineNode =
   | TextNode
+  | { type: "hardBreak" }
   | BoldNode
   | ItalicNode
   | BoldItalicNode
@@ -181,6 +182,9 @@ export function parseInline(text: string): InlineNode[] {
   }
 
   while (i < len) {
+    const hardBreak = /^(?: {2,}|\\)\n/.exec(text.slice(i));
+    if (hardBreak) { nodes.push({ type: "hardBreak" }); i += hardBreak[0].length; continue; }
+    if (text[i] === "\n") { appendText(" "); i++; continue; }
 
     if (text[i] === "`") {
       let backticks = 1;
@@ -561,7 +565,7 @@ export function parseMarkdown(content: string): { ast: BlockNode[]; headings: He
     if (paraLines.length > 0) {
       ast.push({
         type: "paragraph",
-        children: parseInline(paraLines.join(" ")),
+        children: parseInline(paraLines.join("\n")),
       });
     }
   }

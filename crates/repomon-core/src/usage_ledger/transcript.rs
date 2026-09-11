@@ -138,6 +138,28 @@ impl Mapper {
         }
         if matches!(kind, "user" | "assistant") {
             let content = &v["message"]["content"];
+            if kind == "user" {
+                let raw = text(content);
+                let raw = raw.trim();
+                // Claude persists local command traffic with role=user. Preserve the result as
+                // a notice, not an XML message attributed to the operator.
+                if let Some(result) = raw
+                    .strip_prefix("<local-command-stdout>")
+                    .and_then(|s| s.strip_suffix("</local-command-stdout>"))
+                {
+                    if !result.trim().is_empty() {
+                        self.status(offset, v, "command_result", result.trim());
+                    }
+                    return;
+                }
+                if raw.starts_with("<command-name>")
+                    && raw.contains("</command-name>")
+                    && raw.contains("<command-message>")
+                    && raw.ends_with("</command-args>")
+                {
+                    return;
+                }
+            }
             if let Some(s) = content.as_str() {
                 self.message(offset, v, kind, s.into(), None);
             } else if let Some(blocks) = content.as_array() {
@@ -212,7 +234,19 @@ impl Mapper {
             return;
         }
         let stamp = serde_json::json!({"timestamp":v["created_at"]});
-        self.model = Some(model.into());
+        // The fallback passed by the ledger is an estimate, not an observed model selection.
+        if let Some(selected) = v["content"]
+            .as_str()
+            .and_then(|s| s.split("<USER_SETTINGS_CHANGE>").nth(1))
+            .and_then(|s| s.split("</USER_SETTINGS_CHANGE>").next())
+            .and_then(|s| s.split("Model Selection` from ").nth(1))
+            .and_then(|s| s.split_once(" to ").map(|(_, s)| s))
+            .and_then(|s| s.split_once(". No need to comment").map(|(s, _)| s))
+        {
+            self.model = Some(selected.trim().into());
+        } else if self.model.is_none() && model != "gemini-3" {
+            self.model = Some(model.into());
+        }
         let role = if v["source"] == "MODEL" {
             "assistant"
         } else {
@@ -282,8 +316,13 @@ impl Mapper {
         self.model = string(v, "model");
         let role = v["role"].as_str().unwrap_or("");
         if matches!(role, "user" | "assistant") {
-            if let Some(content) = v["content"].as_str().filter(|s| !s.trim().is_empty()) {
-                self.message(offset, v, role, content.into(), None);
+            let content = text(&v["content"]);
+            // Hermes records a runtime model-change notice with role=user. It is not a prompt.
+            let runtime_notice = role == "user"
+                && content.starts_with("[System: The active model for this chat has changed to ")
+                && content.ends_with("active.]");
+            if !content.trim().is_empty() && content != "null" && !runtime_notice {
+                self.message(offset, v, role, content, None);
             }
             if let Some(calls) = v["tool_calls"].as_array() {
                 for call in calls {
@@ -427,6 +466,51 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/usage_ledger/fixtures")
             .join(name)
+    }
+    #[test]
+    fn claude_local_command_xml_is_not_user_prose() {
+        let mut mapper = Mapper::default();
+        mapper.claude(&serde_json::json!({"type":"user","message":{"content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}),0);
+        mapper.claude(&serde_json::json!({"type":"user","message":{"content":"<local-command-stdout>Model set to fixture-model</local-command-stdout>"}}),100);
+        assert_eq!(mapper.rows.len(), 1);
+        assert_eq!(
+            mapper.rows[0].item.status_kind.as_deref(),
+            Some("command_result")
+        );
+        assert_eq!(mapper.rows[0].item.text, "Model set to fixture-model");
+    }
+    #[test]
+    fn real_antigravity_envelope_preserves_prompt_and_observed_model() {
+        let mut mapper = Mapper::default();
+        let raw = "<USER_REQUEST>\nWrite a poem\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-09-11T21:39:12+05:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.8 Flash (High). No need to comment on this change.\n</USER_SETTINGS_CHANGE>";
+        mapper.antigravity(&serde_json::json!({"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":"2026-09-11T16:39:12Z","content":raw}), 0, "gemini-3");
+        mapper.antigravity(&serde_json::json!({"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"2026-09-11T16:39:13Z","content":"First line,  \nSecond line."}), 200, "gemini-3");
+        assert_eq!(mapper.rows.len(), 2);
+        assert_eq!(mapper.rows[0].item.text, "Write a poem");
+        assert_eq!(
+            mapper.rows[1].item.model.as_deref(),
+            Some("Gemini 3.8 Flash (High)")
+        );
+        assert_eq!(mapper.rows[1].item.text, "First line,  \nSecond line.");
+    }
+    #[test]
+    fn codex_context_frame_does_not_become_a_user_turn() {
+        let raw = "# AGENTS.md instructions for /fixture\n<INSTRUCTIONS>\nRepository rules\n</INSTRUCTIONS><environment_context><cwd>/fixture</cwd></environment_context>";
+        assert!(strip_injected_blocks(raw).trim().is_empty());
+        assert_eq!(
+            strip_injected_blocks(&format!("{raw}\nWrite a poem")).trim(),
+            "Write a poem"
+        );
+        let request = "Explain this AGENTS.md example: <INSTRUCTIONS>Keep my code</INSTRUCTIONS>";
+        assert_eq!(strip_injected_blocks(request), request);
+    }
+    #[test]
+    fn hermes_content_blocks_and_runtime_metadata_are_distinguished() {
+        let mut mapper = Mapper::default();
+        mapper.hermes(&serde_json::json!({"role":"user","content":"[System: The active model for this chat has changed to fixture via provider local. From this point forward, use this runtime metadata when answering questions about what model/provider is active.]"}), 1);
+        mapper.hermes(&serde_json::json!({"role":"assistant","content":[{"type":"text","text":"Readable response"}],"model":"fixture"}), 2);
+        assert_eq!(mapper.rows.len(), 1);
+        assert_eq!(mapper.rows[0].item.text, "Readable response");
     }
     #[test]
     fn other_provider_conversation_collection_is_opt_in_and_preserves_ledger_results() {

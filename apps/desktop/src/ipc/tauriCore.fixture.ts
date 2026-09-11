@@ -331,6 +331,17 @@ const operatorItems: TranscriptItem[] = [
   item("operator-finished2", "status", "Turn finished", {status_kind:"turn_finished"}),
 ];
 let promptAnswered = false;
+const commandTerminals = new Set<Channel<ArrayBuffer>>();
+let commandSelection = 0;
+let commandFinished = false;
+function drawCommandFixture() {
+  const body = commandFinished ? `Model changed to fixture-${commandSelection + 1}.\r\nReady for your next message.`
+    : `Select a model\r\n\r\n${commandSelection === 0 ? ">" : " "} 1. fixture-1\r\n${commandSelection === 1 ? ">" : " "} 2. fixture-2\r\n\r\nUse arrow keys and Enter to select. Escape goes back.`;
+  const bytes = new TextEncoder().encode(`\x1b[2J\x1b[H${body}`);
+  const frame = new Uint8Array(bytes.length + 1); frame.set(bytes, 1);
+  for (const channel of commandTerminals) channel.onmessage(frame.buffer);
+  Object.assign(window, {__REPOMON_COMMAND_FIXTURE__:{selection:commandSelection,finished:commandFinished}});
+}
 const eventChannels = new Set<{ onmessage: (event: unknown) => void }>();
 const watchTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
 const defectPane = "Looking at the two that matter most, at your window width.\n\nBoth surfaces now match the reference patterns.\n\nMerge to main, yes or no?\n\nCogitated for 10m 39s\n› yes merge it\nauto mode on (shift+tab to cycle)";
@@ -508,7 +519,17 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "agent.capture": () => ({ content: scenario === "broken" ? "Error: Cannot find module './collections'\nBuild exited with code 1.\n› " : scenario === "no-source" ? "$ hermes\nWaiting for input.\n› " : scenario === "streaming" ? "Checking collection filters\nBuild running\n› " : "Build completed in 1.4s\nReady for your review\n› " }),
   "agent.prompt": () => ({ dialog: scenario === "dialog" && !promptAnswered ? fixtureDialog : null }),
   "agent.answer": () => { promptAnswered = true; return { answered:"Yes", sent:["Enter"] }; },
-  "agent.send_input": () => null,
+  "agent.send_input": () => { if (scenario === "commands") { commandFinished = false; drawCommandFixture(); } return null; },
+  "agent.key": (params) => {
+    if (scenario === "commands") {
+      const key = (params as {key:string}).key;
+      if (key === "Down" || key === "Up") commandSelection = 1 - commandSelection;
+      if (key === "Enter") commandFinished = true;
+      drawCommandFixture();
+    }
+    return null;
+  },
+  "agent.fit": (params) => ({cols:(params as {cols:number}).cols,rows:(params as {rows:number}).rows}),
   "agent.transcript_page": () => scenario === "long-history"
     ? { items: Array.from({ length: 57 }, (_, i) => item(`older${i}`, i % 6 === 0 ? "user" : "assistant", i === 0 ? "Round 0: start the migration off the legacy schema." : `Setup step ${i} of the migration.`)), next_before: null, older_message_count: null }
     : { items:[item("older:1", "user", "Use the existing brand styles for the collection filter.")], next_before:null },
@@ -562,7 +583,10 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   if (cmd === "save_chat_attachment") return `/fixture/attachments/${args?.name}` as T;
   if (cmd === "plugin:dialog|open") return ["/fixture/notes.md"] as T;
   if (cmd === "daemon_subscribe") { eventChannels.add(args?.onEvent as { onmessage: (event: unknown) => void }); return null as T; }
-  if (cmd === "term_watch") return { cols:120, rows:32, generation:1, sequence:1 } as T;
+  if (cmd === "term_watch") {
+    if (scenario === "commands") commandTerminals.add(args?.onBytes as Channel<ArrayBuffer>);
+    return { cols:120, rows:32, generation:1, sequence:1 } as T;
+  }
   if (cmd === "connection_status") return CONNECTED_STATUS as T;
   if (cmd === "daemon_call") {
     const { method, params } = (args ?? {}) as { method: string; params: unknown };

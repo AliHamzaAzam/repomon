@@ -201,7 +201,29 @@ export default function TerminalPane(props: TerminalPaneProps) {
   // session doesn't actually carry one.
   const windowSessionId = createMemo(() => windowSession()?.session_id ?? undefined);
   const view = createMemo(() => props.workspace?.viewFor?.({ laneId: props.laneId, agent: agentKind(), shell: !!props.shell }) ?? localView());
+  const [command, setCommand] = createSignal<string | null>(null);
+  const commandOpen = () => view() === "conversation" && command() !== null;
+  const terminalShown = () => view() === "terminal" || commandOpen();
+  createEffect(() => {
+    commandOpen();
+    // The same canvas changes its top inset when the command heading is present.
+    hostInsets = undefined;
+    if (container) for (const edge of ["top", "right", "bottom", "left"]) container.style.removeProperty(edge);
+  });
+  async function openCommand(text?: string) {
+    setCommand(text ?? "Agent controls");
+    try {
+      if (text) await daemonCall("agent.send_input", { lane_id: props.laneId, window: props.window, text, enter: true });
+      terminal?.scrollToBottom();
+      terminal?.focus();
+    } catch (error) { setCommand(null); throw error; }
+  }
+  function closeCommand() {
+    setCommand(null);
+    requestAnimationFrame(() => pane?.querySelector<HTMLTextAreaElement>(".conversation-compose textarea")?.focus());
+  }
   const setView = (value: AgentView | null) => {
+    setCommand(null);
     setFinding(false);
     setViewError(null);
     if (props.workspace) void props.workspace.setView(props.laneId, value).catch((error) => setViewError(String(error)));
@@ -225,7 +247,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       !disposed
       && props.followTail
       && props.visible !== false
-      && view() === "terminal"
+      && terminalShown()
     ) {
       terminal?.scrollToBottom();
     }
@@ -361,7 +383,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       cancelAnimationFrame(visibleSyncFrame);
       visibleSyncFrame = undefined;
     }
-    if (!visible || view() !== "terminal" || disposed) return;
+    if (!visible || !terminalShown() || disposed) return;
     let retriesRemaining = VISIBLE_LAYOUT_RETRY_FRAMES;
     const syncVisiblePane = () => {
       visibleSyncFrame = requestAnimationFrame(() => {
@@ -369,7 +391,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
         if (
           disposed
           || props.visible === false
-          || view() !== "terminal"
+          || !terminalShown()
           || !terminal
           || !container?.isConnected
         ) return;
@@ -586,7 +608,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
       // resized directly. Shared agent panes use the arbitrated fit call so the TUI and desktop
       // never fight over dimensions.
       syncSize = async () => {
-        if (disposed || !terminal || !fit || props.visible === false || view() !== "terminal") return;
+        if (disposed || !terminal || !fit || props.visible === false || !terminalShown()) return;
         if (!container || !container.isConnected || container.clientWidth === 0 || container.clientHeight === 0) return;
         const hostRealigned = alignTerminalHostToDevicePixels();
         let proposed: { cols: number; rows: number } | undefined;
@@ -860,7 +882,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
               await watch.stop();
             };
             setTransportError(null);
-            if (props.focused && view() === "terminal" && terminal) terminal.focus();
+            if (props.focused && terminalShown() && terminal) terminal.focus();
             return;
           } catch (error) {
             if (disposed || run !== watchRun) return;
@@ -951,18 +973,24 @@ export default function TerminalPane(props: TerminalPaneProps) {
  * cannot paint over this or another pane’s controls. */}
       <div
         ref={container}
-        class={`terminal-host absolute inset-x-2 bottom-0 top-10 overflow-hidden ${view() === "terminal" ? "" : "invisible pointer-events-none"}`}
+        class={`terminal-host absolute inset-x-2 bottom-0 top-10 overflow-hidden ${terminalShown() ? "" : "invisible pointer-events-none"} ${commandOpen() ? "terminal-command-host" : ""}`}
         style={{ "background-color": paneBg() || undefined }}
-        aria-hidden={view() !== "terminal"}
+        aria-hidden={!terminalShown()}
       />
+      <Show when={commandOpen()}>
+        <div class="terminal-command-heading" role="region" aria-label="Agent command controls">
+          <div><strong>{agentKind() === "claude-code" ? "Claude" : agentKind()}</strong><span>{command()}</span></div>
+          <button class="focus-ring rounded" onClick={closeCommand}>Back to chat <IconClose size={12} /></button>
+        </div>
+      </Show>
       <Show when={!props.shell}>
-        <div class={`absolute inset-0 z-[5] pt-10 ${view() === "conversation" ? "" : "hidden"}`}>
+        <div class={`absolute inset-0 z-[5] pt-10 ${view() === "conversation" && !commandOpen() ? "" : "hidden"}`}>
           {/* visible is pane-level: the transcript watch stays subscribed across a Terminal/Chat
              toggle, since the pane itself is still mounted and still the one on screen - only
              shown (chat is the displayed view right now) gates cosmetic, display-only work, so
              switching back to Chat repaints already-loaded rows instantly instead of re-paging. */}
           <ConversationPane target={{ lane_id: props.laneId, window: props.window, session_id: windowSessionId(), kind: agentKind() }}
-            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} onFocusAgent={(window) => props.workspace?.setActiveWindow(window)} detail={detail()} visible={props.visible !== false} shown={view() === "conversation"} onTerminal={() => setView("terminal")} />
+            kind={agentKind()} lane={lane()} onFiles={props.onEnsureEditorOpen} onFocusAgent={(window) => props.workspace?.setActiveWindow(window)} detail={detail()} visible={props.visible !== false} shown={view() === "conversation" && !commandOpen()} onTerminal={() => setView("terminal")} onCommand={openCommand} />
         </div>
       </Show>
       <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-10 items-center justify-between border-b border-line bg-surface/95 px-2.5 font-mono text-[10px] uppercase tracking-wider text-muted backdrop-blur">
@@ -1041,7 +1069,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
           </Show>
         </div>
       </div>
-      <Show when={viewError() || (view() === "terminal" && transportError())}>
+      <Show when={viewError() || (terminalShown() && transportError())}>
         <div
           role="alert"
           class="absolute inset-x-4 top-10 z-20 flex items-center justify-between gap-3 rounded-xl border border-fault/30 bg-surface p-3 text-xs text-fault shadow-lg"

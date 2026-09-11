@@ -3,6 +3,24 @@ use super::{conversation_activity, prompt};
 use crate::model::{ToolCallStatus, TranscriptItem};
 use std::collections::{HashMap, HashSet};
 
+/// A single CLI slash command, excluding paths, prose, and multiline attachment prompts.
+pub fn is_slash_command(text: &str) -> bool {
+    let text = text.trim();
+    if text.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(command) = text
+        .strip_prefix('/')
+        .and_then(|s| s.split_whitespace().next())
+    else {
+        return false;
+    };
+    command.starts_with(|c: char| c.is_ascii_alphabetic())
+        && command
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
 /// Codex's footer is a set of dot-separated fields, including a model/effort and a working
 /// directory. Neither model names nor project paths are fixed. Its composer animation consists
 /// solely of dots/braille cells; those lines carry no prose.

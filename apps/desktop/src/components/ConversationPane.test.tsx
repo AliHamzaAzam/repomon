@@ -514,3 +514,46 @@ describe("structured fleet mail", () => {
     expect(result.container.textContent).not.toContain("[REPOMAIL");
   });
 });
+
+
+it.each(["claude-code", "codex", "antigravity", "hermes", "opencode", "cursor", "aider"])("opens %s native commands without creating a pending chat message", async (kind) => {
+  const onCommand = vi.fn().mockResolvedValue(undefined);
+  render(() => <ConversationPane target={{...target,kind}} kind={kind} visible onTerminal={vi.fn()} onCommand={onCommand} />);
+  const input = screen.getByRole("textbox", { name:`Reply to ${kind}` });
+  fireEvent.input(input, {target:{value:"/model"}});
+  fireEvent.keyDown(input, {key:"Enter"});
+  await waitFor(() => expect(onCommand).toHaveBeenCalledWith(kind === "opencode" ? "/models" : "/model"));
+  expect(daemonCall).not.toHaveBeenCalledWith("agent.send_input", expect.anything());
+  await waitFor(() => expect(input).toHaveValue(""));
+  expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+});
+it("keeps a failed command in the composer and shows its error", async () => {
+  render(() => <ConversationPane target={target} kind="codex" visible onTerminal={vi.fn()} onCommand={vi.fn().mockRejectedValue(new Error("Agent disconnected"))} />);
+  const input = screen.getByRole("textbox", {name:"Reply to codex"});
+  fireEvent.input(input, {target:{value:"/model"}});
+  fireEvent.keyDown(input, {key:"Enter"});
+  await screen.findByRole("alert");
+  expect(input).toHaveValue("/model");
+});
+it("places user and agent metadata beside separate message bodies", async () => {
+  items = [{...row("u1","Please review this"),kind:"user",role:"user",at:"2026-09-11T12:00:00Z"},row("a1","The change is ready")];
+  const {container} = mount();
+  await screen.findByText("The change is ready");
+  expect(container.querySelector(".conversation-user .conversation-gutter")?.textContent).toContain("you");
+  expect(container.querySelector(".conversation-user .conversation-body .conversation-gutter")).toBeNull();
+});
+
+
+it("shows local command results without raw XML or a pending user turn", async () => {
+  items=[{...row("cmd","Model set to fixture-model"),kind:"status",role:"tools",status_kind:"command_result"}];
+  mount();
+  await screen.findByText("Model set to fixture-model");
+  expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+  expect(screen.getByText("command")).toBeInTheDocument();
+});
+it("reveals agent errors at normal detail", async () => {
+  items=[{...row("error","Provider is unavailable. Choose another model."),kind:"status",role:"tools",status_kind:"error"}];
+  mount();
+  await screen.findByText("Provider is unavailable. Choose another model.");
+  expect(screen.getByRole("button",{name:/Agent error/})).toHaveAttribute("aria-expanded","true");
+});

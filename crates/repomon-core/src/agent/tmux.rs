@@ -1006,7 +1006,13 @@ impl TmuxRuntime {
     pub fn send_text_named(&self, window: &str, text: &str) -> Result<()> {
         tracing::debug!(target: "repomon::tmuxwrite", window = %window, op = "send-text", text = %text.chars().take(60).collect::<String>(), "tmux write");
         let target = self.exact_target(window);
-        self.paste_text_named(window, text)?;
+        if super::conversation::is_slash_command(text) {
+            // Paste mode can turn a CLI command into literal prompt text. Commands must take
+            // the same key path as typing them in the native composer.
+            self.send_literal_named(window, text.trim())?;
+        } else {
+            self.paste_text_named(window, text)?;
+        }
         // Allow the paste-burst detector to settle before Enter so the agent treats it as
         // submission rather than pasted text.
         std::thread::sleep(std::time::Duration::from_millis(80));

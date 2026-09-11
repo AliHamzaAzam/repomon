@@ -80,7 +80,7 @@ pub fn scan(path: &Path, after: u64, session: &str, options: ScanOptions) -> Res
         }
         let content: Option<String> = r.get(2)?;
         let calls: Option<String> = r.get(4)?;
-        let v = serde_json::json!({"role":r.get::<_,String>(1)?, "content":content.unwrap_or_default(), "tool_call_id":r.get::<_,Option<String>>(3)?, "tool_calls":calls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()), "tool_name":r.get::<_,Option<String>>(5)?, "timestamp":stamp(r.get(6)?), "model":r.get::<_,Option<String>>(7)?});
+        let v = serde_json::json!({"role":r.get::<_,String>(1)?, "content":content.map(|s| serde_json::from_str::<serde_json::Value>(&s).ok().filter(|v| v.is_array()).unwrap_or(serde_json::Value::String(s))).unwrap_or_default(), "tool_call_id":r.get::<_,Option<String>>(3)?, "tool_calls":calls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()), "tool_name":r.get::<_,Option<String>>(5)?, "timestamp":stamp(r.get(6)?), "model":r.get::<_,Option<String>>(7)?});
         mapper.hermes(&v, id);
     }
     Ok(SourceScan {

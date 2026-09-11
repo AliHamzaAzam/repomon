@@ -786,7 +786,7 @@ fn source_note(kind: &str, window: &str) -> TranscriptItem {
         }
         "opencode" => "OpenCode: no saved database session has been verified for this window.",
         "hermes" => {
-            "Hermes Agent: no state.db session has been uniquely matched to this window. Some sessions do not record a working directory."
+            "Hermes Agent: this live session has no verified saved history in state.db. Sessions that fail before a response may not be saved. Open agent controls to resolve a model or provider error; the live output is available below."
         }
         "cursor" => {
             "Cursor: this reader has no supported cursor-agent transcript store for this window. Cursor IDE history belongs to separate editor sessions."

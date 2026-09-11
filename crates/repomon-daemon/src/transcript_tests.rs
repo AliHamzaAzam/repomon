@@ -829,3 +829,36 @@ async fn one_subscription_consuming_input_does_not_remove_it_from_a_lagging_subs
     assert_ne!(slow.items[0].partial, Some(true));
     assert!(states.as_object().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn cli_commands_never_enter_the_pending_message_queue() {
+    for kind in [
+        "claude-code",
+        "codex",
+        "antigravity",
+        "opencode",
+        "hermes",
+        "cursor",
+        "aider",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = context(dir.path()).await;
+        let path = dir.path().join("source.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let p = lane_source(&ctx, dir.path(), kind, &path, kind).await;
+        let window = TmuxRuntime::window_name(p.lane_id);
+        for command in ["/model", "/models", "/model example", "/help"] {
+            assert!(
+                prepare_input(&ctx, p.lane_id, &window, command)
+                    .await
+                    .is_none(),
+                "{kind}: {command}"
+            );
+        }
+        assert!(
+            prepare_input(&ctx, p.lane_id, &window, "/tmp/example.md")
+                .await
+                .is_some()
+        );
+    }
+}

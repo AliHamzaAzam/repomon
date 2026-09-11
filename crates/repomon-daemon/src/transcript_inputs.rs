@@ -49,7 +49,7 @@ pub async fn prepare_input_from_pane(
     pane: Option<&str>,
 ) -> Option<Ticket> {
     let cleaned = repomon_core::usage_ledger::scan::strip_injected_blocks(text);
-    if cleaned.trim().is_empty() {
+    if cleaned.trim().is_empty() || repomon_core::agent::conversation::is_slash_command(&cleaned) {
         return None;
     }
     let p = Params {
@@ -162,9 +162,13 @@ impl Inputs {
                 let after_send = if pending.source.as_ref().is_some_and(|s| s.path.is_some()) {
                     offset.is_some_and(|offset| offset >= pending.floor)
                 } else {
-                    row.at
-                        .zip(pending.item.at)
-                        .is_some_and(|(row, sent)| row >= sent)
+                    row.at.zip(pending.item.at).is_some_and(|(row, sent)| {
+                        if source.kind == "antigravity" {
+                            row.timestamp() >= sent.timestamp()
+                        } else {
+                            row >= sent
+                        }
+                    })
                 };
                 let same_mail = row
                     .mail
@@ -247,5 +251,57 @@ impl Inputs {
             }
         }
         Value::Object(states)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn antigravity_second_precision_consumes_only_the_new_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let sent = chrono::DateTime::parse_from_rfc3339("2026-09-11T16:39:12.900Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ticket = Ticket {
+            source: None,
+            floor: 0,
+            item: TranscriptItem::new("user", "Write a poem", Some(sent)),
+            prior_prompts: None,
+            consumed: false,
+            submitted: "Write a poem".into(),
+        };
+        ctx.transcript_inputs.sent(&ctx, "lane-1", ticket);
+        let src = Source {
+            window: "lane-1".into(),
+            kind: "antigravity".into(),
+            path: Some(dir.path().join("source.jsonl")),
+            session: Some("session".into()),
+        };
+        let mut old = TranscriptItem::new(
+            "user",
+            "Write a poem",
+            Some(sent - chrono::Duration::seconds(2)),
+        );
+        old.id = Some("old".into());
+        let mut rows = vec![old];
+        assert!(
+            ctx.transcript_inputs
+                .reconcile("lane-1", &src, &mut rows)
+                .is_empty()
+        );
+        let mut current = TranscriptItem::new(
+            "user",
+            "Write a poem",
+            chrono::DateTime::from_timestamp(sent.timestamp(), 0),
+        );
+        current.id = Some("current".into());
+        rows.push(current);
+        assert_eq!(
+            ctx.transcript_inputs.reconcile("lane-1", &src, &mut rows),
+            vec!["current"]
+        );
+        assert_eq!(rows[1].id.as_deref(), Some("sent:0"));
     }
 }

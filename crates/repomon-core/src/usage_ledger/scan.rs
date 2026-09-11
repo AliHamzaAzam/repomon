@@ -868,7 +868,9 @@ pub fn scan_opencode_db_with_options(
 const INJECTED_TAGS: &[&str] = &[
     "local-command-caveat",
     "system-reminder",
-    "USER_REQUEST",
+    "ADDITIONAL_METADATA",
+    "USER_SETTINGS_CHANGE",
+    "environment_context",
     "task-notification",
     "task-id",
     "tool-use",
@@ -891,7 +893,7 @@ const INJECTED_PREAMBLES: &[(&str, &[&str])] = &[(
 /// Bump this whenever the extraction rules change. A session digest's stored
 /// `headline_version` (see `UsageSessionMeta`) lags behind after a bump, and ingest re-digests it
 /// from its source, a bounded batch per tick, until every session reflects the current rules.
-pub const HEADLINE_VERSION: u32 = 5;
+pub const HEADLINE_VERSION: u32 = 6;
 
 /// How many characters a headline keeps, ellipsis included.
 const HEADLINE_MAX_CHARS: usize = 80;
@@ -953,7 +955,23 @@ fn is_image_dimension_note(note: &str) -> bool {
 /// Remove every injected block from `raw`. An opening tag or preamble with no closing marker
 /// swallows the rest of the text: a truncated injection is still an injection.
 pub fn strip_injected_blocks(raw: &str) -> String {
+    // Antigravity wraps the actual prompt in USER_REQUEST. Unwrap it; its body is not
+    // injected context. Preserve whitespace so Markdown hard breaks survive.
     let mut text = raw.to_string();
+    if let Some(request) = raw.trim_start().strip_prefix("<USER_REQUEST>")
+        && let Some((body, rest)) = request.split_once("</USER_REQUEST>")
+    {
+        text = format!("{body}{rest}");
+    }
+    // Codex emits repository instructions as their own user record. Only recognize the
+    // complete CLI frame at the beginning; a request discussing AGENTS.md stays readable.
+    if (text.starts_with("# AGENTS.md instructions for ")
+        || text.starts_with("# AGENTS.md instructions\n"))
+        && let Some(open) = text.find("<INSTRUCTIONS>")
+        && let Some(close) = text[open..].find("</INSTRUCTIONS>")
+    {
+        text.replace_range(..open + close + "</INSTRUCTIONS>".len(), "");
+    }
     loop {
         let mut cut: Option<(usize, usize)> = None;
         for tag in INJECTED_TAGS {

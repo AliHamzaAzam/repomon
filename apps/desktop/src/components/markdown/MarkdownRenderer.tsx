@@ -146,6 +146,8 @@ function RenderInline(props: {
   const node = props.node;
 
   switch (node.type) {
+    case "hardBreak":
+      return <br />;
     case "text":
       return <>{node.text}</>;
 

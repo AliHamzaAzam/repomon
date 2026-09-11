@@ -13,6 +13,7 @@ import AttachmentPreview from "./controls/AttachmentPreview";
 import { attachmentTextParts } from "./attachmentText";
 import { statusRowsFor } from "../stores/agentViews";
 import { formatTokens } from "./usageMetrics";
+import { isAgentCommand, modelCommand, nativeAgentCommand } from "./agentCommands";
 import "./conversation.css";
 
 // Session-level activity ("Whisking... (33s, 1.1k tokens)"), distinct from the per-message
@@ -91,9 +92,9 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
   const open = () => expanded() ?? props.detail === "verbose";
   const tool = () => item().kind === "tool_call";
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
-  const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().role === "user" ? "you" : item().kind === "status" ? "status" : props.kind === "claude-code" ? "claude" : props.kind;
+  const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().role === "user" ? "you" : item().kind === "status" ? item().status_kind === "command_result" ? "command" : "status" : props.kind === "claude-code" ? "claude" : props.kind;
   return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${item().role === "user" ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
-    <div class="conversation-gutter"><Show when={!tool()}><time>{time()}</time><Show when={item().role !== "user"}><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></Show></div>
+    <div class="conversation-gutter"><Show when={!tool()}><time dateTime={item().at ?? undefined}>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></div>
     <div class="conversation-body rounded">
       <Show when={tool()} fallback={<Show when={item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><MessageBody row={props.row} laneId={props.laneId} onResize={props.onResize} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
@@ -126,7 +127,7 @@ export function groupTurnWork(rows: ConversationRow[]) {
   let first: string | undefined;
   for (const row of rows) {
     if ((row.item.role === "user" && row.item.kind !== "status") || row.item.status_kind === "turn_started") first = undefined;
-    if (!row.fallback && row.item.status_kind !== "source_unavailable" && (row.item.kind === "tool_call" || row.item.kind === "status")) {
+    if (!row.fallback && !["source_unavailable", "command_result"].includes(row.item.status_kind ?? "") && (row.item.kind === "tool_call" || row.item.kind === "status")) {
       if (!first) { first = row.key; groups.set(first, []); }
       else hidden.add(row.key);
       groups.get(first)!.push(row);
@@ -136,16 +137,16 @@ export function groupTurnWork(rows: ConversationRow[]) {
 }
 function TurnWork(props: { rows: ConversationRow[]; detail: string; kind: string; laneId: number }) {
   const [expanded, setExpanded] = createSignal<boolean>();
-  const open = () => expanded() ?? props.detail === "verbose";
+  const open = () => expanded() ?? (props.detail === "verbose" || notices().some((row) => row.item.status_kind === "error"));
   const tools = () => props.rows.filter((row) => row.item.kind === "tool_call");
-  const notices = () => props.rows.filter((row) => row.item.kind === "status" && statusRowsFor(props.kind, props.detail).includes(row.item.status_kind ?? ""));
+  const notices = () => props.rows.filter((row) => row.item.kind === "status" && (row.item.status_kind === "error" || statusRowsFor(props.kind, props.detail).includes(row.item.status_kind ?? "")));
   const failed = () => tools().filter((row) => row.item.status === "error").length;
   const running = () => tools().some((row) => row.item.status === "running" || row.item.partial);
   return <Show when={tools().length || notices().length}><div class="conversation-work">
     <button type="button" class="work-summary focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
       {open() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
       <span>{tools().length ? `${running() ? "Using" : "Used"} ${tools().length} ${tools().length === 1 ? "tool" : "tools"}` : "Turn details"}</span>
-      <Show when={failed()}><span class="text-fault">{failed()} failed</span></Show>
+      <Show when={failed()}><span class="text-fault">{failed()} failed</span></Show><Show when={notices().some((row) => row.item.status_kind === "error")}><span class="text-fault">Agent error</span></Show>
       <Show when={notices().some((row) => row.item.status_kind === "rate_limit" || row.item.status_kind === "usage_limit")}><span class="text-attention">Limit reached</span></Show>
     </button>
     <Show when={open()}><div class="work-details"><For each={tools()}>{(row) => <LedgerRow row={row} laneId={props.laneId} kind={props.kind} detail="verbose" />}</For><For each={notices()}>{(row) => <p class="work-notice" data-transcript-id={row.key}>{row.item.text}</p>}</For></div></Show>
@@ -159,7 +160,7 @@ function TurnWork(props: { rows: ConversationRow[]; detail: string; kind: string
 // became visible so the ledger never mounts more than what is either recent or requested.
 const RENDER_CAP = 250;
 
-export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; shown?: boolean; kind: string; lane?: Lane; onFiles?: () => void; onFocusAgent?: (window: string) => void; detail?: TranscriptDetail; onTerminal: () => void }) {
+export default function ConversationPane(props: { target: TranscriptTarget; visible: boolean; shown?: boolean; kind: string; lane?: Lane; onFiles?: () => void; onFocusAgent?: (window: string) => void; detail?: TranscriptDetail; onTerminal: () => void; onCommand?: (text?: string) => Promise<void> }) {
   // `visible` is pane-level (is this window still relevant at all); `shown` (defaulting to
   // visible for callers that don't distinguish the two) is specifically "chat is the displayed
   // view right now" and gates cosmetic, display-only work that would otherwise run against an
@@ -341,9 +342,18 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   async function send(text: string): Promise<boolean> {
     if (!text.trim() || busy() || dialog()) return false;
     setBusy(true); setError(null);
-    try { await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true }); setFollowing(true); return true; }
+    try {
+      if (isAgentCommand(text) && props.onCommand) await props.onCommand(nativeAgentCommand(props.kind, text));
+      else await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true });
+      setFollowing(true); return true;
+    }
     catch (cause) { setError(String(cause)); return false; }
     finally { setBusy(false); }
+  }
+  async function controls(text?: string) {
+    setError(null);
+    try { await props.onCommand?.(text); }
+    catch (cause) { setError(String(cause)); }
   }
   return <section class="conversation" aria-label="Conversation" onMouseUp={copySelectionToClipboard} onKeyUp={copySelectionToClipboard}>
     <div class="conversation-layout">
@@ -382,14 +392,14 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       <div class="conversation-pending-queue" aria-label="Not yet read by the agent">
         <div class="conversation-pending-inner">
         <For each={pendingRows()}>{(row) => <div class="conversation-row conversation-user conversation-pending-row" data-transcript-id={row.key}>
-          <div class="conversation-gutter"><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
+          <div class="conversation-gutter"><span>you</span><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
           <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} /></div>
         </div>}</For>
         </div>
       </div>
     </Show>
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>
-      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
+      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><Show when={props.onCommand}><button class="conversation-controls focus-ring" onClick={() => void controls()}>Agent controls</button></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
         <div class="min-w-0 flex-1">
           <p class="conversation-question"><Show when={pending().title}><span>{pending().title}: </span></Show>{pending().question}</p>
           <Show when={pending().body?.length}><pre class="conversation-raw">{pending().body?.join("\n")}</pre></Show>
@@ -397,7 +407,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
         <div class="flex flex-wrap gap-2"><For each={pending().options}>{(option, index) => <button class="focus-ring rounded border border-line bg-surface px-3 py-1.5 text-xs hover:border-attention disabled:opacity-50" disabled={busy()} onClick={() => void answer(index())}>{option.text}</button>}</For></div>
       </div>}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
-      <AttachmentComposer kind={props.kind} model={model()} disabled={!!dialog()} busy={busy()} onSend={send} />
+      <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
+        onModel={props.onCommand && modelCommand(props.kind) ? () => void controls(modelCommand(props.kind)) : undefined} />
     </footer>
     </div>
     <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} onFocusAgent={props.onFocusAgent} />}</Show>

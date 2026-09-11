@@ -183,6 +183,37 @@ fn read_summaries(
     )
 }
 
+/// Enumerate identities for transcript discovery without computing usage or choosing a winner.
+pub fn session_ids_since(cwd: &Path, since: DateTime<Utc>) -> Vec<String> {
+    session_ids_at(&database_path(), cwd, since).unwrap_or_default()
+}
+fn session_ids_at(path: &Path, cwd: &Path, since: DateTime<Utc>) -> Option<Vec<String>> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    if !compatible(&conn) {
+        return None;
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,directory FROM session WHERE time_archived IS NULL AND time_updated >= ?1",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([since.timestamp_millis()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .ok()?;
+    Some(
+        rows.flatten()
+            .filter(|(_, path)| same_path(Path::new(path), cwd))
+            .map(|(id, _)| id)
+            .collect(),
+    )
+}
+
 pub fn summary_for(cwd: &Path) -> Option<TranscriptSummary> {
     summaries_for(cwd, Duration::hours(6), 1).into_iter().next()
 }
@@ -293,6 +324,28 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn transcript_candidates_include_all_recent_cwd_sessions_and_exclude_foreign_or_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        fixture(&path, dir.path());
+        let conn = Connection::open(&path).unwrap();
+        let since = Utc::now() - Duration::minutes(1);
+        conn.execute("INSERT INTO session SELECT 'second',directory,title,time_updated,NULL FROM session WHERE id='ses-1'",[]).unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES ('foreign','/elsewhere','title',?1,NULL)",
+            [Utc::now().timestamp_millis()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES ('old',?1,'title',1,NULL)",
+            [dir.path().to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        let mut ids = session_ids_at(&path, dir.path(), since).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["second", "ses-1"]);
+    }
     #[test]
     fn cached_summaries_follow_wal_commits_and_database_replacement() {
         let dir = tempfile::tempdir().unwrap();
