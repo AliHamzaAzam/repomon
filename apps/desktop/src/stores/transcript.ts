@@ -5,7 +5,7 @@ import { daemonCall, subscribeDaemon, type ActivitySnapshot, type TranscriptTarg
 import { getCachedTranscriptPage, setCachedTranscriptPage } from "./transcriptCache";
 
 export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean; paneExcerpt?: boolean }
-const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block"]);
+const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block", "mail"]);
 
 export function transcriptRow(value: unknown, fallbackKey: string): ConversationRow {
   const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -14,6 +14,7 @@ export function transcriptRow(value: unknown, fallbackKey: string): Conversation
   const kind = raw.kind ?? (raw.role === "user" || raw.role === "assistant" ? raw.role : "terminal_block");
   const malformed = typeof raw.text !== "string" || typeof kind !== "string" || !KINDS.has(kind)
     || ["name", "model", "input_summary", "result_summary", "diff", "status_kind"].some((field) => raw[field] != null && typeof raw[field] !== "string")
+    || (raw.mail != null && (typeof raw.mail !== "object" || typeof (raw.mail as Record<string, unknown>).id !== "string" || typeof (raw.mail as Record<string, unknown>).sender !== "string"))
     || (raw.cost_usd != null && (typeof raw.cost_usd !== "number" || !Number.isFinite(raw.cost_usd)))
     || (raw.partial != null && typeof raw.partial !== "boolean")
     || (raw.status != null && !["running", "ok", "error"].includes(String(raw.status)));

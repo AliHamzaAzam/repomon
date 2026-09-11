@@ -20,6 +20,7 @@ pub struct Ticket {
     item: TranscriptItem,
     prior_prompts: Option<Vec<String>>,
     consumed: bool,
+    submitted: String,
 }
 
 pub async fn prepare_input(ctx: &Ctx, lane: LaneId, window: &str, text: &str) -> Option<Ticket> {
@@ -61,7 +62,7 @@ pub async fn prepare_input_from_pane(
     };
     let source = resolve_source(ctx, &p, false).await.ok();
     let floor = source.as_ref().map_or(0, |s| {
-        if s.kind == "opencode" {
+        if matches!(s.kind.as_str(), "opencode" | "hermes") {
             chrono::Utc::now().timestamp_millis().max(0) as u64
         } else {
             s.path
@@ -73,7 +74,13 @@ pub async fn prepare_input_from_pane(
     let prior_prompts = source.as_ref().zip(pane).map(|(s, pane)| {
         repomon_core::agent::conversation_queue::pane_inputs(&s.kind, pane).consumed
     });
-    let mut item = TranscriptItem::new("user", cleaned.trim(), Some(chrono::Utc::now()));
+    let now = chrono::Utc::now();
+    let mut parsed = repomon_core::agent::repomail::split(cleaned.trim(), Some(now));
+    let mut item = if parsed.len() == 1 {
+        parsed.remove(0)
+    } else {
+        TranscriptItem::new("user", cleaned.trim(), Some(now))
+    };
     item.partial = Some(true);
     Some(Ticket {
         source,
@@ -81,6 +88,7 @@ pub async fn prepare_input_from_pane(
         item,
         prior_prompts,
         consumed: false,
+        submitted: cleaned.trim().into(),
     })
 }
 impl Inputs {
@@ -102,13 +110,28 @@ impl Inputs {
         &self,
         window: &str,
         source: &Source,
-        rows: &mut [TranscriptItem],
+        rows: &mut Vec<TranscriptItem>,
     ) -> Vec<String> {
         let mut replaced = Vec::new();
         let mut windows = self.windows.lock().unwrap();
         let Some(state) = windows.get_mut(window) else {
             return replaced;
         };
+        if source.path.is_none() {
+            // A pane echo alone is not proof of consumption. The pending ticket supplies this
+            // mail row until the provider's consumed-prompt region confirms it.
+            rows.retain(|row| {
+                !row.mail.as_ref().is_some_and(|mail| {
+                    state.pending.iter().any(|ticket| {
+                        ticket
+                            .item
+                            .mail
+                            .as_ref()
+                            .is_some_and(|pending| pending.id == mail.id)
+                    })
+                })
+            });
+        }
         for row in rows {
             let Some(id) = row.id.clone() else {
                 continue;
@@ -126,7 +149,7 @@ impl Inputs {
                     .source
                     .as_ref()
                     .is_none_or(|old| old.path.is_none() || old == source);
-                let offset = if source.kind == "opencode" {
+                let offset = if matches!(source.kind.as_str(), "opencode" | "hermes") {
                     row.at.map(|t| t.timestamp_millis().max(0) as u64)
                 } else {
                     source
@@ -143,7 +166,15 @@ impl Inputs {
                         .zip(pending.item.at)
                         .is_some_and(|(row, sent)| row >= sent)
                 };
-                same_source && after_send && row.text.trim() == pending.item.text.trim()
+                let same_mail = row
+                    .mail
+                    .as_ref()
+                    .zip(pending.item.mail.as_ref())
+                    .is_some_and(|(row, sent)| row.id == sent.id);
+                // A globally unique mail ID is authoritative consumption evidence even if the
+                // provider records receipt time before injection completes or collapses whitespace.
+                same_source
+                    && (same_mail || (after_send && row.text.trim() == pending.item.text.trim()))
             });
             if let Some(index) = index {
                 let pending = state.pending.remove(index);
@@ -178,7 +209,7 @@ impl Inputs {
                     continue;
                 }
                 let id = ticket.item.id.clone().unwrap();
-                let text = repomon_core::agent::conversation_queue::normalized(&ticket.item.text);
+                let text = repomon_core::agent::conversation_queue::normalized(&ticket.submitted);
                 let queued = if let Some(index) = queued_text.iter().position(|row| row == &text) {
                     queued_text.remove(index);
                     true
@@ -191,7 +222,15 @@ impl Inputs {
                     .map(|prompts| prompts.iter().filter(|s| *s == &text).count());
                 let current = observed.consumed.iter().filter(|s| *s == &text).count();
                 let used = matched.entry(text).or_default();
-                if !queued && prior.is_some_and(|prior| current > prior + *used) {
+                let mail_consumed = ticket.item.mail.as_ref().is_some_and(|mail| {
+                    observed.consumed.iter().any(|text| {
+                        repomon_core::agent::repomail::split(text, None)
+                            .iter()
+                            .any(|row| row.mail.as_ref().is_some_and(|row| row.id == mail.id))
+                    })
+                });
+                if !queued && (mail_consumed || prior.is_some_and(|prior| current > prior + *used))
+                {
                     ticket.consumed = true;
                     *used += 1;
                 }

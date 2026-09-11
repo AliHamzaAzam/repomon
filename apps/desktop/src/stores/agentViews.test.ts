@@ -12,8 +12,8 @@ describe("agent view resolution", () => {
     expect(resolveAgentView(null, null, defaults)).toBe("terminal");
   });
   it("enables transcript defaults for the daemon's four scanned SourceKind variants", () => {
-    expect(["codex","claude-code","antigravity","opencode"].every(hasTranscriptSource)).toBe(true);
-    expect(["cursor","aider","hermes","custom"].some(hasTranscriptSource)).toBe(false);
+    expect(["codex","claude-code","antigravity","opencode","hermes","aider"].every(hasTranscriptSource)).toBe(true);
+    expect(["cursor","custom"].some(hasTranscriptSource)).toBe(false);
   });
 });
 

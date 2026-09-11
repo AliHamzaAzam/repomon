@@ -40,7 +40,12 @@ pub fn pane_content(kind: &str, pane: &str) -> String {
 
 /// Strip only recognized CLI decorations. Unknown kinds preserve the raw plain pane tail.
 pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
-    let plain = super::conversation_queue::without_queue(kind, pane);
+    let plain = super::repomail::split(&super::conversation_queue::without_queue(kind, pane), None)
+        .into_iter()
+        .filter(|row| row.mail.is_none())
+        .map(|row| row.text)
+        .collect::<Vec<_>>()
+        .join("\n");
     let supported = matches!(kind, "claude-code" | "codex");
     let mut prose = Vec::new();
     let mut tools: Vec<TranscriptItem> = Vec::new();

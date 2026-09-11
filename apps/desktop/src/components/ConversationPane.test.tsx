@@ -309,10 +309,12 @@ describe("Codex tool-rollup summaries", () => {
 
 describe("per-kind fallback state", () => {
   it("reads Hermes' missing transcript as a deliberate, named explanation rather than a failure", async () => {
-    items = [{id:"pane:lane-10", kind:"terminal_block", role:"tools", text:"$ hermes\nWaiting for input.\n› ", at:null}];
+    items = [{id:"source:lane-10", kind:"status", role:"assistant", text:"Hermes Agent: no state.db session has been uniquely matched to this window. The live terminal excerpt remains available below.", status_kind:"source_unavailable", at:null}, {id:"pane:lane-10", kind:"terminal_block", role:"tools", text:"$ hermes\nWaiting for input.\n› ", at:null}];
     render(() => <ConversationPane target={target} kind="hermes" visible onTerminal={vi.fn()} />);
     const note = await screen.findByText(/Hermes Agent/);
-    expect(note.textContent).toContain("sends its output straight to the terminal");
+    expect(note.textContent).toContain("no state.db session has been uniquely matched");
+    fireEvent.click(await screen.findByRole("button", {name:/Terminal excerpt/}));
+    expect(screen.getByLabelText("Terminal excerpt content")).toHaveTextContent("Waiting for input.");
     expect(note.textContent?.toLowerCase()).not.toContain("broken");
     expect(await screen.findByRole("button", {name:/Terminal excerpt/})).toBeInTheDocument();
   });
@@ -493,5 +495,22 @@ describe("Latest output pill: right-edge anchoring, unread count, and auto-pagin
     const anchor = result.container.querySelector(".conversation-latest-anchor");
     expect(anchor?.parentElement).toHaveClass("conversation-scroll-area");
     expect(anchor?.parentElement).not.toHaveClass("conversation-main");
+  });
+});
+
+
+describe("structured fleet mail", () => {
+  it("shows sender and time and seats a consumed delivery outside the pinned queue", async () => {
+    const mail: TranscriptItem = {id:"sent:mail",kind:"mail",role:"user",text:"Please review the changes",at:"2026-09-11T10:36:00Z",partial:true,mail:{id:"m1",sender:"lane-2/1",reply_to:null}};
+    items = [mail];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method,...args) => method === "agent.transcript_watch" ? {items,next_before:null,input_states:{"sent:mail":"sent"}} : original(method,...args));
+    const result = mount();
+    await screen.findByText(/Mail from lane-2\/1/);
+    expect(result.container.querySelector(".conversation-pending-queue time")).toHaveAttribute("datetime",mail.at);
+    update([{...mail,partial:false}],[],{input_states:{},order:["sent:mail"]});
+    await waitFor(() => expect(result.container.querySelector(".conversation-pending-queue")).toBeNull());
+    expect(result.container.querySelector(".conversation-ledger")).toHaveTextContent("Please review the changes");
+    expect(result.container.textContent).not.toContain("[REPOMAIL");
   });
 });

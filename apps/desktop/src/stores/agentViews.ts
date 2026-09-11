@@ -1,12 +1,10 @@
 import { createSignal } from "solid-js";
 export type AgentView = "terminal" | "conversation";
 export const [agentViewDefaults, setAgentViewDefaults] = createSignal<Record<string, string>>({});
-/// The daemon's four transcript-scanned SourceKind variants (Claude, Codex, Antigravity,
-/// OpenCode). Every other kind, including Hermes, has no scanner and relies on the deliberate
-/// terminal_block fallback built from agent.capture instead.
+/// Kinds with a durable conversation reader. Availability still requires a window binding.
 export function hasTranscriptSource(kind: string) {
   const raw = kind.toLowerCase().trim();
-  return raw === "claude-code" || raw === "claude" || raw === "codex" || raw === "antigravity" || raw === "agy" || raw === "opencode";
+  return raw === "claude-code" || raw === "claude" || raw === "codex" || raw === "antigravity" || raw === "agy" || raw === "opencode" || raw === "hermes" || raw === "hermes-agent" || raw === "aider";
 }
 export function agentKindDisplayName(agent?: string | null): string {
   const raw = agent?.toLowerCase().trim() ?? "";

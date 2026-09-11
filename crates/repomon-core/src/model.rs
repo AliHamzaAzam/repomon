@@ -854,7 +854,11 @@ pub struct TranscriptItem {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub id: Option<String>,
 
-    /// user, assistant, tool_call, dialog, status, or terminal_block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub mail: Option<TranscriptMail>,
+
+    /// user, assistant, mail, tool_call, dialog, status, or terminal_block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub kind: Option<String>,
@@ -898,6 +902,15 @@ pub struct TranscriptItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub dialog: Option<crate::agent::prompt::PendingDialog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct TranscriptMail {
+    pub id: String,
+    pub sender: String,
+    pub reply_to: Option<String>,
 }
 
 /// A spawnable agent choice: a built-in kind (detected on PATH) or a configured custom one.

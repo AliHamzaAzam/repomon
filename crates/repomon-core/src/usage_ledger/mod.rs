@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::{LaneId, RepoId};
 use crate::pricing::{PriceTable, TokenCounts};
 
+pub mod aider;
+pub mod hermes;
 pub mod scan;
 mod transcript;
 

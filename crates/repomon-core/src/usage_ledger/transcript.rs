@@ -278,6 +278,24 @@ impl Mapper {
         }
     }
 
+    pub fn hermes(&mut self, v: &Value, offset: i64) {
+        self.model = string(v, "model");
+        let role = v["role"].as_str().unwrap_or("");
+        if matches!(role, "user" | "assistant") {
+            if let Some(content) = v["content"].as_str().filter(|s| !s.trim().is_empty()) {
+                self.message(offset, v, role, content.into(), None);
+            }
+            if let Some(calls) = v["tool_calls"].as_array() {
+                for call in calls {
+                    let block = serde_json::json!({"id":call["id"], "name":call["function"]["name"], "arguments":call["function"]["arguments"]});
+                    self.tool(offset, v, &block);
+                }
+            }
+        } else if role == "tool" {
+            self.result(offset, v, string(v, "tool_call_id"), &v["content"], false);
+        }
+    }
+
     pub fn codex(&mut self, v: &Value, offset: i64) {
         let p = &v["payload"];
         if let Some(m) = string(p, "model") {
@@ -368,6 +386,15 @@ impl Mapper {
                 return;
             }
             self.messages.insert(key, source.into());
+        }
+        if role == "user" {
+            let rows = crate::agent::repomail::split(&value, at(v));
+            if rows.iter().any(|row| row.mail.is_some()) {
+                for row in rows {
+                    self.push(offset, row);
+                }
+                return;
+            }
         }
         let mut item = if role == "assistant" && source.is_some() {
             crate::agent::codex_content::tool_item(&value)

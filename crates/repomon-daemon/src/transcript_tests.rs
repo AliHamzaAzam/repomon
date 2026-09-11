@@ -325,7 +325,12 @@ async fn hermes_idle_capture_is_a_stable_terminal_excerpt() {
     .await;
     *backend.pane.lock().unwrap() = "Hermes is ready.".into();
     let initial = page(&ctx, &params).await.unwrap();
-    assert_eq!(initial["items"][0]["kind"], "terminal_block");
+    let excerpt = initial["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "terminal_block")
+        .unwrap();
     let session = ctx.open_session(ConnKind::Local).await;
     watch(&ctx, &session, params.clone()).await.unwrap();
     let mut events = ctx.events.subscribe();
@@ -342,7 +347,7 @@ async fn hermes_idle_capture_is_a_stable_terminal_excerpt() {
         .iter()
         .find(|v| v["kind"] == "terminal_block")
         .unwrap();
-    assert_eq!(item["id"], initial["items"][0]["id"]);
+    assert_eq!(item["id"], excerpt["id"]);
     assert_eq!(item["text"], "Hermes has a result.");
     unwatch_all(&ctx, &session).await;
 }

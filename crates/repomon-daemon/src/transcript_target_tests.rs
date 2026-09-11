@@ -377,7 +377,7 @@ async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|i| i["kind"] == "terminal_block")
+                .all(|i| i["kind"] == "terminal_block" || i["status_kind"] == "source_unavailable")
         );
         assert!(page["next_before"].is_null());
         unwatch_all(&ctx, &client).await;
@@ -401,4 +401,316 @@ async fn old_stamps_and_unknown_ages_return_live_pane_without_history() {
         backend.metas.lock().unwrap()[0].session = None;
         assert!(resolve_source(&ctx, &p, true).await.unwrap().path.is_none());
     }
+}
+
+#[tokio::test]
+async fn every_unresolved_kind_keeps_named_reason_and_live_pane_excerpt() {
+    for kind in [
+        "claude-code",
+        "codex",
+        "antigravity",
+        "opencode",
+        "hermes",
+        "cursor",
+        "aider",
+        "custom-fixture",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, backend) = context(dir.path()).await;
+        let path = dir.path().join("missing");
+        let mut p = lane_source(&ctx, dir.path(), kind, &path, "unbound").await;
+        p.window = Some(TmuxRuntime::window_name(p.lane_id));
+        p.session_id = None;
+        backend.metas.lock().unwrap()[0].session = None;
+        *backend.started.lock().unwrap() = Some(None);
+        *backend.pane.lock().unwrap() = "A live reply remains available for this agent".into();
+        let page = page(&ctx, &p).await.unwrap();
+        let items = page["items"].as_array().unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|r| r["status_kind"] == "source_unavailable"),
+            "{kind}"
+        );
+        assert!(
+            items.iter().any(|r| r["kind"] == "terminal_block"
+                && r["text"].as_str().unwrap().contains("live reply")),
+            "{kind}"
+        );
+        let client = ctx.open_session(ConnKind::Local).await;
+        let watch = watch(&ctx, &client, p).await.unwrap();
+        assert!(
+            watch["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["kind"] == "terminal_block"),
+            "watch {kind}"
+        );
+        unwatch_all(&ctx, &client).await;
+    }
+}
+#[tokio::test]
+async fn delivered_mail_is_structured_and_durable_id_consumption_clears_pinned_state() {
+    for kind in ["claude-code", "codex", "antigravity"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = context(dir.path()).await;
+        let path = dir.path().join("mail.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let p = lane_source(&ctx, dir.path(), kind, &path, "mail-session").await;
+        let window = TmuxRuntime::window_name(p.lane_id);
+        let envelope = "[REPOMAIL id=fixture-mail from=lane-2/1 reply_to=none] Please review this change [fixture-mail] [END REPOMAIL]";
+        let ticket = prepare_input(&ctx, p.lane_id, &window, envelope)
+            .await
+            .unwrap();
+        ctx.transcript_inputs.sent(&ctx, &window, ticket);
+        let src = resolve_source(&ctx, &p, false).await.unwrap();
+        let mut pending = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append(&window, &src, "", &mut pending, &mut order);
+        let id = pending[0].id.clone().unwrap();
+        assert_eq!(pending[0].kind.as_deref(), Some("mail"));
+        assert_eq!(states[&id], "sent");
+        // Provider normalizes whitespace and timestamps the record before injection acknowledgement.
+        let normalized = envelope.replace("Please review", "Please   review");
+        let at = "2026-09-11T09:00:00Z";
+        let row = match kind {
+            "claude-code" => json!({"type":"user","timestamp":at,"message":{"content":normalized}}),
+            "codex" => {
+                json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":normalized}]}})
+            }
+            _ => {
+                json!({"source":"USER_EXPLICIT","created_at":at,"type":"USER_INPUT","content":normalized})
+            }
+        };
+        std::fs::write(&path, format!("{row}\n")).unwrap();
+        let consumed = page(&ctx, &p).await.unwrap();
+        assert_eq!(consumed["items"][0]["id"], id);
+        assert_eq!(consumed["items"][0]["mail"]["sender"], "lane-2/1");
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append(&window, &src, "", &mut items, &mut order);
+        assert!(states.as_object().unwrap().is_empty(), "{kind}");
+        assert!(items.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn hermes_and_aider_resolve_bound_sources_and_render_real_fixture_messages() {
+    for kind in ["hermes", "aider"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = context(dir.path()).await;
+        let (path, id) = if kind == "hermes" {
+            let path = dir.path().join("state.db");
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(include_str!(
+                "../../repomon-core/src/usage_ledger/fixtures/hermes_conversation_v0.sql"
+            ))
+            .unwrap();
+            (path, "hermes-fixture".to_string())
+        } else {
+            let path = dir.path().join(".aider.chat.history.md");
+            std::fs::write(
+                &path,
+                include_str!(
+                    "../../repomon-core/src/usage_ledger/fixtures/aider_conversation_v0.md"
+                ),
+            )
+            .unwrap();
+            let id =
+                repomon_core::usage_ledger::aider::scan(&path, None, 0, ScanOptions::default())
+                    .unwrap()
+                    .sessions[0]
+                    .session_id
+                    .clone();
+            (path, id)
+        };
+        let p = lane_source(&ctx, dir.path(), kind, &path, &id).await;
+        let src = resolve_source(&ctx, &p, false).await.unwrap();
+        assert_eq!(src.path.as_ref(), Some(&path));
+        let first = page(&ctx, &p).await.unwrap();
+        let rows = first["items"].as_array().unwrap();
+        assert!(
+            rows.iter().any(|r| r["role"] == "assistant"
+                && r["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("inspection is complete")),
+            "{kind}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r["text"].as_str().unwrap().contains("Unrelated")),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn pane_mail_is_structured_without_losing_surrounding_excerpt() {
+    let items = fallback_items(
+        "cursor",
+        "Before the mail\n[REPOMAIL id=receipt from=operator reply_to=none] Review the changes [receipt] [END REPOMAIL]\nAfter the mail",
+        "lane-1",
+    );
+    assert!(
+        items
+            .iter()
+            .any(|r| r.mail.as_ref().is_some_and(|m| m.sender == "operator")
+                && r.text == "Review the changes")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|r| r.kind.as_deref() == Some("terminal_block")
+                && r.text.contains("Before the mail"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|r| r.kind.as_deref() == Some("terminal_block")
+                && r.text.contains("After the mail"))
+    );
+    assert!(!items.iter().any(|r| r.text.contains("[REPOMAIL")));
+}
+
+/// Opt-in read-only provider audit. Only synthetic in-memory lane attribution is constructed.
+#[test]
+#[ignore = "manual local provider-format measurement"]
+fn real_provider_chat_audit() {
+    use repomon_core::usage_ledger::{FleetIndex, scan::scan_codex_rollout};
+    let home = directories::BaseDirs::new().unwrap();
+    let root = home.home_dir().join(".codex/sessions/2026/09");
+    let mut files = 0;
+    let mut attributed = 0;
+    let mut messages = 0;
+    for day in std::fs::read_dir(root)
+        .unwrap()
+        .flatten()
+        .filter(|d| d.file_name().to_string_lossy().as_ref() >= "09")
+    {
+        for file in std::fs::read_dir(day.path())
+            .unwrap()
+            .flatten()
+            .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
+        {
+            let scan = scan_codex_rollout(&file.path(), 0).unwrap();
+            let Some(session) = scan.sessions.first() else {
+                continue;
+            };
+            let Some(cwd) = &session.cwd else {
+                continue;
+            };
+            let index = FleetIndex::new(
+                vec![(1, PathBuf::from(cwd))],
+                vec![(7, 1, PathBuf::from(cwd))],
+            );
+            attributed += usize::from(index.attribute(Some(cwd)).lane_id == Some(7));
+            files += 1;
+            let parsed = scan_page(
+                &Source {
+                    window: "fixture-window".into(),
+                    kind: "codex".into(),
+                    path: Some(file.path()),
+                    session: Some(session.session_id.clone()),
+                },
+                None,
+            )
+            .unwrap();
+            messages += parsed
+                .scan
+                .transcript
+                .iter()
+                .filter(|r| matches!(r.item.kind.as_deref(), Some("user" | "assistant")))
+                .count();
+        }
+    }
+    println!(
+        "CODEX files={files} cwd_attributed={attributed} latest_page_prose_rows={messages} monitor_identity=None (baseline CodexMonitor)"
+    );
+    let agy = home.home_dir().join(".gemini/antigravity-cli/brain");
+    let mut files = 0;
+    let mut messages = 0;
+    for dir in std::fs::read_dir(agy).unwrap().flatten() {
+        let path = dir.path().join(".system_generated/logs/transcript.jsonl");
+        if !path.is_file() {
+            continue;
+        }
+        let src = Source {
+            window: "fixture-window".into(),
+            kind: "antigravity".into(),
+            path: Some(path),
+            session: Some(dir.file_name().to_string_lossy().into()),
+        };
+        if let Ok(page) = scan_page(&src, None) {
+            files += 1;
+            messages += page
+                .scan
+                .transcript
+                .iter()
+                .filter(|r| matches!(r.item.kind.as_deref(), Some("user" | "assistant")))
+                .count();
+        }
+    }
+    println!("ANTIGRAVITY exported_files={files} latest_page_prose_rows={messages}");
+    let path = repomon_core::usage_ledger::hermes::database_path();
+    let sessions = repomon_core::usage_ledger::hermes::sessions(&path).unwrap();
+    let mut rows = 0;
+    for session in &sessions {
+        rows += repomon_core::usage_ledger::hermes::scan(
+            &path,
+            0,
+            &session.session_id,
+            ScanOptions {
+                collect_transcript: true,
+                before_offset: None,
+            },
+        )
+        .unwrap()
+        .transcript
+        .len();
+    }
+    println!(
+        "HERMES sessions={} cwd_missing={} structured_rows={rows}",
+        sessions.len(),
+        sessions.iter().filter(|s| s.cwd.is_none()).count()
+    );
+    assert!(files > 0 && messages > 0 && rows > 0);
+}
+
+#[tokio::test]
+async fn pane_echo_does_not_consume_pending_mail_without_provider_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, backend) = context(dir.path()).await;
+    let p = lane_source(
+        &ctx,
+        dir.path(),
+        "hermes",
+        &dir.path().join("missing"),
+        "missing",
+    )
+    .await;
+    *backend.started.lock().unwrap() = Some(None);
+    let window = TmuxRuntime::window_name(p.lane_id);
+    let envelope =
+        "[REPOMAIL id=waiting from=operator reply_to=none] Still waiting [waiting] [END REPOMAIL]";
+    let ticket = prepare_input(&ctx, p.lane_id, &window, envelope)
+        .await
+        .unwrap();
+    ctx.transcript_inputs.sent(&ctx, &window, ticket);
+    let src = resolve_source(&ctx, &p, false).await.unwrap();
+    let mut rows = fallback_items("hermes", envelope, &window);
+    ctx.transcript_inputs.reconcile(&window, &src, &mut rows);
+    assert!(!rows.iter().any(|row| row.mail.is_some()));
+    let mut order = Vec::new();
+    let states = ctx
+        .transcript_inputs
+        .append(&window, &src, envelope, &mut rows, &mut order);
+    assert_eq!(states.as_object().unwrap().values().next().unwrap(), "sent");
+    assert_eq!(rows.iter().filter(|row| row.mail.is_some()).count(), 1);
 }

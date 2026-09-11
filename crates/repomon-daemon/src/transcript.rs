@@ -22,6 +22,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
+#[path = "transcript_discovery.rs"]
+mod discovery;
 #[path = "transcript_inputs.rs"]
 mod inputs;
 pub use inputs::{Inputs, prepare_input, prepare_input_from_pane};
@@ -114,7 +116,7 @@ type FileStamp = Option<(u64, Option<std::time::SystemTime>, u64, u64)>;
 struct Fingerprint(Vec<FileStamp>);
 fn fingerprint(source: &Source) -> Fingerprint {
     let mut paths: Vec<_> = source.path.iter().cloned().collect();
-    if source.kind == "opencode" {
+    if matches!(source.kind.as_str(), "opencode" | "hermes") {
         if let Some(path) = &source.path {
             paths.push(PathBuf::from(format!("{}-wal", path.display())));
         }
@@ -167,6 +169,9 @@ type CachedPrices = Option<(PriceKey, Arc<repomon_core::pricing::PriceTable>)>;
 pub struct Cache {
     entries: std::sync::Mutex<std::collections::HashMap<Source, Arc<CacheEntry>>>,
     prices: tokio::sync::Mutex<CachedPrices>,
+    verified: std::sync::Mutex<
+        std::collections::HashMap<String, (chrono::DateTime<chrono::Utc>, Source)>,
+    >,
     #[cfg(test)]
     scans: AtomicU64,
 }
@@ -333,14 +338,15 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     }
     let backend = ctx.backend.clone();
     let target_window = window.clone();
-    let (win, started) = tokio::task::spawn_blocking(move || {
+    let (win, started, aider_windows) = tokio::task::spawn_blocking(move || {
         let started = backend.window_started_at(&target_window);
-        let meta = backend
-            .list_windows_meta()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|w| w.name == target_window);
-        Ok::<_, String>((meta, started))
+        let windows = backend.list_windows_meta().map_err(|e| e.to_string())?;
+        let aider_windows = windows
+            .iter()
+            .filter(|w| w.agent_kind.as_deref() == Some("aider"))
+            .count();
+        let meta = windows.into_iter().find(|w| w.name == target_window);
+        Ok::<_, String>((meta, started, aider_windows))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -387,12 +393,98 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         path: None,
         session: session.clone(),
     };
+    if kind == "aider" && aider_windows > 1 {
+        return Ok(unknown);
+    }
+    if let Some((age, src)) = ctx
+        .transcript_cache
+        .verified
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&window)
+    {
+        if Some(*age) == started
+            && src.kind == kind
+            && src.session == session
+            && src.path.as_ref().is_some_and(|p| p.is_file())
+        {
+            return Ok(src.clone());
+        }
+    }
+    if started.is_some()
+        && session.is_some()
+        && matches!(
+            kind.as_str(),
+            "claude-code" | "codex" | "antigravity" | "opencode" | "hermes" | "aider"
+        )
+    {
+        let known = ctx
+            .store
+            .conversation_source(p.lane_id, kind.clone(), session.clone(), started)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some((path, session)) = known.filter(|(path, _)| PathBuf::from(path).is_file()) {
+            check_window_session(p, Some(&session))?;
+            return Ok(Source {
+                window: window.clone(),
+                kind: kind.clone(),
+                path: Some(path.into()),
+                session: Some(session),
+            });
+        }
+    }
+    if let Some(started_at) = started
+        && discover
+        && (session.is_some()
+            || p.session_id
+                .as_deref()
+                .is_none_or(|s| s == format!("win:{window}")))
+        && matches!(
+            kind.as_str(),
+            "codex" | "antigravity" | "hermes" | "opencode" | "aider"
+        )
+    {
+        let cache = ctx.transcript_cache.clone();
+        let backend = ctx.backend.clone();
+        let target = window.clone();
+        let agent = kind.clone();
+        let dir = cwd.clone();
+        let bound = session.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            discovery::discover(
+                &cache,
+                backend.as_ref(),
+                discovery::Request {
+                    window: &target,
+                    kind: &agent,
+                    cwd: &dir,
+                    bound: bound.as_deref(),
+                    started: started_at,
+                },
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Some(src) = found {
+            check_window_session(p, src.session.as_deref())?;
+            let mut verified = ctx
+                .transcript_cache
+                .verified
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if verified.len() >= 128 {
+                verified.clear();
+            }
+            verified.insert(window.clone(), (started_at, src.clone()));
+            return Ok(src);
+        }
+    }
     if started.is_none() || session.is_none() {
         return Ok(unknown);
     }
     if !matches!(
         kind.as_str(),
-        "claude-code" | "codex" | "antigravity" | "opencode"
+        "claude-code" | "codex" | "antigravity" | "opencode" | "hermes" | "aider"
     ) {
         check_window_session(p, session.as_deref())?;
         return Ok(Source {
@@ -400,20 +492,6 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
             kind,
             path: None,
             session,
-        });
-    }
-    let known = ctx
-        .store
-        .conversation_source(p.lane_id, kind.clone(), session.clone(), started)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some((path, session)) = known.filter(|(path, _)| PathBuf::from(path).is_file()) {
-        check_window_session(p, Some(&session))?;
-        return Ok(Source {
-            window,
-            kind,
-            path: Some(path.into()),
-            session: Some(session),
         });
     }
     if !discover {
@@ -498,6 +576,15 @@ fn scan_range(source: &Source, from: u64, before: Option<u64>) -> Result<SourceS
             scan_antigravity_transcript_with_options(path, from, "gemini-3", None, options)
         }
         "opencode" => scan_opencode_db_with_options(path, from, source.session.as_deref(), options),
+        "aider" => {
+            repomon_core::usage_ledger::aider::scan(path, source.session.as_deref(), from, options)
+        }
+        "hermes" => repomon_core::usage_ledger::hermes::scan(
+            path,
+            from,
+            source.session.as_deref().ok_or("Hermes session required")?,
+            options,
+        ),
         _ => return Ok(SourceScan::default()),
     }
     .map_err(|e| e.to_string())
@@ -514,6 +601,35 @@ fn scan_page(source: &Source, before: Option<u64>) -> Result<ParsedPage, String>
             older_message_count: None,
         });
     };
+    if source.kind == "aider" {
+        let mut scan = scan_range(source, 0, before)?;
+        let older = scan.transcript.len().saturating_sub(200);
+        scan.transcript.drain(..older);
+        let start = scan.transcript.first().map_or(0, |r| r.offset);
+        return Ok(ParsedPage {
+            end: before.unwrap_or(scan.next_offset),
+            scan,
+            start,
+            next_before: (older > 0).then_some(start),
+            older_message_count: Some(older as u64),
+        });
+    }
+    if source.kind == "hermes" {
+        let session = source
+            .session
+            .as_deref()
+            .ok_or("Hermes conversation requires a session")?;
+        let end = before.unwrap_or(i64::MAX as u64);
+        let (start, older) = repomon_core::usage_ledger::hermes::page_bounds(path, session, end)
+            .map_err(|e| e.to_string())?;
+        return Ok(ParsedPage {
+            scan: scan_range(source, start.saturating_sub(1), Some(end))?,
+            start,
+            end,
+            next_before: (older > 0).then_some(start),
+            older_message_count: Some(older),
+        });
+    }
     if source.kind == "opencode" {
         let session = source
             .session
@@ -661,6 +777,66 @@ pub async fn page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, TranscriptError> 
     Ok(value)
 }
 
+fn source_note(kind: &str, window: &str) -> TranscriptItem {
+    let reason = match kind {
+        "claude-code" => "Claude Code: no saved session has been verified for this window.",
+        "codex" => "Codex: no rollout has been uniquely matched to this window and its start time.",
+        "antigravity" => {
+            "Antigravity: no exported brain transcript has been uniquely matched to this window. Database-only conversations contain binary steps that this reader cannot decode."
+        }
+        "opencode" => "OpenCode: no saved database session has been verified for this window.",
+        "hermes" => {
+            "Hermes Agent: no state.db session has been uniquely matched to this window. Some sessions do not record a working directory."
+        }
+        "cursor" => {
+            "Cursor: this reader has no supported cursor-agent transcript store for this window. Cursor IDE history belongs to separate editor sessions."
+        }
+        "aider" => {
+            "Aider: no dated section in .aider.chat.history.md has been uniquely matched to this window. Undated history or concurrent Aider windows cannot be assigned safely."
+        }
+        _ => {
+            "This custom agent has no configured transcript reader or per-window session identity."
+        }
+    };
+    let mut item = TranscriptItem::new(
+        "status",
+        format!("{reason} The live terminal excerpt remains available below."),
+        None,
+    );
+    if !matches!(
+        kind,
+        "claude-code" | "codex" | "antigravity" | "opencode" | "hermes" | "cursor" | "aider"
+    ) {
+        item.text = format!("{kind}: {}", item.text);
+    }
+    item.status_kind = Some("source_unavailable".into());
+    item.id = Some(format!("source:{window}"));
+    item
+}
+
+fn fallback_items(kind: &str, pane: &str, window: &str) -> Vec<TranscriptItem> {
+    let plain = pane_content(kind, pane);
+    let mut items = vec![source_note(kind, window)];
+    for (index, mut row) in repomon_core::agent::repomail::split(&plain, None)
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(mail) = &row.mail {
+            row.id = Some(format!("pane-mail:{window}:{}", mail.id));
+        } else {
+            row.kind = Some("terminal_block".into());
+            row.role = "tools".into();
+            row.id = Some(if index == 0 {
+                format!("pane:{window}")
+            } else {
+                format!("pane:{window}:{index}")
+            });
+        }
+        items.push(row);
+    }
+    items
+}
+
 async fn capture_page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
     let backend = ctx.backend.clone();
     let window = p
@@ -673,15 +849,9 @@ async fn capture_page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-    let mut item = TranscriptItem::new(
-        "terminal_block",
-        pane_content(p.kind.as_deref().unwrap_or("other"), &pane),
-        None,
-    );
-    item.id = Some(format!("pane:{identity}"));
-    let page_count = usize::from(!item.text.trim().is_empty());
+    let items = fallback_items(p.kind.as_deref().unwrap_or("custom"), &pane, &identity);
     Ok(
-        json!({"items": if item.text.trim().is_empty() { Vec::new() } else { vec![item] }, "next_before":null, "page_count": page_count, "older_message_count": null}),
+        json!({"items":items, "next_before":null, "page_count": items.len(), "older_message_count": null}),
     )
 }
 
@@ -826,7 +996,8 @@ pub async fn watch(
         let mut ledger_dirty = source_cache.cost_revision.load(Ordering::Relaxed) != cost_revision;
         let mut stream_ended = false;
         let mut discovery = std::time::Instant::now() - Duration::from_secs(2);
-        let mut reads = tokio::task::JoinSet::new();
+        let mut reads =
+            tokio::task::JoinSet::<(Source, Fingerprint, u64, Result<Value, String>)>::new();
         let mut discoveries: tokio::task::JoinSet<Result<Source, TranscriptError>> =
             tokio::task::JoinSet::new();
         let mut previous_activity = initial_activity;
@@ -838,9 +1009,13 @@ pub async fn watch(
         loop {
             tokio::select! {
                 Some(result) = reads.join_next(), if !reads.is_empty() => {
-                    if let Ok((src, stamp, revision, Ok(value))) = result {
+                    if let Ok((src, stamp, revision, result)) = result {
                         if src == initial_source {
-                            cached = value;
+                            cached = result.unwrap_or_else(|error| {
+                                let mut note=source_note(&src.kind,&task_window);
+                                note.text=format!("{}: the saved conversation could not be read: {error}. The live terminal remains available.",src.kind);
+                                json!({"items":[note],"next_before":null,"older_message_count":null})
+                            });
                             signature = Some(stamp);
                             cost_revision = revision;
                             ledger_dirty = task_ctx.transcript_cache.cost_revision(&initial_source) != cost_revision;
@@ -855,6 +1030,7 @@ pub async fn watch(
                                 identity_removed.extend(previous_order.iter().cloned());
                                 state = ConversationStream::default();
                             }
+                            if src.path.is_some() { identity_removed.push(format!("source:{task_window}")); }
                             initial_source = src;
                             cached = json!({"items":[], "next_before":null, "older_message_count":null});
                             source_cache = task_ctx.transcript_cache.entry(&initial_source);
@@ -916,9 +1092,7 @@ pub async fn watch(
                     }
                     let mut finals = serde_json::from_value(cached["items"].clone()).unwrap_or_default();
                     if initial_source.path.is_none() {
-                        let mut excerpt = TranscriptItem::new("terminal_block", pane_content(&kind, &pane), None);
-                        excerpt.id = Some(format!("pane:{task_window}"));
-                        finals = if excerpt.text.trim().is_empty() { Vec::new() } else { vec![excerpt] };
+                        finals = fallback_items(&kind, &pane, &task_window);
                         live.retain(|i| matches!(i.kind.as_deref(), Some("dialog" | "status")));
                     }
                     let replaced = task_ctx.transcript_inputs.reconcile(&task_window, &initial_source, &mut finals);

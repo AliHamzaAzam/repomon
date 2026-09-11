@@ -5893,15 +5893,15 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                         within,
                         MAX_SESSIONS_PER_LANE,
                     ));
-                    if let Some(summary) = agent::antigravity::summary_for(p)
-                        && chrono::Utc::now() - summary.last_activity <= within
-                    {
-                        recent.push(summary);
-                    }
+                    // Antigravity's last-conversation cwd map is not a window identity.
+                    // Chat discovers its exported transcripts using unique pane evidence.
                     recent.sort_by_key(|summary| std::cmp::Reverse(summary.last_activity));
                     recent.truncate(MAX_SESSIONS_PER_LANE);
                     if recent.is_empty() {
-                        agent::summary_for(p).into_iter().collect()
+                        agent::summary_for(p)
+                            .filter(|s| s.kind != AgentKind::Antigravity)
+                            .into_iter()
+                            .collect()
                     } else {
                         recent
                     }
@@ -6738,7 +6738,7 @@ struct Pairing {
 /// Collapse text to lowercase ASCII alphanumerics. Makes fingerprint matching immune to
 /// tmux line wrapping, markdown styling (the pane renderer strips `**`/`_` markers), ANSI
 /// spacing, and case.
-fn normalize_fingerprint(s: &str) -> String {
+pub(crate) fn normalize_fingerprint(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
@@ -6756,7 +6756,7 @@ const STAMP_CONFIRM_CAPTURE_LINES: u32 = 500;
 
 /// The pane fingerprint of a transcript's last message, or `None` when there is no message
 /// or it is too short to be distinctive.
-fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
+pub(crate) fn message_fingerprint(last_message: Option<&str>) -> Option<String> {
     let n = normalize_fingerprint(last_message?);
     if n.len() < FINGERPRINT_MIN {
         return None;

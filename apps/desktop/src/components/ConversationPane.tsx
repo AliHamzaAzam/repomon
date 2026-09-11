@@ -11,7 +11,7 @@ import ConversationContext from "./ConversationContext";
 import AttachmentChip, { isImageAttachment } from "./controls/AttachmentChip";
 import AttachmentPreview from "./controls/AttachmentPreview";
 import { attachmentTextParts } from "./attachmentText";
-import { agentKindDisplayName, hasTranscriptSource, statusRowsFor } from "../stores/agentViews";
+import { statusRowsFor } from "../stores/agentViews";
 import { formatTokens } from "./usageMetrics";
 import "./conversation.css";
 
@@ -62,6 +62,7 @@ function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: (
   const images = createMemo(() => parts().flatMap((part) => "attachment" in part && isImageAttachment(part.attachment) ? [part.attachment] : []));
   return <Show when={props.row.fallback} fallback={
     <>
+      <Show when={props.row.item.mail}>{(mail) => <p class="conversation-mail-header">Mail from {mail().sender}<Show when={props.row.item.at}> · <time dateTime={props.row.item.at!}>{new Date(props.row.item.at!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</time></Show></p>}</Show>
       <Show when={images().length}><div class="conversation-images"><For each={images()}>{(file, index) => <AttachmentPreview file={file} number={index() + 1} onResize={props.onResize} />}</For></div></Show>
       <div class="conversation-message rounded"><For each={parts()}>{(part) => "attachment" in part
         ? isImageAttachment(part.attachment)
@@ -125,7 +126,7 @@ export function groupTurnWork(rows: ConversationRow[]) {
   let first: string | undefined;
   for (const row of rows) {
     if ((row.item.role === "user" && row.item.kind !== "status") || row.item.status_kind === "turn_started") first = undefined;
-    if (!row.fallback && (row.item.kind === "tool_call" || row.item.kind === "status")) {
+    if (!row.fallback && row.item.status_kind !== "source_unavailable" && (row.item.kind === "tool_call" || row.item.kind === "status")) {
       if (!first) { first = row.key; groups.set(first, []); }
       else hidden.add(row.key);
       groups.get(first)!.push(row);
@@ -202,7 +203,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     const remaining = transcript.remaining();
     return remaining ? `Load ${remaining} earlier message${remaining === 1 ? "" : "s"}` : "Load earlier messages";
   };
-  const ledgerRows = createMemo(() => visibleRows().filter((row) => !pendingKeys().has(row.key)));
+  const sourceNote = createMemo(() => transcript.rows().find((row) => row.item.status_kind === "source_unavailable")?.item.text);
+  const ledgerRows = createMemo(() => visibleRows().filter((row) => !pendingKeys().has(row.key) && row.item.status_kind !== "source_unavailable"));
   const work = createMemo(() => groupTurnWork(ledgerRows()));
   const model = () => [...transcript.rows()].reverse().find((row) => row.item.model)?.item.model;
   const [busy, setBusy] = createSignal(false);
@@ -349,8 +351,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     <div class="conversation-scroll-area">
     <div class="conversation-scroll" ref={scroll} onScroll={onLedgerScroll}>
       <div class="conversation-ledger">
-        <Show when={!hasTranscriptSource(props.kind)}><p class="conversation-source-note">{agentKindDisplayName(props.kind)} sends its output straight to the terminal; there is no saved chat transcript to read here. A live excerpt appears below, or open the live terminal to follow along.</p></Show>
-        <Show when={hasOlder()} fallback={<Show when={transcript.pagedOnce()}><p class="conversation-history-boundary">Beginning of conversation</p></Show>}>
+        <Show when={sourceNote()}>{(note) => <p class="conversation-source-note">{note()}</p>}</Show>
+        <Show when={hasOlder()} fallback={<Show when={transcript.pagedOnce() && !sourceNote()}><p class="conversation-history-boundary">Beginning of conversation</p></Show>}>
           <button class="focus-ring conversation-older" disabled={transcript.loading()} onClick={() => void older()}>{olderLabel()}</button>
         </Show>
         <Show when={transcript.error()}><p class="text-fault text-xs" role="alert">{transcript.error()} <button class="underline focus-ring" onClick={props.onTerminal}>Open terminal</button></p></Show>
