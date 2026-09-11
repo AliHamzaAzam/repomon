@@ -189,6 +189,17 @@ fn is_antigravity_live_footer(line: &str) -> bool {
         && (t.contains('\u{2191}') || t.contains('\u{2193}') || t.contains('\u{b7}'))
 }
 
+/// The key hints Antigravity prints under a menu that is actually waiting for a choice:
+/// "↑/↓ Navigate · enter Confirm" under the trust dialog, "↑/↓ Navigate · tab Amend · ..." under
+/// the permission menu. Deliberately NOT satisfied by "esc to cancel", which Antigravity draws
+/// under every running turn and which therefore cannot tell a menu from ordinary output. A menu
+/// that stops printing its hints will be missed rather than invented, which is the safer error:
+/// a wrong dialog disables the composer.
+fn is_antigravity_menu_hint(line: &str) -> bool {
+    let t = line.trim();
+    t.to_lowercase().contains("navigate") && (t.contains('↑') || t.contains('↓'))
+}
+
 /// Lines that may sit between an Antigravity menu's last option and the bottom of the pane
 /// without meaning the dialog is dead scrollback: its own footers, the empty composer, rules,
 /// and the right-aligned model status bar.
@@ -252,6 +263,7 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
     let mut options: Vec<DialogOption> = Vec::new();
     let mut selected: Option<usize> = None;
     let mut saw_footer = false;
+    let mut saw_menu_hint = false;
     let mut preamble = 0usize;
     let synthetic_question = synthetic.is_some();
     let scan_from = if synthetic_question { q } else { q + 1 };
@@ -271,6 +283,7 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
         }
         if is_antigravity_live_footer(line) {
             saw_footer = true;
+            saw_menu_hint |= is_antigravity_menu_hint(line);
             continue;
         }
         if is_antigravity_tail_furniture(line) {
@@ -303,9 +316,13 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
         last.text.push(' ');
         last.text.push_str(line.trim());
     }
-    if options.len() < 2 || !saw_footer {
+    // `saw_footer` alone is not evidence of a menu: it is also true of the "esc to cancel" row
+    // drawn under a running turn, which is how a prompt echo plus the first lines of an answer
+    // came to render as answerable chips and disable the composer mid-turn.
+    if options.len() < 2 || !saw_menu_hint {
         return None;
     }
+    let _ = saw_footer;
     // The usage-limit menu is the auto-continue watcher's, not a permission ask.
     if options
         .iter()
@@ -1494,6 +1511,54 @@ Do you want to proceed?
         assert_eq!(detect_active_spinner(pane), None);
     }
 
+    /// The operator could not type while a turn was running: Antigravity's prompt echo plus the
+    /// first lines of its answer rendered as three answerable chips, so the composer was disabled
+    /// with "Answer the prompt first". The pane is mid turn, so "esc to cancel" is on screen, and
+    /// that alone used to satisfy the footer requirement. A real menu prints its navigation hints;
+    /// a running turn does not.
+    #[test]
+    fn antigravity_answer_lines_mid_turn_are_not_an_answerable_dialog() {
+        let pane = include_str!("fixtures/antigravity_suggestion_chips.txt");
+        assert_eq!(
+            detect_dialog(pane),
+            None,
+            "prompt echo and answer read as a dialog"
+        );
+        assert_eq!(detect_pending_prompt(pane), None);
+        // The frame is still a running turn, which must keep working.
+        assert!(
+            detect_active_spinner(pane).is_some(),
+            "mid turn should still read as running"
+        );
+    }
+
+    /// What separates a real Antigravity prompt from that frame: both shipped dialogs print
+    /// "Navigate" key hints under their options. Neither ordinary output nor a running turn does.
+    #[test]
+    fn real_antigravity_dialogs_are_distinguished_by_their_navigate_hints() {
+        for (name, pane) in [
+            (
+                "permission",
+                include_str!("fixtures/antigravity_permission_dialog.txt"),
+            ),
+            (
+                "trust",
+                include_str!("fixtures/antigravity_trust_dialog.txt"),
+            ),
+        ] {
+            let dialog = detect_dialog(pane).unwrap_or_else(|| panic!("{name} no longer detected"));
+            assert!(dialog.options.len() >= 2, "{name}");
+            assert!(
+                pane.lines().any(is_antigravity_menu_hint),
+                "{name} fixture should carry the hint the detector now requires"
+            );
+        }
+        // The hint is specific: a running turn's cancel row must not stand in for it.
+        assert!(!is_antigravity_menu_hint(
+            "esc to cancel                 Gemini 3.8 Flash · high"
+        ));
+        assert!(is_antigravity_menu_hint("  ↑/↓ Navigate · enter Confirm"));
+    }
     /// Menu navigation hints must not make an active permission prompt look like scrollback.
     #[test]
     fn antigravity_permission_dialog_is_a_pending_prompt() {

@@ -345,14 +345,26 @@ impl ConversationStream {
             .rev()
             .find(|i| i.kind.as_deref() == Some("assistant") && !i.text.trim().is_empty())
         {
+            // `terminal_block` is the preview for every kind whose pane we cannot parse into
+            // messages, and it carries the whole visible pane. It needs this strip more than an
+            // assistant preview does, not less: without it the excerpt repeats, verbatim, text
+            // that is already seated as durable rows above it.
             for item in &mut live {
-                if item.kind.as_deref() == Some("assistant") {
+                if matches!(
+                    item.kind.as_deref(),
+                    Some("assistant") | Some("terminal_block")
+                ) {
                     if let Some(end) = prior_answer_end(&item.text, &answer.text) {
                         item.text = item.text[end..].trim().to_string();
                     }
                 }
             }
-            live.retain(|i| i.kind.as_deref() != Some("assistant") || !i.text.is_empty());
+            live.retain(|i| {
+                !matches!(
+                    i.kind.as_deref(),
+                    Some("assistant") | Some("terminal_block")
+                ) || !i.text.is_empty()
+            });
         }
         for mut row in final_rows {
             let Some(key) = row.id.clone() else {
@@ -756,6 +768,80 @@ mod tests {
             }
         }
     }
+
+    /// An opaque `terminal_block` preview is the whole visible pane, so it repeats answers that
+    /// are already seated as durable rows above it. Antigravity showed this directly: the raw
+    /// block under the message rows carried the same text again.
+    #[test]
+    fn an_opaque_preview_does_not_repeat_an_answer_already_seated_above_it() {
+        let mut stream = ConversationStream::default();
+        let answer = "The tide rolls in with steady grace, erasing footsteps from the place.";
+        let mut durable = TranscriptItem::new("assistant", answer, None);
+        durable.id = Some("/db:1".into());
+        stream.update(vec![durable.clone()], Vec::new(), false);
+        // The pane still shows that answer, followed by the next turn's opening line.
+        let pane = format!("{answer}\nA second line the transcript does not have yet.");
+        let mut live = TranscriptItem::new("terminal_block", pane, None);
+        live.id = None;
+        let update = stream.update(vec![durable], vec![live], true);
+        let preview = update
+            .items
+            .iter()
+            .find(|i| i.kind.as_deref() == Some("terminal_block"))
+            .expect("the new text still previews");
+        assert!(
+            !preview.text.contains("steady grace"),
+            "preview repeats a seated answer: {:?}",
+            preview.text
+        );
+        assert!(preview.text.contains("A second line"));
+    }
+
+    /// PARKED REPRODUCTION of the OpenCode terminal-excerpt defect, deliberately failing.
+    ///
+    /// Traced on lane-81-4: every `chat_open` resolved `source=durable`, so binding is not
+    /// involved. When the durable row lands BEFORE the pane preview is captured (OpenCode
+    /// flushed while the pane was still painting, or the WAL fingerprint moved first), the
+    /// pairing at the top of `update` runs against an empty `pending` and consumes nothing.
+    /// The preview is then seated afterwards with no durable row left to claim it, and it
+    /// stays as a "Terminal excerpt" row with speaker "terminal" for the rest of the session.
+    ///
+    /// The reverse order works and is covered by
+    /// `partial_updates_and_final_replace_one_identity_without_resurrection`. Run with
+    /// `--ignored` to see the defect; it is parked, not fixed, because the correct rule is a
+    /// content-redundancy test and delaying the preview instead would reintroduce the blank
+    /// wait the conversation view exists to avoid.
+    #[test]
+    #[ignore]
+    fn opencode_durable_before_preview_orphans_the_excerpt_unfixed() {
+        let pane = "  write a poem\n\n     Code compiles, tests pass green,\n     Deploy succeeds, the pipeline clean.\n\n  Build - Nemotron";
+        let durable = |n: usize| -> Vec<TranscriptItem> {
+            (0..n)
+                .map(|i| {
+                    let kind = if i % 2 == 0 { "user" } else { "assistant" };
+                    let mut it = TranscriptItem::new(kind, format!("durable row {i}"), None);
+                    it.id = Some(format!("/db:msg{i}"));
+                    it
+                })
+                .collect()
+        };
+        let mut stream = ConversationStream::default();
+        stream.update(durable(17), Vec::new(), false);
+        // The durable row lands first; `pending` is empty so nothing pairs with it.
+        stream.update(durable(19), Vec::new(), true);
+        // Only now is the pane captured, showing the same reply.
+        stream.update(durable(19), pane_items("opencode", pane), true);
+        let quiet = stream.update(durable(19), pane_items("opencode", pane), false);
+        assert!(
+            !quiet
+                .items
+                .iter()
+                .chain(stream.last_live.iter())
+                .any(|i| i.kind.as_deref() == Some("terminal_block")),
+            "a terminal excerpt outlived the durable rows that already cover it"
+        );
+    }
+
     #[test]
     fn dialogs_clear_and_unknown_panes_remain_readable() {
         let mut stream = ConversationStream::default();
