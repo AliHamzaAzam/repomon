@@ -28,6 +28,10 @@ typography:
     fontFamily: "var(--font-mono)"
     fontSize: "10px"
     lineHeight: 1.5
+  caption:
+    fontFamily: "var(--font-sans)"
+    fontSize: "11px"
+    lineHeight: 1.5
 components:
   button-primary:
     backgroundColor: "{colors.signal}"
@@ -81,6 +85,8 @@ Neutral: `background` grounds the workspace, `surface` holds controls and pane c
 Use the existing `--font-sans` system stack for interface text and transcript prose, and `--font-mono` for branches, timestamps, model metadata, tool output, and terminal content. No display scale is introduced.
 
 Pane titles and controls are compact; repository names use semibold text, accepted home headlines use the slightly larger body treatment, and branch fallbacks use muted mono. Transcript prose has more line spacing than operational chrome. The ledger gutter stacks time above a short speaker label; message model metadata is available in the speaker tooltip. The latest observed model appears in the composer. Its button opens the agent's native model controls in the same mounted terminal, with Back to chat returning to the preserved draft and transcript.
+
+A muted sans caption step (11px) sits between metadata and body for compact secondary chrome that is not mono: the Latest output pill, the pagination boundary labels, the composer's observed agent/model name, and attachment chip filenames. These predate the conversation layout rework and stay as-is rather than moving to the body or metadata step, since either would change their established, still-correct visual weight.
 
 **The Identity Rule.** Home leads with the repository, then the accepted headline or branch fallback. Repeated repository/title pairs retain the lane identifier.
 

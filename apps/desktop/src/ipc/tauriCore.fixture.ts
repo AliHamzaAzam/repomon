@@ -286,7 +286,9 @@ const defectRepo = repo(505, "repomind");
 // note and the daemon's deliberate terminal_block-from-capture item are what's on screen.
 // "antigravity" models one of the daemon's four scanned kinds rendering an ordinary transcript,
 // the state the operator's broken capture should reach once C1 round 5's daemon half lands.
-const scenarioAgent = scenario === "no-source" ? "hermes" : scenario === "antigravity" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex";
+// ?agent= overrides the scenario's own default kind, for evidence gathering across every
+// spawnable kind (e.g. chat command routing) without a scenario per kind.
+const scenarioAgent = query.get("agent") ?? (scenario === "no-source" ? "hermes" : scenario === "antigravity" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex");
 // "agentsDemo" adds a second, non-tmux (external) session beside the primary one, so a single
 // conversation screenshot can show both the sidebar's interactive row and its inert counterpart
 // side by side. "spawn-loading" strips the lane down to no agent at all: that is the real,

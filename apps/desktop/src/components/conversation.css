@@ -29,7 +29,9 @@
 .conversation-gutter { grid-column:1; grid-row:1; }
 .conversation-user .conversation-body { justify-self:end; max-width:90%; }
 .conversation-user .conversation-message { background:var(--raised); padding:10px 14px; }
-.conversation-user .conversation-gutter { grid-column:3; text-align:left; }
+/* Mirrors the assistant gutter: text flushes to the column's outer edge (right, here), the same
+   distance from the message body that the agent/time label keeps on the other side. */
+.conversation-user .conversation-gutter { grid-column:3; text-align:right; }
 .conversation-body blockquote { padding:12px 16px; background:var(--surface); border:1px solid var(--line); }
 .conversation-excerpt-toggle { display:flex; align-items:center; gap:8px; padding:5px 0; color:var(--muted); font-size:12px; text-align:left; }
 .conversation-excerpt-toggle:hover { color:var(--foreground); }
