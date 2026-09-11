@@ -3,6 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon, type ActivitySnapshot, type TranscriptTarget, type TranscriptUpdate } from "../ipc/rpc";
 import { getCachedTranscriptPage, setCachedTranscriptPage } from "./transcriptCache";
+import { markChatLatency } from "../ipc/chatLatency";
 
 export interface ConversationRow { key: string; item: TranscriptItem; fallback: boolean; paneExcerpt?: boolean }
 const KINDS = new Set(["user", "assistant", "tool_call", "dialog", "status", "terminal_block", "mail"]);
@@ -137,6 +138,9 @@ export function createTranscript(target: () => TranscriptTarget | null) {
     const identity = JSON.stringify(params);
     const retained = historyTarget === identity;
     if (!retained) {
+      // Chat-mode first-open latency breakdown (round 9): a genuinely new pane identity, not a
+      // reconnect retry of one already open.
+      markChatLatency("pane_mount", params);
       historyTarget = identity;
       paged = false;
       // A pane opened for the first time this mount still might not be the first time this exact
@@ -164,15 +168,22 @@ export function createTranscript(target: () => TranscriptTarget | null) {
     lifecycle = lifecycle.catch(() => undefined).then(async () => {
       if (disposed) return;
       try {
+        // Chat-mode first-open latency breakdown (round 9): timestamps either side of the two
+        // calls this pane's first content is gated behind, plus the moment each resolves.
+        const subscribeStart = performance.now();
         unsubscribe = await subscribeDaemon((event) => {
           if (disposed || event.method !== "event.agent.transcript") return;
           const value = event.params as TranscriptUpdate;
           if (!value || value.lane_id !== params.lane_id || value.window !== params.window || !Array.isArray(value.items)) return;
           if (!initialized) buffered.push(value); else update(value);
         });
+        markChatLatency("subscribe_daemon_resolved", params, performance.now() - subscribeStart);
         if (disposed) { unsubscribe(); return; }
         try {
+          markChatLatency("transcript_watch_issued", params);
+          const watchStart = performance.now();
           const page = await daemonCall("agent.transcript_watch", { ...params, on: true });
+          markChatLatency("transcript_watch_resolved", params, performance.now() - watchStart);
           if (disposed || run !== epoch) return;
           if (!page) throw new Error("The transcript watch returned no page. Open terminal or retry.");
           const incoming = page.items.map((item, index) => transcriptRow(item, `page:latest:${index}`));

@@ -14,6 +14,7 @@ import { attachmentTextParts } from "./attachmentText";
 import { statusRowsFor } from "../stores/agentViews";
 import { formatTokens } from "./usageMetrics";
 import { isAgentCommand, modelCommand, nativeAgentCommand } from "./agentCommands";
+import { markChatLatency } from "../ipc/chatLatency";
 import "./conversation.css";
 
 // Session-level activity ("Whisking... (33s, 1.1k tokens)"), distinct from the per-message
@@ -226,6 +227,15 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   const sourceNote = createMemo(() => transcript.rows().find((row) => row.item.status_kind === "source_unavailable")?.item.text);
   const ledgerRows = createMemo(() => visibleRows().filter((row) => !pendingKeys().has(row.key) && row.item.status_kind !== "source_unavailable"));
   const work = createMemo(() => groupTurnWork(ledgerRows()));
+  // Chat-mode first-open latency breakdown (round 9): the last of the six marks - the moment
+  // real content actually lands in the ledger, not just the moment the data arrived. Fires once
+  // per mount; a live stream adding more rows afterward isn't a second "first" anything.
+  let markedFirstContent = false;
+  createEffect(() => {
+    if (markedFirstContent || ledgerRows().length === 0) return;
+    markedFirstContent = true;
+    markChatLatency("first_content_visible", props.target);
+  });
   const model = () => [...transcript.rows()].reverse().find((row) => row.item.model)?.item.model;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);

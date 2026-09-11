@@ -4,6 +4,7 @@ mod boot;
 mod cli;
 mod connection;
 mod control;
+mod diagnostics;
 mod ipc;
 mod state;
 mod terminal;
@@ -67,6 +68,7 @@ pub fn run() {
             control::daemon_stop,
             control::daemon_start,
             control::daemon_restart,
+            diagnostics::record_chat_latency_event,
             ipc::daemon_call,
             ipc::daemon_subscribe,
             terminal::term_watch,

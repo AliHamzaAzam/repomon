@@ -32,6 +32,9 @@ vi.mock("../ipc/rpc", async () => {
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
+const markChatLatencyMock = vi.hoisted(() => vi.fn());
+vi.mock("../ipc/chatLatency", () => ({ markChatLatency: (...args: unknown[]) => markChatLatencyMock(...args) }));
+
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
@@ -116,6 +119,7 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", vi.fn());
   watchTerminalMock.mockReset();
   daemonCallMock.mockClear();
+  markChatLatencyMock.mockClear();
   terminalInstances.splice(0);
 });
 
@@ -586,6 +590,26 @@ describe("Terminal / Chat", () => {
     unmount();
     await flushMicrotasks();
     expect(stopWatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("round 9: marks chat_clicked with the lane/window on the click that switches into Chat, not on the click back to Terminal", async () => {
+    watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "agent.capture") return { content: "" };
+      if (method === "agent.prompt") return { dialog: null };
+      if (method === "agent.transcript_watch") return { items: [], next_before: null };
+      return null;
+    });
+    render(() => <TerminalPane laneId={11} window="lane-11" label="codex" renderer="dom" visible focused />);
+    await flushMicrotasks();
+    expect(markChatLatencyMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    expect(markChatLatencyMock).toHaveBeenCalledWith("chat_clicked", { lane_id: 11, window: "lane-11" });
+    markChatLatencyMock.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await flushMicrotasks();
+    expect(markChatLatencyMock).not.toHaveBeenCalledWith("chat_clicked", expect.anything());
   });
 });
 

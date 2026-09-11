@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 
 import { daemonCall } from "../ipc/rpc";
+import { markChatLatency } from "../ipc/chatLatency";
 import type { ActionsStore } from "../stores/actions";
 import type { EditorStore } from "../stores/editor";
 import type { FleetStore } from "../stores/fleet";
@@ -31,7 +32,17 @@ import {
   IconTerminal,
 } from "./icons";
 
-const TerminalPane = lazy(() => import("./TerminalPane"));
+// Chat-mode first-open latency breakdown (round 9): a first-ever pane render has to fetch and
+// evaluate this chunk (it carries ConversationPane too), a real one-time cost worth capturing
+// alongside the rest of the breakdown. lazy() only calls this once per app lifetime; every pane
+// after the first pays nothing.
+const TerminalPane = lazy(() => {
+  const start = performance.now();
+  return import("./TerminalPane").then((mod) => {
+    markChatLatency("terminal_pane_chunk_resolved", undefined, performance.now() - start);
+    return mod;
+  });
+});
 // Used only until a live xterm reports its authoritative minimum height.
 const MULTITASK_FALLBACK_ROW_HEIGHT_PX = 224;
 

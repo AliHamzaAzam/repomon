@@ -1,13 +1,15 @@
-import { createRoot } from "solid-js";
+import { createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
+import { markChatLatency } from "../ipc/chatLatency";
 import { getCachedTranscriptPage, resetTranscriptCacheForTests } from "./transcriptCache";
 import { createTranscript, orderRows, transcriptRow, type ConversationRow } from "./transcript";
 
 vi.mock("../ipc/rpc", () => ({ daemonCall: vi.fn(), subscribeDaemon: vi.fn() }));
+vi.mock("../ipc/chatLatency", () => ({ markChatLatency: vi.fn() }));
 
-beforeEach(() => resetTranscriptCacheForTests());
+beforeEach(() => { resetTranscriptCacheForTests(); vi.mocked(markChatLatency).mockClear(); });
 
 const row = (id: string): ConversationRow => transcriptRow({ id, kind: "assistant", role: "assistant", text: id, at: null }, id);
 
@@ -152,5 +154,49 @@ describe("createTranscript, end to end", () => {
     expect(unresolved.transcript.rows().map((r) => r.item.text)).toEqual(["$ codex\nWaiting for input.\n› "]);
     expect(unresolved.transcript.rows().every((r) => r.paneExcerpt)).toBe(true);
     unresolved.dispose();
+  });
+});
+
+describe("chat-mode first-open latency breakdown (round 9)", () => {
+  it("marks pane_mount, subscribe_daemon_resolved, and both transcript_watch marks, in order, for a genuinely new pane", async () => {
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as { on: boolean }).on
+        ? { items: [{ id: "a1", kind: "assistant", role: "assistant", text: "Answer", at: null }], next_before: null }
+        : null;
+      return null;
+    });
+    const { dispose } = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 9, window: "lane-9" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const labels = vi.mocked(markChatLatency).mock.calls.map(([label]) => label);
+    expect(labels).toEqual(["pane_mount", "subscribe_daemon_resolved", "transcript_watch_issued", "transcript_watch_resolved"]);
+    for (const call of vi.mocked(markChatLatency).mock.calls) {
+      expect(call[1]).toEqual({ lane_id: 9, window: "lane-9" });
+    }
+    const resolvedCall = vi.mocked(markChatLatency).mock.calls.find(([label]) => label === "transcript_watch_resolved")!;
+    expect(typeof resolvedCall[2]).toBe("number");
+    dispose();
+  });
+
+  it("does not mark pane_mount again when the effect re-runs for the same retained identity", async () => {
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => (
+      method === "agent.transcript_watch" && (args[0] as { on: boolean }).on ? { items: [], next_before: null } : null
+    ));
+    const [trigger, setTrigger] = createSignal(0);
+    // Reads a signal but always returns the same logical identity, so the effect re-runs
+    // (something a reconnect can genuinely do) without this being a new pane.
+    const target = () => { trigger(); return { lane_id: 9, window: "lane-9" }; };
+    const { dispose } = createRoot((dispose) => ({ transcript: createTranscript(target), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(markChatLatency).mock.calls.map(([label]) => label)).toContain("pane_mount");
+    vi.mocked(markChatLatency).mockClear();
+    setTrigger(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(markChatLatency).mock.calls.map(([label]) => label)).not.toContain("pane_mount");
+    dispose();
   });
 });

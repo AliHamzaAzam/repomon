@@ -40,6 +40,7 @@ import { matchChord } from "../keymap";
 import { IconArrowDown, IconArrowUp, IconClose, IconSearch } from "./icons";
 import { multitaskRowFloor } from "./terminalMetrics";
 import { findPathRefs, isMacPlatform } from "./terminalPathLinks";
+import { markChatLatency } from "../ipc/chatLatency";
 
 interface TerminalPaneProps extends TerminalTarget {
   label: string;
@@ -223,6 +224,7 @@ export default function TerminalPane(props: TerminalPaneProps) {
     requestAnimationFrame(() => pane?.querySelector<HTMLTextAreaElement>(".conversation-compose textarea")?.focus());
   }
   const setView = (value: AgentView | null) => {
+    if (value === "conversation") markChatLatency("chat_clicked", { lane_id: props.laneId, window: props.window });
     setCommand(null);
     setFinding(false);
     setViewError(null);

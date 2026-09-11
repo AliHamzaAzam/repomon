@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "../ipc/rpc";
 import type { TranscriptItem } from "../bindings";
 import { daemonCall, subscribeDaemon } from "../ipc/rpc";
+import { markChatLatency } from "../ipc/chatLatency";
 import { resetTranscriptCacheForTests } from "../stores/transcriptCache";
 import ConversationPane, { activityLabel, dialogSummary, groupTurnWork } from "./ConversationPane";
 vi.mock("../ipc/rpc", () => ({ daemonCall:vi.fn(), subscribeDaemon:vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl:vi.fn() }));
+vi.mock("../ipc/chatLatency", () => ({ markChatLatency:vi.fn() }));
 let emit: (event: DaemonEvent) => void;
 let items: TranscriptItem[];
 const target = { lane_id:7, window:"lane-7/1", session_id:"s7", kind:"codex" };
@@ -699,4 +701,20 @@ it("reveals agent errors at normal detail", async () => {
   mount();
   await screen.findByText("Provider is unavailable. Choose another model.");
   expect(screen.getByRole("button",{name:/Agent error/})).toHaveAttribute("aria-expanded","true");
+});
+
+describe("chat-mode first-open latency breakdown (round 9)", () => {
+  it("marks first_content_visible exactly once, when the ledger first has a row to show", async () => {
+    items = [];
+    mount();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(markChatLatency).not.toHaveBeenCalledWith("first_content_visible", expect.anything());
+    update([row("a1", "The first real reply")]);
+    await screen.findByText("The first real reply");
+    expect(markChatLatency).toHaveBeenCalledWith("first_content_visible", target);
+    expect(vi.mocked(markChatLatency).mock.calls.filter(([label]) => label === "first_content_visible")).toHaveLength(1);
+    update([row("a2", "A second reply, not a second first")]);
+    await screen.findByText("A second reply, not a second first");
+    expect(vi.mocked(markChatLatency).mock.calls.filter(([label]) => label === "first_content_visible")).toHaveLength(1);
+  });
 });
