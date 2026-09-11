@@ -619,6 +619,9 @@ it("reuses the mounted terminal for command controls and returns to the same cha
   daemonCallMock.mockImplementation(async (method: string) => {
     if (method === "agent.prompt") return {dialog:null};
     if (method === "agent.transcript_watch") return {items:[],next_before:null};
+    // No models in the catalog: the model chip cannot offer a native panel, so it honestly
+    // falls back to the existing terminal route instead of guessing at a model list.
+    if (method === "agent.command_catalog") return {commands:[],models:[],model_command:"/model"};
     return null;
   });
   const {container} = render(() => <TerminalPane laneId={7} window="lane-7-1" label="Claude" visible fleet={{lanes:()=>[{id:7,repo:{id:1,name:"fixture"},worktree:{branch:"main",name:"main",path:"/fixture"},state:{dirty:{staged:0,unstaged:0,untracked:0},ahead:0,behind:0},agent_sessions:[{tmux_window:"lane-7-1",agent:"claude-code",status:"idle"}]}]} as unknown as FleetStore} />);

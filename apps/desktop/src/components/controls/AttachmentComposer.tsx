@@ -1,8 +1,12 @@
-import { For, Show, createEffect, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { IconArrowUp, IconChevronDown, IconPlus } from "../icons";
 import AttachmentChip, { attachmentFromPath, isImageAttachment, type ChatAttachment } from "./AttachmentChip";
+import ModelPanel from "./ModelPanel";
+import SlashPalette from "./SlashPalette";
+import { bareAlias } from "../agentCommands";
+import type { CatalogCommand, CommandCatalog } from "../../ipc/rpc";
 
 export type { ChatAttachment } from "./AttachmentChip";
 // Claude TUI style: attaching an image drops a friendly [Image #N] marker into the draft at the
@@ -45,10 +49,23 @@ export function attachmentPrompt(text: string, files: ChatAttachment[]): string 
   }
   return [body.trim(), ...trailing.map((file) => `Attached file: ${JSON.stringify(file.path)}`)].filter(Boolean).join("\n\n");
 }
+// A bare "/" as the first character opens the palette; anything with whitespace after it is no
+// longer a single in-progress command token (an argument, or an ordinary sentence that happens to
+// contain a slash), so the palette closes on its own the moment that happens.
+function paletteQueryOf(text: string): string | null {
+  return /^\/[^\s]*$/.test(text) ? text.slice(1) : null;
+}
+function matchesQuery(command: CatalogCommand, query: string): boolean {
+  const lower = query.toLowerCase();
+  return command.name.toLowerCase().startsWith(lower) || bareAlias(command.name).toLowerCase().startsWith(lower);
+}
 export default function AttachmentComposer(props: {
   kind: string; model?: string; disabled: boolean; busy: boolean;
   onSend: (text: string) => Promise<boolean>;
-  onModel?: () => void;
+  catalog: CommandCatalog;
+  hasTerminalFallback: boolean;
+  onSelectModel: (id: string) => void;
+  onModelFallback: () => void;
 }) {
   const [text, setText] = createSignal("");
   const [files, setFiles] = createSignal<ChatAttachment[]>([]);
@@ -60,8 +77,12 @@ export default function AttachmentComposer(props: {
   // press. Local to this mount, like the draft itself - a fresh pane starts with empty history.
   const [history, setHistory] = createSignal<string[]>([]);
   const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
+  const [modelOpen, setModelOpen] = createSignal(false);
+  const [paletteDismissed, setPaletteDismissed] = createSignal(false);
+  const [highlightedIndex, setHighlightedIndex] = createSignal(0);
   let dragDepth = 0;
   let field!: HTMLTextAreaElement;
+  let modelButtonRef!: HTMLButtonElement;
   const resize = () => {
     if (!field) return;
     field.style.height = "0px";
@@ -70,6 +91,18 @@ export default function AttachmentComposer(props: {
   createEffect(() => { text(); resize(); });
   onMount(resize);
   const locked = () => props.disabled || props.busy || staging();
+
+  const paletteQuery = createMemo(() => paletteQueryOf(text()));
+  const filteredCommands = createMemo(() => {
+    const query = paletteQuery();
+    if (query === null) return [];
+    return query ? props.catalog.commands.filter((command) => matchesQuery(command, query)) : props.catalog.commands;
+  });
+  // The palette owns the arrows only while it is genuinely open; dismissing it (Escape) or
+  // opening the model panel hands them straight back to history, with no dead middle state.
+  const paletteOpen = () => paletteQuery() !== null && !paletteDismissed() && !modelOpen();
+  createEffect(() => { filteredCommands(); setHighlightedIndex(0); });
+
   const add = (attachments: ChatAttachment[]) => {
     const fresh = attachments.filter((file) => !files().some((old) => old.path === file.path));
     if (!fresh.length) return;
@@ -157,6 +190,11 @@ export default function AttachmentComposer(props: {
       setText(""); setFiles([]); setError(undefined); setHistoryIndex(null);
     }
   }
+  function runPaletteCommand(command: CatalogCommand) {
+    setPaletteDismissed(true);
+    setText(`/${command.name}`);
+    void send();
+  }
   function recallOlder() {
     const items = history();
     if (!items.length) return;
@@ -173,14 +211,34 @@ export default function AttachmentComposer(props: {
     setHistoryIndex(current + 1);
     setText(items[current + 1]);
   }
+  function onModelChipClick() {
+    if (locked()) return;
+    if (props.catalog.models.length > 0) { setModelOpen(true); return; }
+    if (props.hasTerminalFallback) props.onModelFallback();
+  }
   return <form class="conversation-compose" onSubmit={(event) => { event.preventDefault(); void send(); }}>
     <div class="conversation-reply rounded" classList={{ "is-drag-target": dragging() }}
       onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
       <Show when={dragging()}><div class="conversation-reply-drop" aria-hidden="true">Drop to attach</div></Show>
       <textarea ref={field} aria-label={`Reply to ${props.kind}`} placeholder={props.disabled ? "Answer the prompt first" : "Ask a question or describe a change…"} disabled={props.disabled || props.busy} value={text()} rows={1}
         onPaste={(event) => paste(event)}
-        onInput={(event) => { setText(event.currentTarget.value); if (historyIndex() !== null) setHistoryIndex(null); }}
+        onInput={(event) => { setText(event.currentTarget.value); if (historyIndex() !== null) setHistoryIndex(null); setPaletteDismissed(false); }}
         onKeyDown={(event) => {
+          if (event.key === "Escape" && paletteOpen()) { event.preventDefault(); setPaletteDismissed(true); return; }
+          if (event.key === "Escape" && modelOpen()) { event.preventDefault(); setModelOpen(false); return; }
+          if (paletteOpen() && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+            const count = filteredCommands().length;
+            if (event.key === "ArrowDown") { event.preventDefault(); setHighlightedIndex((i) => count ? (i + 1) % count : 0); return; }
+            if (event.key === "ArrowUp") { event.preventDefault(); setHighlightedIndex((i) => count ? (i - 1 + count) % count : 0); return; }
+            // Nothing to highlight (an empty catalog, or a query that matches nothing): fall
+            // through to the normal Enter-send below instead of silently eating the keystroke -
+            // resolveCommand there decides one-shot vs. the terminal fallback on its own.
+            if (event.key === "Enter" && !event.isComposing && filteredCommands().length > 0) {
+              event.preventDefault();
+              runPaletteCommand(filteredCommands()[highlightedIndex()]);
+              return;
+            }
+          }
           if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); return; }
           if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
           if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
@@ -197,14 +255,24 @@ export default function AttachmentComposer(props: {
             recallNewer();
           }
         }} />
+      <Show when={paletteOpen() && field}>
+        <SlashPalette
+          commands={filteredCommands()}
+          query={paletteQuery() ?? ""}
+          highlightedIndex={highlightedIndex()}
+          anchor={field}
+          onHighlight={setHighlightedIndex}
+          onRun={runPaletteCommand}
+        />
+      </Show>
       <div class="composer-actions">
         <div class="composer-leading">
         <button class="focus-ring rounded composer-attach" type="button" aria-label="Attach images or files" title="Attach images or files. You can also paste an image." disabled={locked()} onClick={() => void pick()}><IconPlus size={16} /></button>
         <Show when={files().length}><ul class="attachment-list" aria-label="Attachments"><For each={files()}>{(file) => <li><AttachmentChip file={file} disabled={locked()} onRemove={() => removeFile(file)} /></li>}</For></ul></Show>
         </div>
         <div class="composer-trailing">
-        <Show when={props.onModel} fallback={<span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>}>
-          <button type="button" class="composer-model focus-ring rounded" aria-label={`Change ${props.kind} model`} title={props.model ?? "Choose a model"} disabled={locked()} onClick={props.onModel}>
+        <Show when={props.catalog.model_command} fallback={<span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>}>
+          <button ref={modelButtonRef} type="button" class="composer-model focus-ring rounded" aria-label={`Change ${props.kind} model`} aria-haspopup="menu" aria-expanded={modelOpen()} title={props.model ?? "Choose a model"} disabled={locked()} onClick={onModelChipClick}>
             <span class="composer-agent">{props.model ?? props.kind}</span><IconChevronDown size={12} />
           </button>
         </Show>
@@ -212,6 +280,9 @@ export default function AttachmentComposer(props: {
         </div>
       </div>
     </div>
+    <Show when={modelOpen() && modelButtonRef}>
+      <ModelPanel models={props.catalog.models} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
+    </Show>
     <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>
     <Show when={error()}><p class="text-xs text-fault" role="alert">{error()}</p></Show>
   </form>;

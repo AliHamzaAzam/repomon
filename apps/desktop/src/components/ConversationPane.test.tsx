@@ -26,6 +26,7 @@ beforeEach(() => {
     if (method === "agent.transcript_page") return { items:[row("old:1", "Earlier history")], next_before:40 };
     if (method === "agent.capture") return { content:"line one\nline two\nline three" };
     if (method === "agent.prompt") return { dialog:null };
+    if (method === "agent.command_catalog") return { commands:[{name:"model",description:"",source:"builtin",one_shot:true}], models:[], model_command:"/model" };
     return null;
   });
 });
@@ -337,6 +338,26 @@ describe("pending queued/sent user turns", () => {
     expect(seated?.textContent).not.toContain("Queued");
     expect(seated?.textContent).not.toContain("Sent");
     expect(screen.queryByText(/Writing/)).not.toBeInTheDocument();
+  });
+  it("clamps a long pending message to its own height budget with an explicit toggle, not a nested scrollbar", async () => {
+    items = [{ id:"u1", kind:"user", role:"user", text:"A very long queued message\n".repeat(20), at:null, partial:true }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{u1:"queued"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Queued");
+    const message = result.container.querySelector(".conversation-pending-queue .conversation-message") as HTMLElement;
+    expect(message).not.toBeNull();
+    expect(message).not.toHaveStyle({ overflow: "auto" });
+    expect(message.className).toContain("conversation-message-clamped");
+    stubScrollMetrics(message, { scrollHeight: 400, clientHeight: 128, scrollTop: 0 });
+    fireEvent(window, new Event("resize"));
+    const toggle = await screen.findByRole("button", { name: /Show more/ });
+    fireEvent.click(toggle);
+    expect(await screen.findByRole("button", { name: /Show less/ })).toBeInTheDocument();
+    expect(message.className).not.toContain("conversation-message-clamped");
   });
 });
 
@@ -661,24 +682,33 @@ describe("structured fleet mail", () => {
 });
 
 
-it.each(["claude-code", "codex", "antigravity", "hermes", "opencode", "cursor", "aider"])("opens %s native commands without creating a pending chat message", async (kind) => {
+it.each(["claude-code", "codex", "antigravity", "hermes", "opencode", "cursor", "aider"])("sends %s a catalog-known one_shot command directly, never opening the terminal or creating a pending chat message", async (kind) => {
   const onCommand = vi.fn().mockResolvedValue(undefined);
   render(() => <ConversationPane target={{...target,kind}} kind={kind} visible onTerminal={vi.fn()} onCommand={onCommand} />);
   const input = screen.getByRole("textbox", { name:`Reply to ${kind}` });
   fireEvent.input(input, {target:{value:"/model"}});
   fireEvent.keyDown(input, {key:"Enter"});
-  await waitFor(() => expect(onCommand).toHaveBeenCalledWith(kind === "opencode" ? "/models" : "/model"));
-  expect(daemonCall).not.toHaveBeenCalledWith("agent.send_input", expect.anything());
+  await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.send_input", {lane_id:7, window:"lane-7/1", text:"/model", enter:true}));
+  expect(onCommand).not.toHaveBeenCalled();
   await waitFor(() => expect(input).toHaveValue(""));
   expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+});
+it("falls back to the terminal route for a command the catalog does not vouch for, never firing it blind", async () => {
+  const onCommand = vi.fn().mockResolvedValue(undefined);
+  render(() => <ConversationPane target={target} kind="codex" visible onTerminal={vi.fn()} onCommand={onCommand} />);
+  const input = screen.getByRole("textbox", { name:"Reply to codex" });
+  fireEvent.input(input, {target:{value:"/vim"}});
+  fireEvent.keyDown(input, {key:"Enter"});
+  await waitFor(() => expect(onCommand).toHaveBeenCalledWith("/vim"));
+  expect(daemonCall).not.toHaveBeenCalledWith("agent.send_input", expect.objectContaining({text:"/vim"}));
 });
 it("keeps a failed command in the composer and shows its error", async () => {
   render(() => <ConversationPane target={target} kind="codex" visible onTerminal={vi.fn()} onCommand={vi.fn().mockRejectedValue(new Error("Agent disconnected"))} />);
   const input = screen.getByRole("textbox", {name:"Reply to codex"});
-  fireEvent.input(input, {target:{value:"/model"}});
+  fireEvent.input(input, {target:{value:"/vim"}});
   fireEvent.keyDown(input, {key:"Enter"});
   await screen.findByRole("alert");
-  expect(input).toHaveValue("/model");
+  expect(input).toHaveValue("/vim");
 });
 it("places user and agent metadata beside separate message bodies", async () => {
   items = [{...row("u1","Please review this"),kind:"user",role:"user",at:"2026-09-11T12:00:00Z"},row("a1","The change is ready")];
