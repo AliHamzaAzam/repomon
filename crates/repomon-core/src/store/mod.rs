@@ -114,6 +114,24 @@ pub struct Store {
     /// FIRST-CHAT-OPEN INSTRUMENTATION. Jobs queued for the single store worker thread. Remove
     /// with the rest of `chat_open_trace` once the first-open cause is found.
     depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// STALL INSTRUMENTATION. The job the worker thread is running right now, named by the type of
+    /// its closure, which carries the `Store` method that created it.
+    running: std::sync::Arc<std::sync::Mutex<&'static str>>,
+}
+
+/// STALL INSTRUMENTATION. Reports a store call that waited longer than [`SLOW_CALL_MS`] for the
+/// single worker thread: the waiting job, its wait in milliseconds, the queue depth behind it, and
+/// the job that was running when it was enqueued. The daemon installs the writer so the file
+/// handling stays out of core.
+pub type SlowCallHook = fn(&'static str, f64, usize, &'static str);
+static SLOW_CALL_HOOK: std::sync::OnceLock<SlowCallHook> = std::sync::OnceLock::new();
+
+/// Only a wait this long is worth a line; normal use logs nothing at all.
+pub const SLOW_CALL_MS: f64 = 250.0;
+
+/// Install the slow-call reporter. The first caller wins; later calls are ignored.
+pub fn set_slow_call_hook(hook: SlowCallHook) {
+    let _ = SLOW_CALL_HOOK.set(hook);
 }
 
 impl Store {
@@ -141,6 +159,7 @@ impl Store {
         let (tx, rx) = channel::<Job>();
         let depth = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker_depth = depth.clone();
+        let running = std::sync::Arc::new(std::sync::Mutex::new("idle"));
         thread::Builder::new()
             .name("repomon-store".into())
             .spawn(move || {
@@ -165,7 +184,7 @@ impl Store {
         init_rx
             .recv()
             .map_err(|_| Error::Other("store thread exited during init".into()))??;
-        Ok(Store { tx, depth })
+        Ok(Store { tx, depth, running })
     }
 
     /// FIRST-CHAT-OPEN INSTRUMENTATION. How many jobs are waiting for the single store worker
@@ -181,11 +200,27 @@ impl Store {
         T: Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.depth
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // STALL INSTRUMENTATION. `type_name` of the closure names the method that built it, at no
+        // runtime cost; the timing is two `Instant`s on a path that already crosses a thread.
+        let label = std::any::type_name::<F>();
+        let queued = std::time::Instant::now();
+        let depth = self
+            .depth
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let running = self.running.clone();
         self.tx
             .send(Box::new(move |c| {
+                let waited = queued.elapsed().as_secs_f64() * 1000.0;
+                if waited > SLOW_CALL_MS {
+                    let ahead = *running.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(hook) = SLOW_CALL_HOOK.get() {
+                        hook(label, waited, depth, ahead);
+                    }
+                }
+                *running.lock().unwrap_or_else(|e| e.into_inner()) = label;
                 let _ = tx.send(f(c));
+                *running.lock().unwrap_or_else(|e| e.into_inner()) = "idle";
             }))
             .map_err(|_| {
                 self.depth
@@ -2945,6 +2980,54 @@ fn truncate_char_boundary(s: &str, max_chars: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// STALL INSTRUMENTATION. Every store call in the process is serialized through one worker
+    /// thread, so a single long job delays every other caller. This proves the reporter fires with
+    /// the waiting job, its wait, the depth behind it, and the job that was in front.
+    static SLOW_SEEN: std::sync::Mutex<Vec<(&'static str, f64, usize, &'static str)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    #[tokio::test]
+    async fn a_store_call_waiting_behind_a_long_job_is_reported_with_what_held_it() {
+        fn record(job: &'static str, waited: f64, depth: usize, running: &'static str) {
+            SLOW_SEEN
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((job, waited, depth, running));
+        }
+        super::set_slow_call_hook(record);
+        let store = Store::open_in_memory().unwrap();
+        // One long job, then a trivial one queued behind it while it runs.
+        let slow = store.call(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(SLOW_CALL_MS as u64 + 150));
+            Ok(())
+        });
+        // Give the worker time to pick the long job up, so the next call really queues behind it.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let waiter = store.list_lane_meta();
+        let (_, _) = tokio::join!(slow, waiter);
+        let seen = SLOW_SEEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let hit = seen
+            .iter()
+            .find(|(job, ..)| job.contains("list_lane_meta"))
+            .expect("the waiting call was not reported");
+        assert!(hit.1 > SLOW_CALL_MS, "wait {} not over threshold", hit.1);
+        assert!(hit.2 >= 1, "depth should count the queued job");
+        assert!(
+            hit.3.contains("a_store_call_waiting_behind_a_long_job") || hit.3 == "idle",
+            "running job should name what was in front, got {:?}",
+            hit.3
+        );
+        // A call on an idle store is never reported.
+        SLOW_SEEN.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        store.list_lane_meta().await.unwrap();
+        assert!(
+            SLOW_SEEN
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+    }
     use super::*;
     use crate::agent::supervision::{DialogClass, PolicyAction, PolicySource};
 

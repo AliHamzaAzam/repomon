@@ -248,6 +248,7 @@ async fn start_background_tasks(ctx: Arc<Ctx>) {
 
     // Ingest agent transcripts into the usage ledger. Self-gates per pass on `[usage] enabled`,
     // reads only files that already exist, and bounds its work per tick.
+    repomon_daemon::chat_open_trace::install();
     tokio::spawn(repomon_daemon::usage_ingest::ingest_watch(ctx.clone()));
 
     // Daily LiteLLM price refresh. Self-gates on `[usage] refresh_prices` (on by default); the
