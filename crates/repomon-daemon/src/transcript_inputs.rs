@@ -60,7 +60,7 @@ pub async fn prepare_input_from_pane(
         before: None,
         on: true,
     };
-    let source = resolve_source(ctx, &p, false).await.ok();
+    let source = resolve_source(ctx, &p, false, None).await.ok();
     let floor = source.as_ref().map_or(0, |s| {
         if matches!(s.kind.as_str(), "opencode" | "hermes") {
             chrono::Utc::now().timestamp_millis().max(0) as u64

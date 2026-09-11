@@ -199,11 +199,13 @@ impl Cache {
                 return Ok(table.clone());
             }
         }
+        let built = std::time::Instant::now();
         let table = Arc::new(
             tokio::task::spawn_blocking(move || crate::usage_ingest::build_price_table(config))
                 .await
                 .map_err(|e| e.to_string())?,
         );
+        crate::chat_open_trace::price_table(built, table.len());
         *cached = Some((key, table.clone()));
         Ok(table)
     }
@@ -334,9 +336,15 @@ impl Cache {
 }
 
 async fn source(ctx: &Arc<Ctx>, p: &Params) -> Result<Source, TranscriptError> {
-    resolve_source(ctx, p, true).await
+    resolve_source(ctx, p, true, None).await
 }
-async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source, TranscriptError> {
+async fn resolve_source(
+    ctx: &Ctx,
+    p: &Params,
+    discover: bool,
+    trace: Option<&crate::chat_open_trace::Stages>,
+) -> Result<Source, TranscriptError> {
+    let at = std::time::Instant::now();
     let cwd = ctx
         .lanes
         .focus(p.lane_id)
@@ -350,6 +358,9 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         .into_iter()
         .find(|m| m.id == p.lane_id)
         .ok_or_else(|| TranscriptError::InvalidParams("lane not found".into()))?;
+    if let Some(trace) = trace {
+        trace.store(at);
+    }
     let window = p
         .window
         .clone()
@@ -363,6 +374,7 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     }
     let backend = ctx.backend.clone();
     let target_window = window.clone();
+    let at = std::time::Instant::now();
     let (win, started, aider_windows) = tokio::task::spawn_blocking(move || {
         let started = backend.window_started_at(&target_window);
         let windows = backend.list_windows_meta().map_err(|e| e.to_string())?;
@@ -375,6 +387,9 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     })
     .await
     .map_err(|e| e.to_string())??;
+    if let Some(trace) = trace {
+        trace.windows(at);
+    }
     if p.window.is_some() && win.is_none() {
         return Err(TranscriptError::InvalidParams(
             "window is not available".into(),
@@ -444,11 +459,15 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
             "claude-code" | "codex" | "antigravity" | "opencode" | "hermes" | "aider"
         )
     {
+        let at = std::time::Instant::now();
         let known = ctx
             .store
             .conversation_source(p.lane_id, kind.clone(), session.clone(), started)
             .await
             .map_err(|e| e.to_string())?;
+        if let Some(trace) = trace {
+            trace.store(at);
+        }
         if let Some((path, session)) = known.filter(|(path, _)| PathBuf::from(path).is_file()) {
             check_window_session(p, Some(&session))?;
             ctx.transcript_cache.record_unbound(&window, None);
@@ -528,12 +547,16 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     }
     // A stale ledger row still provides a session-specific path for age validation. Do not
     // scan other sessions or provider directories when the window's source is unknown.
+    let at = std::time::Instant::now();
     let recorded = ctx
         .store
         .conversation_source(p.lane_id, kind.clone(), session.clone(), None)
         .await
         .map_err(|e| e.to_string())?
         .map(|(path, _)| PathBuf::from(path));
+    if let Some(trace) = trace {
+        trace.store(at);
+    }
     let scan_kind = kind.clone();
     let selected_session = session.clone();
     let found = tokio::task::spawn_blocking(move || {
@@ -939,11 +962,15 @@ pub async fn watch(
         .window
         .clone()
         .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+    let opened = std::time::Instant::now();
+    let stages = crate::chat_open_trace::Stages::default();
     let resolved = if p.on {
-        Some(resolve_source(ctx, &p, false).await?)
+        Some(resolve_source(ctx, &p, false, Some(&stages)).await?)
     } else {
         None
     };
+    let source_ms = opened.elapsed().as_secs_f64() * 1000.0;
+    let store_depth = ctx.store.queue_depth();
     let mut watches = sess.transcript_watches.lock().await;
     let targets: Vec<_> = watches
         .iter()
@@ -970,6 +997,7 @@ pub async fn watch(
     let mut source_cache = ctx.transcript_cache.entry(&initial_source);
     let initial_signature = fingerprint(&initial_source);
     let initial_cost_revision = source_cache.cost_revision.load(Ordering::Relaxed);
+    let paged = std::time::Instant::now();
     let mut initial = if initial_source.path.is_none() {
         let mut capture_params = p.clone();
         capture_params.kind = Some(initial_source.kind.clone());
@@ -977,6 +1005,8 @@ pub async fn watch(
     } else {
         read_page(ctx, initial_source.clone(), None).await?
     };
+    let page_ms = paged.elapsed().as_secs_f64() * 1000.0;
+    let captured = std::time::Instant::now();
     let capture_backend = ctx.backend.clone();
     let capture_window = window.clone();
     let initial_pane = tokio::task::spawn_blocking(move || {
@@ -986,6 +1016,20 @@ pub async fn watch(
     .ok()
     .and_then(Result::ok)
     .unwrap_or_default();
+    let pane_ms = captured.elapsed().as_secs_f64() * 1000.0;
+    crate::chat_open_trace::chat_open(
+        &window,
+        &initial_source.kind,
+        ctx.started.elapsed(),
+        store_depth,
+        opened,
+        source_ms,
+        &stages,
+        page_ms,
+        pane_ms,
+        initial_source.path.is_some(),
+        initial["items"].as_array().map_or(0, Vec::len),
+    );
     let initial_activity = pane_activity(&initial_source.kind, &initial_pane);
     let mut initial_rows: Vec<TranscriptItem> =
         serde_json::from_value(initial["items"].clone()).unwrap_or_default();
@@ -1039,6 +1083,7 @@ pub async fn watch(
         let mut ledger_dirty = source_cache.cost_revision.load(Ordering::Relaxed) != cost_revision;
         let mut stream_ended = false;
         let mut discovery = std::time::Instant::now() - Duration::from_secs(2);
+        let mut discovery_started = discovery;
         let mut reads =
             tokio::task::JoinSet::<(Source, Fingerprint, u64, Result<Value, String>)>::new();
         let mut discoveries: tokio::task::JoinSet<Result<Source, TranscriptError>> =
@@ -1069,6 +1114,7 @@ pub async fn watch(
                 Some(result) = discoveries.join_next(), if !discoveries.is_empty() => {
                     if let Ok(Ok(src)) = result {
                         if src != initial_source {
+                            crate::chat_open_trace::discovery(&task_window, &src.kind, discovery_started, src.path.is_some());
                             if initial_source.path.is_some() && (initial_source.path != src.path || initial_source.session != src.session) {
                                 identity_removed.extend(previous_order.iter().cloned());
                                 state = ConversationStream::default();
@@ -1105,6 +1151,7 @@ pub async fn watch(
                         let params = p.clone();
                         discoveries.spawn(async move { source(&ctx, &params).await });
                         discovery = std::time::Instant::now();
+                        discovery_started = discovery;
                     }
                     let src = initial_source.clone();
                     let kind = src.kind.clone();
