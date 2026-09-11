@@ -557,6 +557,7 @@ fn pane_mail_is_structured_without_losing_surrounding_excerpt() {
         "cursor",
         "Before the mail\n[REPOMAIL id=receipt from=operator reply_to=none] Review the changes [receipt] [END REPOMAIL]\nAfter the mail",
         "lane-1",
+        None,
     );
     assert!(
         items
@@ -704,7 +705,7 @@ async fn pane_echo_does_not_consume_pending_mail_without_provider_confirmation()
         .unwrap();
     ctx.transcript_inputs.sent(&ctx, &window, ticket);
     let src = resolve_source(&ctx, &p, false).await.unwrap();
-    let mut rows = fallback_items("hermes", envelope, &window);
+    let mut rows = fallback_items("hermes", envelope, &window, None);
     ctx.transcript_inputs.reconcile(&window, &src, &mut rows);
     assert!(!rows.iter().any(|row| row.mail.is_some()));
     let mut order = Vec::new();

@@ -6236,14 +6236,14 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
         let tmux = ctx.backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
             for (cands, probe, lane_window_count, duplicate_stamps) in stamp_batches {
-                let confirmed = if cands.iter().any(|c| c.needle.is_some()) {
+                let confirmed = if cands.iter().any(|c| !c.needles.is_empty()) {
                     let panes: Vec<(u64, String, String)> = probe
                         .iter()
                         .map(|(wid, name)| {
                             let text = tmux
                                 .capture_named(name, CaptureOpts::last(STAMP_CONFIRM_CAPTURE_LINES))
                                 .unwrap_or_default();
-                            (*wid, name.clone(), normalize_fingerprint(&text))
+                            (*wid, name.clone(), pane_haystack(&text))
                         })
                         .collect();
                     confirmed_stamps(&cands, &panes)
@@ -6699,10 +6699,10 @@ pub(crate) const VIEWPORT_OWNED_TTL: std::time::Duration = std::time::Duration::
 struct BindingCandidate {
     sid: String,
     last_activity: chrono::DateTime<chrono::Utc>,
-    /// Normalized fingerprint of the transcript's last message ([`message_fingerprint`]);
-    /// `None` (no message yet / too short) means no evidence - the candidate simply returns
+    /// Normalized pane fingerprints of the transcript's last message ([`message_needles`]);
+    /// empty (no message yet / too short) means no evidence - the candidate simply returns
     /// next tick.
-    needle: Option<String>,
+    needles: Vec<String>,
     /// The agent kind parsed from the transcript.
     kind: AgentKind,
 }
@@ -6763,6 +6763,39 @@ pub(crate) fn message_fingerprint(last_message: Option<&str>) -> Option<String> 
     }
     // Byte slicing is safe: the normalized form is pure ASCII.
     Some(n[n.len().saturating_sub(FINGERPRINT_LEN)..].to_string())
+}
+
+/// Whether this agent paints its conversation and a status sidebar as columns of one grid.
+/// OpenCode does, so the pane interleaves sidebar text between a reply's wrapped lines and the
+/// whole-message fingerprint is never a contiguous run. Measured on a live OpenCode window: the
+/// whole-message needle was absent from its own pane while every complete line was present.
+pub(crate) fn grid_columns(kind: &str) -> bool {
+    kind == "opencode"
+}
+
+/// Every needle that can identify one message on a pane. The whole message's tail always, plus
+/// each complete line for a grid agent, which stays subject to the same one-to-one session and
+/// peer-window checks as any other needle.
+pub(crate) fn message_needles(kind: &str, message: &str) -> Vec<String> {
+    let mut needles: Vec<String> = message_fingerprint(Some(message)).into_iter().collect();
+    if grid_columns(kind) {
+        for line in message
+            .lines()
+            .filter_map(|line| message_fingerprint(Some(line)))
+        {
+            if !needles.contains(&line) {
+                needles.push(line);
+            }
+        }
+    }
+    needles
+}
+
+/// A pane as the fingerprint matcher must see it. Captures carry SGR escapes (`capture-pane -e`)
+/// whose parameters are alphanumeric, so they survive normalization and splice digits into the
+/// text; remove them before normalizing or a mid-message color change breaks the match.
+pub(crate) fn pane_haystack(pane: &str) -> String {
+    normalize_fingerprint(&repomon_core::agent::text::strip_ansi(pane))
 }
 
 fn managed_session_key(window: &str) -> String {
@@ -6874,12 +6907,15 @@ fn confirmed_stamps(
     cands: &[BindingCandidate],
     panes: &[(u64, String, String)],
 ) -> Vec<(u64, String, String, AgentKind)> {
-    // Every needle↔pane hit, as (candidate index, pane index).
+    // Every candidate↔pane hit, as (candidate index, pane index). A candidate offering several
+    // needles still contributes at most one hit per pane.
     let mut hits: Vec<(usize, usize)> = Vec::new();
     for (ci, c) in cands.iter().enumerate() {
-        let Some(needle) = &c.needle else { continue };
         for (pi, (_, _, text)) in panes.iter().enumerate() {
-            if text.contains(needle.as_str()) {
+            if c.needles
+                .iter()
+                .any(|needle| text.contains(needle.as_str()))
+            {
                 hits.push((ci, pi));
             }
         }
@@ -7031,8 +7067,14 @@ fn pair_transcripts_to_windows_with_ages(
         // Nominate fresh transcripts or fingerprinted quiet transcripts for unstamped windows;
         // neither stale bindings nor fingerprint-free guesses may claim a window.
         if let Some(sid) = &summaries[si].session_id {
-            let needle = message_fingerprint(summaries[si].last_message.as_deref());
-            let nominate = is_fresh(&summaries[si]) || (has_never_bound_window && needle.is_some());
+            let needles = summaries[si]
+                .last_message
+                .as_deref()
+                .map_or_else(Vec::new, |message| {
+                    message_needles(summaries[si].kind.as_str().as_ref(), message)
+                });
+            let nominate =
+                is_fresh(&summaries[si]) || (has_never_bound_window && !needles.is_empty());
             if nominate
                 && free.iter().any(|&wi| {
                     activity_belongs_to_window(
@@ -7044,7 +7086,7 @@ fn pair_transcripts_to_windows_with_ages(
                 new_bindings.push(BindingCandidate {
                     sid: sid.clone(),
                     last_activity: summaries[si].last_activity,
-                    needle,
+                    needles,
                     kind: summaries[si].kind.clone(),
                 });
             }
@@ -10566,7 +10608,10 @@ mod tests {
         let p = pair_transcripts_to_windows(&[tsum_msg("a", t(0), msg)], &windows, t(100));
         assert_eq!(p.assignment, vec![None]);
         assert_eq!(candidate_sids(&p), vec!["a"]);
-        assert_eq!(p.new_bindings[0].needle, message_fingerprint(Some(msg)));
+        assert_eq!(
+            p.new_bindings[0].needles,
+            message_needles("claude-code", msg)
+        );
         assert_eq!(p.unpaired, vec!["lane-7".to_string()]);
     }
 
@@ -10907,7 +10952,7 @@ mod tests {
 
     /// Test-side helper mirroring the stamp task's pane check.
     fn pane_text_contains(pane: &str, needle: &str) -> bool {
-        normalize_fingerprint(pane).contains(needle)
+        pane_haystack(pane).contains(needle)
     }
 
     #[test]
@@ -10915,7 +10960,7 @@ mod tests {
         let cand = |sid: &str, msg: &str| BindingCandidate {
             last_activity: chrono::Utc::now(),
             sid: sid.into(),
-            needle: message_fingerprint(Some(msg)),
+            needles: message_needles("claude-code", msg),
             kind: AgentKind::ClaudeCode,
         };
         let a = cand("a", "fingerprint marker for agent alpha pane evidence");
@@ -10955,12 +11000,48 @@ mod tests {
         );
     }
 
+    /// The overlay's stamping pass and the chat's discovery pass must agree about what a pane
+    /// shows. OpenCode paints its reply and its status sidebar as columns of one grid, so the
+    /// sidebar lands between the reply's wrapped lines and the whole-message needle is never
+    /// contiguous; and `capture-pane -e` keeps SGR parameters, which are alphanumeric and would
+    /// otherwise be spliced into the text.
+    #[test]
+    fn grid_columns_and_color_escapes_do_not_hide_a_windows_own_reply() {
+        let reply = "Code compiles, tests pass green,\nDeploy succeeds, the pipeline clean.";
+        // Exactly the live shape: each conversation line carries a sidebar column after it.
+        let grid_pane = "     \u{1b}[38;5;244mCode compiles, tests pass green,\u{1b}[0m      \u{1b}[2m| Models\u{1b}[0m\n\
+                         \u{1b}[38;5;244mDeploy succeeds, the pipeline clean.\u{1b}[0m  \u{1b}[2m| artistry kimi\u{1b}[0m";
+        let haystack = pane_haystack(grid_pane);
+        // The whole-message needle really is absent; only the per-line needles survive the grid.
+        assert!(!haystack.contains(&message_fingerprint(Some(reply)).unwrap()));
+        let grid = |kind: AgentKind| BindingCandidate {
+            last_activity: chrono::Utc::now(),
+            sid: "ses-grid".into(),
+            needles: message_needles(kind.as_str().as_ref(), reply),
+            kind,
+        };
+        let panes = vec![(9, "lane-81-4".to_string(), haystack)];
+        assert_eq!(
+            confirmed_stamps(&[grid(AgentKind::OpenCode)], &panes)
+                .into_iter()
+                .map(|(wid, _, sid, _)| (wid, sid))
+                .collect::<Vec<_>>(),
+            vec![(9, "ses-grid".to_string())],
+        );
+        // Per-line needles stay scoped to the agents that actually paint columns.
+        assert!(confirmed_stamps(&[grid(AgentKind::ClaudeCode)], &panes).is_empty());
+        // A colour change inside one message must not break the whole-message needle either.
+        let recoloured = "\u{1b}[1mrecoloured mid message marker\u{1b}[0m alpha \u{1b}[31mbravo charlie\u{1b}[0m";
+        let plain = "recoloured mid message marker alpha bravo charlie";
+        assert!(pane_haystack(recoloured).contains(&message_fingerprint(Some(plain)).unwrap()));
+    }
+
     #[test]
     fn ambiguous_or_absent_pane_evidence_stamps_nothing() {
         let cand = |sid: &str, msg: Option<&str>| BindingCandidate {
             last_activity: chrono::Utc::now(),
             sid: sid.into(),
-            needle: message_fingerprint(msg),
+            needles: msg.map_or_else(Vec::new, |m| message_needles("claude-code", m)),
             kind: AgentKind::ClaudeCode,
         };
         let marker = "identical rotation continuation marker text";
