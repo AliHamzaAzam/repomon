@@ -172,6 +172,9 @@ pub struct Cache {
     verified: std::sync::Mutex<
         std::collections::HashMap<String, (chrono::DateTime<chrono::Utc>, Source)>,
     >,
+    /// Why each window's last discovery pass could not claim a session, so the unavailable-source
+    /// row can name this window's actual obstacle.
+    unbound: std::sync::Mutex<std::collections::HashMap<String, discovery::Unbound>>,
     #[cfg(test)]
     scans: AtomicU64,
 }
@@ -203,6 +206,28 @@ impl Cache {
         );
         *cached = Some((key, table.clone()));
         Ok(table)
+    }
+    /// The reason `window`'s last discovery pass gave up, if it has run and failed.
+    fn unbound_detail(&self, window: &str) -> Option<&'static str> {
+        self.unbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(window)
+            .map(|reason| reason.detail())
+    }
+    fn record_unbound(&self, window: &str, reason: Option<discovery::Unbound>) {
+        let mut map = self.unbound.lock().unwrap_or_else(|e| e.into_inner());
+        match reason {
+            Some(reason) => {
+                if map.len() >= 128 && !map.contains_key(window) {
+                    map.clear();
+                }
+                map.insert(window.to_string(), reason);
+            }
+            None => {
+                map.remove(window);
+            }
+        }
     }
     fn entry(&self, source: &Source) -> Arc<CacheEntry> {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -408,6 +433,7 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
             && src.session == session
             && src.path.as_ref().is_some_and(|p| p.is_file())
         {
+            ctx.transcript_cache.record_unbound(&window, None);
             return Ok(src.clone());
         }
     }
@@ -425,6 +451,7 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
             .map_err(|e| e.to_string())?;
         if let Some((path, session)) = known.filter(|(path, _)| PathBuf::from(path).is_file()) {
             check_window_session(p, Some(&session))?;
+            ctx.transcript_cache.record_unbound(&window, None);
             return Ok(Source {
                 window: window.clone(),
                 kind: kind.clone(),
@@ -465,7 +492,9 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
         })
         .await
         .map_err(|e| e.to_string())?;
-        if let Some(src) = found {
+        ctx.transcript_cache
+            .record_unbound(&window, found.as_ref().err().copied());
+        if let Ok(src) = found {
             check_window_session(p, src.session.as_deref())?;
             let mut verified = ctx
                 .transcript_cache
@@ -540,6 +569,7 @@ async fn resolve_source(ctx: &Ctx, p: &Params, discover: bool) -> Result<Source,
     .map_err(|e| e.to_string())?;
     if let Some(Ok(path)) = &found {
         check_window_session(p, selected_session.as_deref())?;
+        ctx.transcript_cache.record_unbound(&window, None);
         return Ok(Source {
             window,
             kind,
@@ -777,7 +807,7 @@ pub async fn page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, TranscriptError> 
     Ok(value)
 }
 
-fn source_note(kind: &str, window: &str) -> TranscriptItem {
+fn source_note(kind: &str, window: &str, detail: Option<&str>) -> TranscriptItem {
     let reason = match kind {
         "claude-code" => "Claude Code: no saved session has been verified for this window.",
         "codex" => "Codex: no rollout has been uniquely matched to this window and its start time.",
@@ -800,7 +830,10 @@ fn source_note(kind: &str, window: &str) -> TranscriptItem {
     };
     let mut item = TranscriptItem::new(
         "status",
-        format!("{reason} The live terminal excerpt remains available below."),
+        format!(
+            "{reason}{} The live terminal excerpt remains available below.",
+            detail.map(|d| format!(" {d}")).unwrap_or_default()
+        ),
         None,
     );
     if !matches!(
@@ -814,9 +847,14 @@ fn source_note(kind: &str, window: &str) -> TranscriptItem {
     item
 }
 
-fn fallback_items(kind: &str, pane: &str, window: &str) -> Vec<TranscriptItem> {
+fn fallback_items(
+    kind: &str,
+    pane: &str,
+    window: &str,
+    detail: Option<&str>,
+) -> Vec<TranscriptItem> {
     let plain = pane_content(kind, pane);
-    let mut items = vec![source_note(kind, window)];
+    let mut items = vec![source_note(kind, window, detail)];
     for (index, mut row) in repomon_core::agent::repomail::split(&plain, None)
         .into_iter()
         .enumerate()
@@ -849,7 +887,12 @@ async fn capture_page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-    let items = fallback_items(p.kind.as_deref().unwrap_or("custom"), &pane, &identity);
+    let items = fallback_items(
+        p.kind.as_deref().unwrap_or("custom"),
+        &pane,
+        &identity,
+        ctx.transcript_cache.unbound_detail(&identity),
+    );
     Ok(
         json!({"items":items, "next_before":null, "page_count": items.len(), "older_message_count": null}),
     )
@@ -1012,7 +1055,7 @@ pub async fn watch(
                     if let Ok((src, stamp, revision, result)) = result {
                         if src == initial_source {
                             cached = result.unwrap_or_else(|error| {
-                                let mut note=source_note(&src.kind,&task_window);
+                                let mut note=source_note(&src.kind,&task_window,None);
                                 note.text=format!("{}: the saved conversation could not be read: {error}. The live terminal remains available.",src.kind);
                                 json!({"items":[note],"next_before":null,"older_message_count":null})
                             });
@@ -1092,7 +1135,12 @@ pub async fn watch(
                     }
                     let mut finals = serde_json::from_value(cached["items"].clone()).unwrap_or_default();
                     if initial_source.path.is_none() {
-                        finals = fallback_items(&kind, &pane, &task_window);
+                        finals = fallback_items(
+                            &kind,
+                            &pane,
+                            &task_window,
+                            task_ctx.transcript_cache.unbound_detail(&task_window),
+                        );
                         live.retain(|i| matches!(i.kind.as_deref(), Some("dialog" | "status")));
                     }
                     let replaced = task_ctx.transcript_inputs.reconcile(&task_window, &initial_source, &mut finals);
