@@ -2131,10 +2131,21 @@ pub async fn dispatch(
         "lane.list" => to_value(lanes_with_agents(ctx).await?),
         "lane.get" => {
             let p: LaneId = parse(params)?;
-            let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
-            let mut one = vec![lane];
-            overlay_agents(ctx, &mut one).await;
-            to_value(one.into_iter().next().unwrap())
+            // Scanning one lane costs the same as scanning the fleet, so share `lane.list`'s
+            // coalesced snapshot. A lane newer than it falls back; `lane.create` invalidates.
+            let fresh = lanes_with_agents(ctx)
+                .await?
+                .into_iter()
+                .find(|lane| lane.id == p.lane_id);
+            match fresh {
+                Some(lane) => to_value(lane),
+                None => {
+                    let lane = ctx.lanes.get(p.lane_id).await.map_err(internal)?;
+                    let mut one = vec![lane];
+                    overlay_agents(ctx, &mut one).await;
+                    to_value(one.into_iter().next().unwrap())
+                }
+            }
         }
 
         "message.send" => {
