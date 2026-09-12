@@ -260,10 +260,26 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
             }
             let method = req.method.clone();
             let own = std::time::Instant::now();
+            // Report this request while it is still the chain head. Aborted the moment dispatch
+            // returns, so only a request that outlives its own ceiling ever writes a line.
+            let watchdog = {
+                let method = method.clone();
+                let conn = sess.id;
+                tokio::spawn(async move {
+                    for ms in CHAIN_HEAD_ALARMS {
+                        tokio::time::sleep_until(
+                            (own + std::time::Duration::from_millis(ms)).into(),
+                        )
+                        .await;
+                        crate::chat_open_trace::chain_head(&method, ms, conn);
+                    }
+                })
+            };
             let resp = match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
                 Ok(value) => Response::ok(req.id, value),
                 Err(err) => Response::err(req.id, err),
             };
+            watchdog.abort();
             let ran = own.elapsed().as_secs_f64() * 1000.0;
             let _ = out_tx
                 .send(serde_json::to_vec(&resp).unwrap_or_default())
@@ -284,6 +300,10 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     forwarder.abort();
     let _ = writer.await;
 }
+
+/// When a still-running ordered request is reported. The last is past the client's own 15 s
+/// ceiling, so a request that blows through it is named even though its caller has already gone.
+const CHAIN_HEAD_ALARMS: [u64; 3] = [1_000, 5_000, 15_000];
 
 /// A request joins the connection's FIFO chain if and only if a later request on that same
 /// connection could observe its effect. That is the whole rule, and it has two consequences.
