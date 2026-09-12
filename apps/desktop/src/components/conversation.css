@@ -49,6 +49,8 @@
 .conversation-raw { white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.6 var(--font-mono); margin:0; color:var(--muted); }
 .conversation-streaming { display:inline-block; font:10px var(--font-mono); color:var(--signal); margin-top:6px; }
 .conversation-pending { display:inline-block; font:10px var(--font-mono); color:var(--muted); margin-top:6px; }
+/* Receipt is unobservable for this agent, not overdue: a quieter note than the pinned queue's. */
+.conversation-delivered { display:inline-block; font:10px var(--font-mono); color:var(--muted); opacity:.7; margin-top:2px; }
 .conversation-source-note { margin:0 calc(var(--conversation-gutter) + var(--conversation-gap)) 24px; font-size:12px; color:var(--muted); }
 .conversation-empty { padding:20px calc(var(--conversation-gutter) + var(--conversation-gap)) 48px; }
 .conversation-older { font-size:11px; color:var(--muted); margin:0 calc(var(--conversation-gutter) + var(--conversation-gap)) 24px; }
@@ -102,7 +104,10 @@
 .attachment-chip > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .attachment-chip button { display:grid; place-items:center; padding:3px; min-width:20px; min-height:20px; color:var(--muted); }
 .attachment-chip svg { flex-shrink:0; }
-.conversation-pending-queue { flex:none; max-height:160px; overflow:auto; }
+/* A clamped row carries its own "Show more" control directly beneath it. The queue's own clip has
+   to leave room for one whole row plus that control, or it hides the only way to reach the text it
+   just truncated; `scrollbar-gutter` keeps the scroll affordance visible once there is more. */
+.conversation-pending-queue { flex:none; max-height:calc(var(--pending-message-max-height) + 88px); overflow:auto; scrollbar-gutter:stable; }
 .conversation-pending-inner { width:100%; max-width:var(--conversation-width); margin-inline:auto; padding:8px var(--conversation-edge); }
 .conversation-pending-row { margin-bottom:8px; }
 .conversation-pending-row:last-child { margin-bottom:0; }

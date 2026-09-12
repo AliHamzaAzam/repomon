@@ -13,6 +13,11 @@ pub struct Inputs {
 struct WindowInputs {
     pending: Vec<Ticket>,
     aliases: HashMap<String, String>,
+    /// How far a catch-up read has already looked, and in which source. A transcript only grows,
+    /// so ground already covered cannot start holding a ticket's evidence later. Without this a
+    /// ticket whose evidence never arrives re-reads the whole range on every sweep for as long as
+    /// it stays pending, which on a long session is megabytes every few seconds, forever.
+    swept: Option<(PathBuf, u64)>,
 }
 pub struct Ticket {
     source: Option<Source>,
@@ -44,6 +49,15 @@ impl Conjuncts {
 /// How long a ticket may sit pending before it is worth a line. A consumed input normally pairs
 /// within a tick or two; ten seconds means something refused it.
 const STUCK_MS: i64 = 10_000;
+
+/// Row ids carry the source path once they reach a page, and `conjuncts` reads the byte offset
+/// back out of that shape. A catch-up read works on raw scanner ids, so it restores the prefix.
+fn qualified_id(source: &Source, id: &str) -> String {
+    match source.path.as_ref() {
+        Some(path) => format!("{}:{id}", path.display()),
+        None => id.into(),
+    }
+}
 
 /// Evaluate consumption for one pending ticket against one durable row. Lifted out of the matcher
 /// so the stuck-ticket diagnosis reports exactly what the matcher decided, not a paraphrase.
@@ -186,9 +200,18 @@ pub async fn prepare_input_from_pane(
                 .map_or(0, |m| m.len())
         }
     });
-    let prior_prompts = source.as_ref().zip(pane).map(|(s, pane)| {
-        repomon_core::agent::conversation_queue::pane_inputs(&s.kind, pane).consumed
-    });
+    // The baseline is what makes a later echo countable as new. It needs the kind, so it is `None`
+    // exactly when the source did not resolve, and that stays distinct from an empty baseline: an
+    // empty one asserts the pane held no earlier prompts, which would retire the next echo seen
+    // whether or not it was ours. `append` reads the `None` as "nothing can confirm this ticket"
+    // rather than leaving it pinned as unread forever.
+    let prior_prompts = source
+        .as_ref()
+        .map(|s| s.kind.as_str())
+        .zip(pane)
+        .map(|(kind, pane)| {
+            repomon_core::agent::conversation_queue::pane_inputs(kind, pane).consumed
+        });
     let now = chrono::Utc::now();
     let mut parsed = repomon_core::agent::repomail::split(cleaned.trim(), Some(now));
     let mut item = if parsed.len() == 1 {
@@ -222,6 +245,79 @@ impl Inputs {
             .push(ticket);
         ctx.broadcast(INPUT_SENT, json!({"window": window}));
     }
+    /// The byte offset a catch-up read must start from to find evidence the display page cannot
+    /// reach, or `None` when every pending ticket is still young enough to pair from the page.
+    ///
+    /// `reconcile` only ever sees the trailing page, which is a display bound, not an evidence
+    /// one. On a session writing faster than the page is wide, a row passes out of that window
+    /// between two passes and the ticket can never pair again. A ticket records the source length
+    /// at send time, so its evidence, if it exists at all, lies at or after that offset.
+    pub(super) fn catch_up_floor(&self, window: &str, source: &Source) -> Option<u64> {
+        let now = chrono::Utc::now();
+        let windows = self.windows.lock().unwrap();
+        let state = windows.get(window)?;
+        let floor = state
+            .pending
+            .iter()
+            .filter(|ticket| {
+                ticket
+                    .source
+                    .as_ref()
+                    .is_none_or(|s| s.path.is_none() || s == source)
+            })
+            .filter(|ticket| {
+                ticket
+                    .item
+                    .at
+                    .is_none_or(|sent| (now - sent).num_milliseconds() >= STUCK_MS)
+            })
+            .map(|ticket| ticket.floor)
+            .min()?;
+        // Resume where the last read stopped, and only for the source it read.
+        let swept = state
+            .swept
+            .as_ref()
+            .filter(|(path, _)| source.path.as_ref() == Some(path))
+            .map_or(0, |(_, offset)| *offset);
+        Some(floor.max(swept))
+    }
+
+    /// Record how far a catch-up read got, so the next one starts there instead of repeating it.
+    pub(super) fn mark_swept(&self, window: &str, source: &Source, next: u64) {
+        let Some(path) = source.path.clone() else {
+            return;
+        };
+        let mut windows = self.windows.lock().unwrap();
+        if let Some(state) = windows.get_mut(window) {
+            state.swept = Some((path, next));
+        }
+    }
+
+    /// Retire tickets whose evidence a catch-up read found outside the display page. The rows are
+    /// not seated: they are already older than the page, so the ledger will show them when the
+    /// operator pages back, and the ticket has no further claim to make.
+    pub(super) fn retire_confirmed(
+        &self,
+        window: &str,
+        source: &Source,
+        rows: &[TranscriptItem],
+    ) -> usize {
+        let mut windows = self.windows.lock().unwrap();
+        let Some(state) = windows.get_mut(window) else {
+            return 0;
+        };
+        let before = state.pending.len();
+        state.pending.retain(|ticket| {
+            !rows.iter().any(|row| {
+                row.role == "user"
+                    && row.id.as_ref().is_some_and(|id| {
+                        conjuncts(ticket, row, &qualified_id(source, id), source).consumed()
+                    })
+            })
+        });
+        before - state.pending.len()
+    }
+
     pub(super) fn reconcile(
         &self,
         window: &str,
@@ -323,12 +419,23 @@ impl Inputs {
                     ticket.consumed = true;
                     *used += 1;
                 }
+                // "sent" is a claim that the agent has not read this yet, and the pinned queue
+                // shows it as such. Only make that claim while some channel could still withdraw
+                // it: this kind's pane region with a baseline to count against, or a bound
+                // transcript for `reconcile` to pair against. With neither, all we know is that
+                // the keystrokes landed, and saying more would make an unreadable agent
+                // indistinguishable from one that is ignoring the operator.
+                let watched = (repomon_core::agent::conversation_queue::observable(&source.kind)
+                    && ticket.prior_prompts.is_some())
+                    || source.path.is_some();
                 let state = if ticket.consumed {
                     "consumed"
                 } else if queued || (source.kind == "codex" && observed.queue_reported) {
                     "queued"
-                } else {
+                } else if watched {
                     "sent"
+                } else {
+                    "delivered"
                 };
                 states.insert(id.clone(), json!(state));
                 order.push(id);
@@ -404,6 +511,502 @@ mod tests {
         assert!(!c.text_equal && !c.consumed());
     }
     use super::*;
+
+    /// A claude-code transcript holding one mail envelope, followed by enough unrelated records to
+    /// push it further behind the tail than a page is wide. This is the operator's controller pane
+    /// in miniature: the evidence is on disk and outside every page the watch will ever load.
+    fn transcript_with_mail_behind_the_page(
+        dir: &std::path::Path,
+        id: &str,
+        body: &str,
+    ) -> PathBuf {
+        let path = dir.join("session.jsonl");
+        let envelope =
+            format!("[REPOMAIL id={id} from=lane-2/1 reply_to=none] {body} [{id}] [END REPOMAIL]");
+        let mut text = format!(
+            "{}\n",
+            json!({"type":"user","message":{"content":envelope}})
+        );
+        let filler = json!({"type":"assistant","message":{"content":"x".repeat(2048)}}).to_string();
+        while text.len() < 256 * 1024 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn mail_ticket(
+        source: &Source,
+        id: &str,
+        body: &str,
+        sent: chrono::DateTime<chrono::Utc>,
+    ) -> Ticket {
+        let envelope =
+            format!("[REPOMAIL id={id} from=lane-2/1 reply_to=none] {body} [{id}] [END REPOMAIL]");
+        let mut parsed = repomon_core::agent::repomail::split(envelope.trim(), Some(sent));
+        assert_eq!(
+            parsed.len(),
+            1,
+            "a bare envelope is one row, so it keeps its mail id"
+        );
+        Ticket {
+            source: Some(source.clone()),
+            floor: 0,
+            item: parsed.remove(0),
+            prior_prompts: Some(Vec::new()),
+            consumed: false,
+            submitted: envelope,
+            diagnosed: false,
+        }
+    }
+
+    /// The round's defect, measured on the operator's own pane: `reconcile` only ever sees the
+    /// trailing page, so once a mail row falls behind it no conjunct is ever evaluated and the
+    /// ticket is pinned as unread for good. A read from the ticket's own floor finds it.
+    #[tokio::test]
+    async fn mail_behind_the_display_page_is_retired_by_a_read_from_the_tickets_own_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let id = "2dd190b818e0323bb958c845ab7d2f0b";
+        let body = "Ordered-chain work is committed on the branch.";
+        let path = transcript_with_mail_behind_the_page(dir.path(), id, body);
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        ctx.transcript_inputs
+            .sent(&ctx, "lane-1", mail_ticket(&source, id, body, sent));
+
+        // The page the watch actually loads. The mail row is not in it, so nothing pairs.
+        let page_start =
+            repomon_core::usage_ledger::scan::jsonl_page_start(&path, u64::MAX, PAGE_BYTES)
+                .unwrap();
+        assert!(page_start > 0, "the fixture is wider than one page");
+        let page = scan_range(&source, page_start, None).unwrap();
+        let mut rows: Vec<_> = page
+            .transcript
+            .into_iter()
+            .map(|entry| {
+                let mut item = entry.item;
+                item.id = item.id.map(|id| format!("{}:{id}", path.display()));
+                item
+            })
+            .collect();
+        assert!(
+            !rows.iter().any(|row| row.mail.is_some()),
+            "the evidence is behind the page, which is the whole defect"
+        );
+        assert!(
+            ctx.transcript_inputs
+                .reconcile("lane-1", &source, &mut rows)
+                .is_empty(),
+            "a page without the row cannot retire the ticket"
+        );
+
+        // The catch-up read knows where to look because the ticket recorded its floor.
+        let floor = ctx
+            .transcript_inputs
+            .catch_up_floor("lane-1", &source)
+            .expect("a stuck ticket asks for a read");
+        let scan = scan_range(&source, floor, None).unwrap();
+        let behind: Vec<_> = scan.transcript.into_iter().map(|e| e.item).collect();
+        assert_eq!(
+            ctx.transcript_inputs
+                .retire_confirmed("lane-1", &source, &behind),
+            1,
+            "the mail id is in the transcript, so the ticket has nothing left to claim"
+        );
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append("lane-1", &source, "", &mut items, &mut order);
+        assert!(
+            states.as_object().unwrap().is_empty(),
+            "a retired ticket leaves the pinned queue entirely"
+        );
+    }
+
+    /// A young ticket is not swept: the row may simply not be written yet, and reading megabytes
+    /// on every tick for a mail that is about to pair normally would be the wrong trade.
+    #[tokio::test]
+    async fn a_ticket_younger_than_the_stuck_threshold_asks_for_no_catch_up_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(dir.path().join("session.jsonl")),
+            session: Some("s1".into()),
+        };
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-1",
+            mail_ticket(&source, "abc", "just sent", chrono::Utc::now()),
+        );
+        assert!(
+            ctx.transcript_inputs
+                .catch_up_floor("lane-1", &source)
+                .is_none()
+        );
+    }
+
+    /// The same mail body recurs in a long transcript, because the agent quotes it back. One
+    /// envelope is one ticket, so a sweep that sees several matching rows must retire exactly the
+    /// one ticket and never reach past it into a second, still-unread mail.
+    #[tokio::test]
+    async fn repeated_occurrences_of_one_mail_retire_one_ticket_and_leave_the_others_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(dir.path().join("session.jsonl")),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        let delivered = "2dd190b818e0323bb958c845ab7d2f0b";
+        let unread = "7af6dadef35efab8a7c239ddb73cf4a6";
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-1",
+            mail_ticket(&source, delivered, "same body", sent),
+        );
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-1",
+            mail_ticket(&source, unread, "same body", sent),
+        );
+
+        // The delivered mail appears several times over; the second mail is nowhere yet.
+        let envelope = format!(
+            "[REPOMAIL id={delivered} from=lane-2/1 reply_to=none] same body [{delivered}] [END REPOMAIL]"
+        );
+        let rows: Vec<_> = (0..5)
+            .map(|n| {
+                let mut row = repomon_core::agent::repomail::split(&envelope, Some(sent)).remove(0);
+                row.id = Some(format!(
+                    "{}:{}:0",
+                    source.path.as_ref().unwrap().display(),
+                    n * 100
+                ));
+                row
+            })
+            .collect();
+        assert_eq!(
+            ctx.transcript_inputs
+                .retire_confirmed("lane-1", &source, &rows),
+            1,
+            "five echoes of one mail are still one delivered mail"
+        );
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append("lane-1", &source, "", &mut items, &mut order);
+        let states = states.as_object().unwrap().clone();
+        assert_eq!(states.len(), 1, "the mail with no row stays pinned");
+        assert_eq!(states.values().next().unwrap(), "sent");
+    }
+
+    /// A ticket whose evidence never arrives is never abandoned, so the sweep that looks for it
+    /// must not cost more each time it runs. Measured before this cursor existed: one stuck ticket
+    /// on a 26 MB session re-read up to 26 MB every five seconds, about 5 MB/s sustained and
+    /// unbounded. A transcript only grows, so ground already covered cannot start holding the
+    /// evidence later, and re-reading it buys nothing.
+    #[tokio::test]
+    async fn a_ticket_that_can_never_pair_rereads_only_what_the_source_has_newly_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        // The ticket's own mail id is never written, so no sweep can ever retire it.
+        let path = transcript_with_mail_behind_the_page(dir.path(), "a-different-mail", "other");
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-1",
+            mail_ticket(&source, "never-written", "absent", sent),
+        );
+
+        let sweep = |source: &Source| {
+            let from = ctx
+                .transcript_inputs
+                .catch_up_floor("lane-1", source)
+                .expect("a stuck ticket still asks to be looked for");
+            let len = std::fs::metadata(source.path.as_ref().unwrap())
+                .unwrap()
+                .len();
+            let read = len.saturating_sub(from);
+            if len > from {
+                let scan = scan_range(source, from, None).unwrap();
+                ctx.transcript_inputs
+                    .mark_swept("lane-1", source, scan.next_offset);
+            }
+            read
+        };
+
+        let first = sweep(&source);
+        assert!(first > 128 * 1024, "the first read covers the whole range");
+        // What remains is the trailing assistant group, which the scanner deliberately rewinds to
+        // so a message still being streamed is re-read until it is complete. That is one message,
+        // not one transcript, and it does not grow with the file.
+        let repeat = sweep(&source);
+        assert!(
+            repeat * 10 < first,
+            "a source that has not grown must not cost another full read: {repeat} vs {first}"
+        );
+        assert_eq!(sweep(&source), repeat, "and it stays flat, tick after tick");
+
+        // Only what the agent has newly written is read, which is what tailing costs anyway.
+        let appended = format!(
+            "{}\n",
+            json!({"type":"assistant","message":{"content":"y"}})
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+        drop(file);
+        let after = sweep(&source);
+        assert!(
+            after >= appended.len() as u64 && after <= repeat + appended.len() as u64,
+            "the read covers the new bytes and no more than the re-read group: {after}"
+        );
+
+        // The ticket is still pending and still reads as unread: nothing was silently dropped and
+        // nothing was marked paired on no evidence.
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append("lane-1", &source, "", &mut items, &mut order);
+        assert_eq!(states.as_object().unwrap().values().next().unwrap(), "sent");
+    }
+
+    /// A rewritten source is shorter than the cursor that was reading it, so the cursor no longer
+    /// describes ground that exists. The next read starts over rather than reading past the end.
+    #[tokio::test]
+    async fn a_source_rewritten_shorter_than_the_cursor_is_swept_from_the_start_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let path = transcript_with_mail_behind_the_page(dir.path(), "a-different-mail", "other");
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        let id = "2dd190b818e0323bb958c845ab7d2f0b";
+        ctx.transcript_inputs
+            .sent(&ctx, "lane-1", mail_ticket(&source, id, "body", sent));
+        let long = std::fs::metadata(&path).unwrap().len();
+        ctx.transcript_inputs.mark_swept("lane-1", &source, long);
+        assert_eq!(
+            ctx.transcript_inputs
+                .catch_up_floor("lane-1", &source)
+                .unwrap(),
+            long
+        );
+
+        // The provider rewrites the session shorter, and the evidence now sits below the cursor.
+        let rewritten = transcript_with_mail_behind_the_page(dir.path(), id, "body");
+        assert_eq!(rewritten, path);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user","message":{"content":format!("[REPOMAIL id={id} from=lane-2/1 reply_to=none] body [{id}] [END REPOMAIL]")}})
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        let floor = ctx
+            .transcript_inputs
+            .catch_up_floor("lane-1", &source)
+            .unwrap();
+        assert!(len < floor, "the cursor is past the end of the new source");
+        let from = if len < floor { 0 } else { floor };
+        let scan = scan_range(&source, from, None).unwrap();
+        let rows: Vec<_> = scan.transcript.into_iter().map(|e| e.item).collect();
+        assert_eq!(
+            ctx.transcript_inputs
+                .retire_confirmed("lane-1", &source, &rows),
+            1,
+            "starting over finds the evidence the stale cursor would have skipped"
+        );
+    }
+
+    fn ticket_for(
+        kind: &str,
+        text: &str,
+        pane: Option<&str>,
+        sent: chrono::DateTime<chrono::Utc>,
+    ) -> Ticket {
+        Ticket {
+            source: None,
+            floor: 0,
+            item: TranscriptItem::new("user", text, Some(sent)),
+            prior_prompts: pane.map(|pane| {
+                repomon_core::agent::conversation_queue::pane_inputs(kind, pane).consumed
+            }),
+            consumed: false,
+            submitted: text.into(),
+            diagnosed: false,
+        }
+    }
+
+    fn state_of(ctx: &Ctx, window: &str, source: &Source, pane: &str) -> String {
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append(window, source, pane, &mut items, &mut order);
+        states
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .into()
+    }
+
+    /// A kind whose pane has no prompt region to read, on a window whose transcript never bound.
+    /// Nothing can ever report that the agent picked this up, so pinning it under "Not yet read by
+    /// the agent" states something we do not know and can never withdraw. It must read as
+    /// delivered instead, which is the whole of what we do know.
+    #[tokio::test]
+    async fn an_input_no_channel_can_confirm_is_delivered_not_pinned_as_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let sent = chrono::Utc::now();
+        let pane = "hermes> hh\nhermes> \n";
+        for (kind, expected) in [("hermes", "delivered"), ("aider", "delivered")] {
+            let window = format!("lane-{kind}");
+            ctx.transcript_inputs
+                .sent(&ctx, &window, ticket_for(kind, "hh", Some(pane), sent));
+            let unbound = Source {
+                window: window.clone(),
+                kind: kind.into(),
+                path: None,
+                session: None,
+            };
+            assert_eq!(
+                state_of(&ctx, &window, &unbound, pane),
+                expected,
+                "{kind} offers no pane region and no bound transcript"
+            );
+            // Binding the transcript hands `reconcile` a channel that can still retire the
+            // ticket, so the unread claim becomes ours to make again.
+            let bound = Source {
+                path: Some(dir.path().join("session.jsonl")),
+                session: Some("s1".into()),
+                ..unbound
+            };
+            assert_eq!(state_of(&ctx, &window, &bound, pane), "sent");
+        }
+    }
+
+    /// The operator's reproduction: send, then clear the agent's chat. Clearing destroys the pane
+    /// echo, and a managed TUI on the alternate screen keeps no scrollback to recover it from, so
+    /// the evidence is gone for good. Consumption already observed must survive that, and a kind
+    /// that never had a channel must not be left pinned by it.
+    #[tokio::test]
+    async fn clearing_the_chat_after_the_send_neither_unconsumes_nor_strands_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let sent = chrono::Utc::now();
+        let cleared = "\n  Antigravity CLI 1.2.2\n\n────\n>\n────\n? for shortcuts\n";
+        let echoed = "────\n> hh\n\n▸ Thought for 5s\n────\n>\n────\n? for shortcuts\n";
+        let before = "────\n>\n────\n? for shortcuts\n";
+
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-agy",
+            ticket_for("antigravity", "hh", Some(before), sent),
+        );
+        let agy = Source {
+            window: "lane-agy".into(),
+            kind: "antigravity".into(),
+            path: None,
+            session: None,
+        };
+        assert_eq!(
+            state_of(&ctx, "lane-agy", &agy, echoed),
+            "consumed",
+            "antigravity echoes the prompt it has read"
+        );
+        assert_eq!(
+            state_of(&ctx, "lane-agy", &agy, cleared),
+            "consumed",
+            "clearing the chat destroys the echo but not what it already proved"
+        );
+
+        // The same clear, on a kind with no pane region, where the echo was never readable.
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-hermes",
+            ticket_for("hermes", "hh", Some(before), sent),
+        );
+        let hermes = Source {
+            window: "lane-hermes".into(),
+            kind: "hermes".into(),
+            path: None,
+            session: None,
+        };
+        assert_eq!(state_of(&ctx, "lane-hermes", &hermes, cleared), "delivered");
+    }
+
+    /// Lock 2. A ticket prepared without a resolved source has no baseline, because without the
+    /// kind there is no way to read the pane and an empty baseline would be a different claim: it
+    /// asserts the pane held no earlier prompts, which would retire the next echo seen whether or
+    /// not it was ours. What must not happen is the old outcome, where that ticket sat pinned as
+    /// unread for the life of the window with nothing able to release it.
+    #[tokio::test]
+    async fn a_ticket_with_no_baseline_reports_what_it_knows_instead_of_pinning_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let p = Params {
+            lane_id: 1,
+            session_id: None,
+            window: Some("lane-1".into()),
+            kind: None,
+            before: None,
+            on: true,
+        };
+        assert!(
+            resolve_source(&ctx, &p, false, None).await.is_err(),
+            "this window has no lane behind it, so the source cannot resolve"
+        );
+        let ticket = prepare_input_from_pane(&ctx, p.lane_id, "lane-1", "hh", Some("❯ hh\n"))
+            .await
+            .unwrap();
+        assert!(ticket.prior_prompts.is_none(), "no kind, so no baseline");
+        ctx.transcript_inputs.sent(&ctx, "lane-1", ticket);
+        let unbound = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: None,
+            session: None,
+        };
+        assert_eq!(
+            state_of(&ctx, "lane-1", &unbound, "❯ hh\n\n────\n❯ \n────\n"),
+            "delivered",
+            "an observable kind with no baseline still has nothing that could confirm it"
+        );
+    }
+
     #[tokio::test]
     async fn antigravity_second_precision_consumes_only_the_new_prompt() {
         let dir = tempfile::tempdir().unwrap();

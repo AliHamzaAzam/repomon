@@ -730,6 +730,13 @@ async fn pane_echo_does_not_consume_pending_mail_without_provider_confirmation()
     let states = ctx
         .transcript_inputs
         .append(&window, &src, envelope, &mut rows, &mut order);
-    assert_eq!(states.as_object().unwrap().values().next().unwrap(), "sent");
+    // Not consumed, and the ticket still supplies the mail row. It reads as "delivered" rather
+    // than "sent" because this window is hermes with no bound transcript: no pane region to read
+    // the echo from and nothing for `reconcile` to pair against, so there is no channel left that
+    // could ever confirm it. Pinning it as unread would be a claim with nothing behind it.
+    assert_eq!(
+        states.as_object().unwrap().values().next().unwrap(),
+        "delivered"
+    );
     assert_eq!(rows.iter().filter(|row| row.mail.is_some()).count(), 1);
 }
