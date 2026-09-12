@@ -367,9 +367,30 @@ describe("pending queued/sent user turns", () => {
     // That is a mechanism, not authorship: it must never be labelled or aligned as the operator's.
     const pinned = result.container.querySelector('.conversation-pending-queue [data-transcript-id="m1"]');
     expect(pinned).not.toBeNull();
-    expect(pinned?.querySelector(".conversation-gutter")?.textContent).toContain("lane-48358676/1");
+    // The label is the identifying tail rather than the full address; see the gutter test below.
+    expect(pinned?.querySelector(".conversation-gutter")?.textContent).toContain("48358676/1");
     expect(pinned?.querySelector(".conversation-gutter")?.textContent).not.toContain("you");
     expect(pinned?.classList.contains("conversation-user")).toBe(false);
+  });
+  it("keeps the identifying tail of a sender in the gutter, not the prefix every lane shares", async () => {
+    const mail = { id: "2dd190b818e0323bb958c845ab7d2f0b", sender: "lane-48358676/1", reply_to: null };
+    items = [{ id: "m1", kind: "mail", role: "user", text: "Gates are green.", at: null, partial: true, mail }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{m1:"sent"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Gates are green.");
+    // The gutter is 68px, then 44px, then 32px. "lane-" is common to every address on the fleet,
+    // so left-to-right ellipsis keeps only the part that identifies nobody. Dropping the shared
+    // prefix and clipping from the start (.truncate-tail, pinned in index.css.fleet.test.ts) is
+    // what leaves something readable at 32px. The full address stays in the title.
+    const label = result.container.querySelector('.conversation-pending-queue .conversation-gutter span') as HTMLElement;
+    expect(label.textContent).toBe("48358676/1");
+    expect(label.textContent).not.toContain("lane-");
+    expect(label.classList.contains("truncate-tail")).toBe(true);
+    expect(label.title).toBe("lane-48358676/1");
   });
   it("seats an unobservable agent's message in the ledger marked Delivered, never pinned as unread", async () => {
     items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];

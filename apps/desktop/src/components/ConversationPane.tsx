@@ -188,6 +188,13 @@ function toolLabel(name: string | undefined): string | null {
 function isOperatorInput(row: ConversationRow): boolean {
   return row.item.role === "user" && !row.item.mail;
 }
+// Every address on a fleet starts "lane-", so in a 68px gutter (44px, then 32px, further down)
+// that prefix is the only part that survives ellipsis and it identifies nobody. Drop the shared
+// prefix and let .truncate-tail clip from the start, so what is left is the part that differs.
+// The full address stays in the title and in the "Mail from ..." header beside it.
+function senderLabel(sender: string): string {
+  return sender.replace(/^lane-/, "");
+}
 function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string; delivered?: boolean; onResize?: () => void }) {
   const item = () => props.row.item;
   const [expanded, setExpanded] = createSignal<boolean>();
@@ -196,7 +203,7 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
   const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().mail ? item().mail!.sender : item().role === "user" ? "you" : item().kind === "status" ? item().status_kind === "command_result" ? "command" : "status" : props.kind === "claude-code" ? "claude" : props.kind;
   return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${isOperatorInput(props.row) ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
-    <div class="conversation-gutter"><Show when={!tool()}><time dateTime={item().at ?? undefined}>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span><Show when={props.delivered}><span class="conversation-delivered" role="status" title={`Sent to the agent. ${props.kind} does not report back which messages it has read, so whether it has been picked up cannot be shown here.`}>Delivered</span></Show></Show></div>
+    <div class="conversation-gutter"><Show when={!tool()}><time dateTime={item().at ?? undefined}>{time()}</time><span class={item().mail ? "truncate-tail" : undefined} title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{item().mail ? senderLabel(item().mail!.sender) : speaker()}</span><Show when={props.delivered}><span class="conversation-delivered" role="status" title={`Sent to the agent. ${props.kind} does not report back which messages it has read, so whether it has been picked up cannot be shown here.`}>Delivered</span></Show></Show></div>
     <div class="conversation-body rounded">
       <Show when={tool()} fallback={<Show when={item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><MessageBody row={props.row} laneId={props.laneId} onResize={props.onResize} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
@@ -604,7 +611,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       <div class="conversation-pending-queue" aria-label="Not yet read by the agent">
         <div class="conversation-pending-inner">
         <For each={pendingRows()}>{(row) => <div class="conversation-row conversation-pending-row" classList={{"conversation-user": isOperatorInput(row)}} data-transcript-id={row.key}>
-          <div class="conversation-gutter"><span>{row.item.mail ? row.item.mail.sender : "you"}</span><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
+          <div class="conversation-gutter"><span class={row.item.mail ? "truncate-tail" : undefined} title={row.item.mail ? row.item.mail.sender : "you"}>{row.item.mail ? senderLabel(row.item.mail.sender) : "you"}</span><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
           <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} clampWhenTall /></div>
         </div>}</For>
         </div>
