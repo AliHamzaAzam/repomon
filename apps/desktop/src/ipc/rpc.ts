@@ -117,7 +117,7 @@ export interface TranscriptPage {
   // Watch/event only: replacement snapshot of sent-but-not-yet-consumed user items, keyed by id.
   // "consumed" can precede durable persistence; it means neither "Sent" nor "Queued" - just an
   // ordinary seated row, no label. Durable consumption removes the entry (and partial) entirely.
-  input_states?: Record<string, "sent" | "queued" | "consumed">;
+  input_states?: Record<string, "sent" | "queued" | "consumed" | "delivered">;
 }
 // subscription_id is daemon-internal connection routing, never a UI row identity.
 export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }

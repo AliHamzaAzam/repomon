@@ -288,7 +288,7 @@ const defectRepo = repo(505, "repomind");
 // the state the operator's broken capture should reach once C1 round 5's daemon half lands.
 // ?agent= overrides the scenario's own default kind, for evidence gathering across every
 // spawnable kind (e.g. chat command routing) without a scenario per kind.
-const scenarioAgent = query.get("agent") ?? (scenario === "no-source" ? "hermes" : scenario === "antigravity" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex");
+const scenarioAgent = query.get("agent") ?? (scenario === "no-source" ? "hermes" : scenario === "antigravity" || scenario === "agy-cleared" ? "antigravity" : scenario === "operator" || defects ? "claude-code" : "codex");
 // "agentsDemo" adds a second, non-tmux (external) session beside the primary one, so a single
 // conversation screenshot can show both the sidebar's interactive row and its inert counterpart
 // side by side. "spawn-loading" strips the lane down to no agent at all: that is the real,
@@ -296,7 +296,8 @@ const scenarioAgent = query.get("agent") ?? (scenario === "no-source" ? "hermes"
 // loading forever (agent.detect never resolves below) for the loading-skeleton screenshot.
 const agentsDemo = query.has("agentsDemo");
 const spawnLoading = scenario === "spawn-loading";
-const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: spawnLoading ? [] : [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : []), ...(agentsDemo ? [agentSession({id:103,agent:"claude-code",session_id:null,tmux_window:null,external:true,status:"idle",custom_label:"design-review"})] : [])] });
+const agyState = (query.get("states") ?? "sent") as "sent" | "queued" | "consumed" | "delivered";
+const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "agy-cleared", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: spawnLoading ? [] : [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : []), ...(agentsDemo ? [agentSession({id:103,agent:"claude-code",session_id:null,tmux_window:null,external:true,status:"idle",custom_label:"design-review"})] : [])] });
 const fixtureRepos = defects ? [defectRepo] : fleetMode === "operator" || scenario === "operator" || defects ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
 const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
@@ -366,6 +367,13 @@ function transcriptItems(): TranscriptItem[] {
     item("t1", "tool_call", "Found the pricing table and its existing tax mapping.", { name:"exec_command", input_summary:"rg tax_bands src/pricing", result_summary:"1 matching file", status:"ok" }),
     item("a1", "assistant", "The EU tax bands are in place, using the existing pricing table so no schema change was needed. Checkout totals now include the new bands for EU carts.", { model:"gemini-3-pro" }),
   ];
+  // The operator's report: an antigravity chat he had cleared, holding nothing but the two
+  // messages he typed into it. `?states=` supplies exactly what the daemon reports for them, so
+  // the same fixture shows the regression and the fix without either being drawn by hand.
+  if (scenario === "agy-cleared") return [
+    item("u1", "user", "Hi which model are you?", { partial:true }),
+    item("u2", "user", "hhh", { partial:true }),
+  ];
   if (scenario === "long-history") return Array.from({ length: 40 }, (_, i) => item(`h${i}`, i % 6 === 0 ? "user" : "assistant", i % 6 === 0 ? `Round ${i / 6 + 1}: keep going on the migration.` : `Batch ${i} of the migration is done; the existing schema stayed untouched.`));
   if (scenario === "queued") return [
     item("u1", "user", "Attached file: \"/fixture/attachments/screen.png\"\n\nCheck this layout before you continue."),
@@ -395,8 +403,8 @@ const initialPage = () => ({
   items:transcriptItems(),
   next_before: scenario === "rich" ? 120 : scenario === "long-history" ? 40 : null,
   older_message_count: scenario === "long-history" ? 57 : undefined,
-  order: scenario === "queued" ? ["u1", "a1", "u2", "u3"] : scenario === "pending-long" ? ["u1"] : undefined,
-  input_states: scenario === "queued" ? { u2:"consumed", u3:"queued" } : scenario === "pending-long" ? { u1:"queued" } : undefined,
+  order: scenario === "queued" ? ["u1", "a1", "u2", "u3"] : scenario === "pending-long" ? ["u1"] : scenario === "agy-cleared" ? ["u1", "u2"] : undefined,
+  input_states: scenario === "queued" ? { u2:"consumed", u3:"queued" } : scenario === "pending-long" ? { u1:"queued" } : scenario === "agy-cleared" ? { u1:agyState, u2:agyState } : undefined,
 });
 let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"}, agent_status_rows:query.has("notices") ? {codex:["rate_limit", "usage_limit"]} : {} };
 if (query.get("focus") === "reply") {

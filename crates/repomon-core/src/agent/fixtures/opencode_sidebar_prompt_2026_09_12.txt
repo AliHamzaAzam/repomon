@@ -1,0 +1,59 @@
+
+  ┃                                                                                                                                                                    New session - 2026-09-12T16:27:30.
+  ┃  hi                                                                                                                                                                290Z
+  ┃
+                                                                                                                                                                       Context
+     + Thought: 559ms                                                                                                                                                  12,504 tokens
+                                                                                                                                                                       1% used
+     Hi! How can I help you today?                                                                                                                                     $0.00 spent
+
+     ▣  Build · Nemotron 3 Ultra Free · 1m 28s                                                                                                                         MCP
+                                                                                                                                                                       • repomon Connected
+
+                                                                                                                                                                       LSP
+                                                                                                                                                                       LSPs are disabled
+
+                                                                                                                                                                       ┌───────────────────────────────────┐
+                                                                                                                                                                       │                                   │
+                                                                                                                                                                       │ Models                            │
+                                                                                                                                                                       │ artistry kimi-k2.6                │
+                                                                                                                                                                       │ atlas kimi-k2.6                   │
+                                                                                                                                                                       │ deep deepseek-v4-pro              │
+                                                                                                                                                                       │ explore deepseek-v4-flash         │
+                                                                                                                                                                       │ hephaestus deepseek-v4-pro        │
+                                                                                                                                                                       │ librarian deepseek-v4-flash       │
+                                                                                                                                                                       │ metis deepseek-v4-pro             │
+                                                                                                                                                                       │ momus qwen3.6-plus                │
+                                                                                                                                                                       │ multimodal-looker kimi-k2.6       │
+                                                                                                                                                                       │ oracle glm-5.1                    │
+                                                                                                                                                                       │ prometheus glm-5.1                │
+                                                                                                                                                                       │ quick deepseek-v4-flash           │
+                                                                                                                                                                       │                                   │
+                                                                                                                                                                       └───────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Nemotron 3 Ultra Free OpenCode Zen                                                                                                                        ~/Developer/Github/AliHamzaAzam:main
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /Users/azaleas/Developer/Github/AliHamzaAzam                                                                                         12.5K (1%)  ctrl+p commands    • OpenCode 1.18.30
+

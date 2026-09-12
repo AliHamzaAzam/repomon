@@ -182,7 +182,7 @@ function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: (
 function toolLabel(name: string | undefined): string | null {
   return name && name !== "tool_summary" ? name : null;
 }
-function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string; onResize?: () => void }) {
+function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string; kind: string; delivered?: boolean; onResize?: () => void }) {
   const item = () => props.row.item;
   const [expanded, setExpanded] = createSignal<boolean>();
   const open = () => expanded() ?? props.detail === "verbose";
@@ -190,7 +190,7 @@ function LedgerRow(props: { row: ConversationRow; laneId: number; detail: string
   const time = () => { const date = new Date(item().at ?? ""); return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
   const speaker = () => tool() ? "tool" : props.row.fallback ? props.row.paneExcerpt ? "terminal" : "entry" : item().role === "user" ? "you" : item().kind === "status" ? item().status_kind === "command_result" ? "command" : "status" : props.kind === "claude-code" ? "claude" : props.kind;
   return <article class={`conversation-row ${tool() ? "conversation-tool-row" : ""} ${item().role === "user" ? "conversation-user" : ""} ${props.row.fallback ? "conversation-fallback" : ""}`} data-transcript-id={props.row.key} data-partial={item().partial ? "true" : undefined}>
-    <div class="conversation-gutter"><Show when={!tool()}><time dateTime={item().at ?? undefined}>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span></Show></div>
+    <div class="conversation-gutter"><Show when={!tool()}><time dateTime={item().at ?? undefined}>{time()}</time><span title={item().model ? `${speaker()} · ${item().model}` : speaker()}>{speaker()}</span><Show when={props.delivered}><span class="conversation-delivered" role="status" title={`Sent to the agent. ${props.kind} does not report back which messages it has read, so whether it has been picked up cannot be shown here.`}>Delivered</span></Show></Show></div>
     <div class="conversation-body rounded">
       <Show when={tool()} fallback={<Show when={item().kind !== "status" && item().kind !== "dialog"} fallback={<pre class="conversation-raw">{item().text || (validDialog(item().dialog) ? item().dialog?.question : "No text in this entry.")}</pre>}><MessageBody row={props.row} laneId={props.laneId} onResize={props.onResize} /></Show>}>
         <button class="conversation-tool focus-ring" aria-expanded={open()} onClick={() => setExpanded(!open())}>
@@ -580,7 +580,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
           </Show>
         </Show>
         <For each={ledgerRows().filter((row) => !work().hidden.has(row.key))}>
-          {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} onResize={followLatest} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
+          {(row) => <Show when={work().groups.has(row.key)} fallback={<LedgerRow row={row} laneId={props.target.lane_id} detail={detail()} kind={props.kind} delivered={transcript.inputStates()[row.key] === "delivered"} onResize={followLatest} />}><TurnWork rows={work().groups.get(row.key) ?? []} laneId={props.target.lane_id} detail={detail()} kind={props.kind} /></Show>}
         </For>
       </div>
     </div>

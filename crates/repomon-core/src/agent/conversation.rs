@@ -72,7 +72,7 @@ fn antigravity_chrome(line: &str) -> bool {
 /// and a truncated preview is recoverable, where a preview full of sidebar text is not.
 const OPENCODE_COLUMN_GAP: usize = 6;
 
-fn opencode_conversation_column(line: &str) -> &str {
+pub(super) fn opencode_conversation_column(line: &str) -> &str {
     let mut run = 0usize;
     for (at, c) in line.char_indices() {
         if c == ' ' {
@@ -91,7 +91,7 @@ fn opencode_conversation_column(line: &str) -> &str {
 /// and `▀`, the gutter rows of the empty input above it, and the status line below. The gutter
 /// glyph is the same one that marks a user prompt, so the composer is identified by position
 /// (the run of gutter rows that reaches the rule) rather than by its content.
-fn opencode_body(plain: &str) -> String {
+pub(super) fn opencode_body(plain: &str) -> String {
     let lines: Vec<&str> = plain.lines().map(opencode_conversation_column).collect();
     let rule = lines.iter().rposition(|l| {
         let t = l.trim();

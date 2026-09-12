@@ -1196,7 +1196,7 @@ pub async fn watch(
                     update.removed_ids.extend(replaced);
                     let mut input_states = task_ctx.transcript_inputs.append(&task_window, &initial_source, &pane, &mut update.items, &mut update.order);
                     if let Some(anchor) = update.order.iter().find(|id| state.is_partial_assistant(id)).cloned() {
-                        let consumed: Vec<_> = update.order.iter().filter(|id| input_states[*id] == "consumed").cloned().collect();
+                        let consumed: Vec<_> = update.order.iter().filter(|id| matches!(input_states[*id].as_str(), Some("consumed" | "delivered"))).cloned().collect();
                         update.order.retain(|id| !consumed.contains(id));
                         let position = update.order.iter().position(|id| id == &anchor).unwrap();
                         update.order.splice(position..position, consumed);

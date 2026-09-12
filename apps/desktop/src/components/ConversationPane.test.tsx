@@ -353,6 +353,26 @@ describe("pending queued/sent user turns", () => {
     expect(seated?.textContent).not.toContain("Queued");
     expect(seated?.textContent).not.toContain("Sent");
   });
+  it("seats an unobservable agent's message in the ledger marked Delivered, never pinned as unread", async () => {
+    items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{u1:"delivered"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Do the thing");
+    // The pinned queue is captioned "Not yet read by the agent". For a kind whose pane we cannot
+    // read and whose transcript has not bound, we do not know that, so the row belongs in the
+    // ordinary ledger - but it must still not read as an ordinary consumed message, or an agent
+    // we cannot observe becomes indistinguishable from one that has replied.
+    expect(result.container.querySelector(".conversation-pending-queue")).toBeNull();
+    const seated = result.container.querySelector('.conversation-ledger [data-transcript-id="u1"]');
+    expect(seated).not.toBeNull();
+    expect(seated?.textContent).toContain("Delivered");
+    expect(seated?.textContent).not.toContain("Sent");
+    expect(seated?.textContent).not.toContain("Queued");
+  });
   it("treats consumed as an ordinary seated row with no label, even while still briefly partial", async () => {
     items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
     const original = vi.mocked(daemonCall).getMockImplementation()!;
