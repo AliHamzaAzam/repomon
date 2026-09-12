@@ -3,4 +3,13 @@
 /**
  * One selectable dialog row: its printed number (if any) and its text.
  */
-export type DialogOption = { number?: number | null, text: string, };
+export type DialogOption = { number?: number | null, 
+/**
+ * The choice's own label, short enough to read at a glance ("Leave it").
+ */
+text: string, 
+/**
+ * The explanation a structured question prints beside its label, absent when the prompt
+ * offers none. Never an empty string: a choice either has an explanation or it does not.
+ */
+description?: string, };

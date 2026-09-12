@@ -1,0 +1,10 @@
+● Running the installer…
+╭──────────────────────────────────────────────╮
+│ Bash command                                 │
+│                                              │
+│   cargo install --path crates/repomon-tui    │
+│                                              │
+│ Do you want to proceed?                      │
+│ ❯ 1. Yes                                     │
+│   2. No                                      │
+╰──────────────────────────────────────────────╯

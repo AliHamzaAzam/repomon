@@ -1,0 +1,59 @@
+
+  Down the lane the chowkidar counts the hours
+  by how often the dogs decide who they are.
+  A motorcycle stitches the dark and is gone,
+  leaving behind the smell of somebody's errand.
+
+  I am awake for no good reason except
+  that the day was loud and I want to hear
+  what it sounds like after everyone has stopped
+  explaining themselves to it.
+
+  The fan turns. The city exhales.
+  Tomorrow will arrive already halfway through
+  its own sentence, and I will nod
+  like I have been listening the whole time.
+
+✻ Cogitated for 7s · done 11:56 PM
+
+❯ new
+
+⏺ Inventory
+
+  Three chargers, none of them the right one.
+  A hoodie that belongs to a version of me
+  who ran in the mornings. A receipt
+  for a coffee I do not remember drinking
+  in a city I remember perfectly.
+
+  The drawer keeps things the way a friend does:
+  without judgment, and without a system.
+  Here is a key to a door that was repainted.
+  Here is a battery that may or may not be dead.
+  The only way to find out is to need it.
+
+  I used to think a life was what you chose.
+  Now I think it is mostly what you kept
+  when moving, when the boxes ran out
+  and the taxi was already downstairs honking,
+  and your hand went to one thing and not another.
+
+  So: the key stays. The receipt stays.
+  The hoodie I will wear to sleep in
+  until it becomes a different kind of promise,
+  one I can actually keep.
+
+✻ Sautéed for 6s · done 3:06 AM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+     1. Default (recommended)  Opus 5 with 1M context · Best for everyday, complex tasks
+   ❯ 2. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks
+     3. Fable                  Fable 5.1 · Most capable for your hardest and longest-running tasks
+     4. Sonnet                 Sonnet 5 · Efficient for routine tasks
+     5. Haiku                  Haiku 4.5 · Fastest for quick answers
+
+   ● High effort (default) ←/→ to adjust
+
+   Enter to set as default · s to use this session only · Esc to cancel

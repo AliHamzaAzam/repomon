@@ -62,7 +62,55 @@ pub struct PendingDialog {
 pub struct DialogOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<u32>,
+    /// The choice's own label, short enough to read at a glance ("Leave it").
     pub text: String,
+    /// The explanation a structured question prints beside its label, absent when the prompt
+    /// offers none. Never an empty string: a choice either has an explanation or it does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub description: Option<String>,
+}
+
+/// A structured menu prints a choice as a short label, a run of spaces holding the column, then
+/// the explanation. One space never separates them, so ordinary prose stays a single label.
+const LABEL_GAP: usize = 2;
+
+impl DialogOption {
+    /// Split a menu row into its label and explanation on the column gap between them.
+    fn parse(number: Option<u32>, text: &str) -> Self {
+        let text = text.trim();
+        let mut run = 0usize;
+        for (at, c) in text.char_indices() {
+            if c == ' ' {
+                run += 1;
+                continue;
+            }
+            if run >= LABEL_GAP {
+                let label = text[..at - run].trim();
+                let rest = text[at..].trim();
+                if !label.is_empty() && !rest.is_empty() {
+                    return DialogOption {
+                        number,
+                        text: label.to_string(),
+                        description: Some(rest.to_string()),
+                    };
+                }
+            }
+            run = 0;
+        }
+        DialogOption {
+            number,
+            text: text.to_string(),
+            description: None,
+        }
+    }
+
+    /// A wrapped row resumes at column zero; it continues whichever part was last being written.
+    fn continue_wrapped(&mut self, rest: &str) {
+        let target = self.description.as_mut().unwrap_or(&mut self.text);
+        target.push(' ');
+        target.push_str(rest);
+    }
 }
 
 impl PendingDialog {
@@ -126,10 +174,7 @@ fn detect_boxed_dialog(stripped: &[String], cleaned: &[String]) -> Option<Pendin
             }
             let opts: Vec<DialogOption> = block
                 .iter()
-                .map(|(_, n, t)| DialogOption {
-                    number: *n,
-                    text: t.clone(),
-                })
+                .map(|(_, n, t)| DialogOption::parse(*n, t))
                 .collect();
             let selected = block.iter().position(|(c, _, _)| *c);
             if let Some((title, question, body, context)) = describe(stripped, cleaned, start) {
@@ -275,10 +320,7 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
             if cursor {
                 selected = Some(options.len());
             }
-            options.push(DialogOption {
-                number,
-                text: text.trim().to_string(),
-            });
+            options.push(DialogOption::parse(number, &text));
             continue;
         }
         if is_antigravity_live_footer(line) {
@@ -306,15 +348,10 @@ fn detect_antigravity_dialog(stripped: &[String], cleaned: &[String]) -> Option<
         // still an option when the terminal indented it to align under its siblings. A hard wrap
         // resumes at column zero instead, so column zero is the remainder of the option above.
         if raw.starts_with(char::is_whitespace) && line.chars().count() <= OPTION_MAX_CHARS {
-            options.push(DialogOption {
-                number: None,
-                text: line.trim().to_string(),
-            });
+            options.push(DialogOption::parse(None, line));
             continue;
         }
-        let last = options.last_mut()?;
-        last.text.push(' ');
-        last.text.push_str(line.trim());
+        options.last_mut()?.continue_wrapped(line.trim());
     }
     // `saw_footer` alone is not evidence of a menu: it is also true of the "esc to cancel" row
     // drawn under a running turn, which is how a prompt echo plus the first lines of an answer
@@ -492,7 +529,16 @@ fn describe(
     let q_idx = (menu_start.saturating_sub(QUESTION_REACH)..menu_start)
         .rev()
         .find(|&i| is_question(&cleaned[i]))?;
-    let question = cleaned[q_idx].trim().to_string();
+    // Claude marks its own lines with a bullet. It is decoration on the pane, not part of the
+    // question, and it read as one once the question became a heading.
+    let raw_question = cleaned[q_idx].trim();
+    // A bulleted question is a line of the agent's own message. Whatever sits above it belongs
+    // to that message, not to the prompt, so such a prompt has no preamble to collect.
+    let bulleted = raw_question.starts_with(['⏺', '●', '○', '•']);
+    let question = raw_question
+        .trim_start_matches(['⏺', '●', '○', '•'])
+        .trim()
+        .to_string();
 
     // Walk up to the dialog's top border; the first content line below it names the tool
     // ("Bash command", "Edit file", …). Boxless dialogs simply get no header.
@@ -513,15 +559,27 @@ fn describe(
         None => Vec::new(),
     };
 
+    // Walk up from the question in blocks separated by blank lines. A prompt's own preamble is
+    // compact (Antigravity prints "Requesting permission for:" and the command); the message
+    // that happened to precede the prompt on the pane is not, and including it buried the
+    // question under a wall of unrelated text.
+    // A prompt's own preamble is whatever sits between its frame and its question. The frame
+    // is a box border for a boxed dialog and a horizontal rule for a boxless one; without
+    // one, a bulleted question is a line of the agent's own message and has no preamble at
+    // all, which is what stopped the whole preceding message being collected as the body.
     let mut raw_context = Vec::new();
     let mut blank_run = 0;
-    if q_idx > 0 {
+    if q_idx > 0 && !bulleted {
         for i in (0..q_idx).rev() {
-            let s = stripped[i].trim_start();
-            if s.starts_with('╭')
-                || s.starts_with('╰')
+            let line = stripped[i].trim();
+            if line.starts_with('╭')
+                || line.starts_with('╰')
                 || stripped[i].contains('╭')
                 || stripped[i].contains('╰')
+            {
+                break;
+            }
+            if line.chars().count() > 8 && line.chars().all(|c| matches!(c, '─' | '━' | '▔'))
             {
                 break;
             }
@@ -1162,6 +1220,92 @@ mod tests {
         }
     }
 
+    /// A structured question renders its choices as a short label and an explanation in a second
+    /// column. Both were being flattened into one string, and the body had swallowed the whole
+    /// preceding assistant message, so the question arrived at the top of a wall of text.
+    #[test]
+    fn structured_question_separates_label_from_description_and_leaves_the_message_out() {
+        let pane = include_str!("fixtures/claude_structured_question.txt");
+        let d = detect_dialog(pane).expect("structured question");
+        assert_eq!(
+            d.question,
+            "What should I do about the unused sample documents?"
+        );
+        assert_eq!(
+            d.options
+                .iter()
+                .map(|o| (o.text.as_str(), o.description.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Leave it",
+                    Some(
+                        "No deletion. Everything currently works, but the next preview build will almost certainly fail on space"
+                    )
+                ),
+                (
+                    "Delete them",
+                    Some("Drops 41 MB immediately. Reversible from git if a reader turns up")
+                ),
+                (
+                    "Move to a fixture",
+                    Some(
+                        "Keeps them for tests without shipping them, but needs the loader path changed first"
+                    )
+                ),
+            ]
+        );
+        // The message above the prompt is not the prompt's body.
+        for line in d.body.iter().chain(d.context.iter()) {
+            for banned in ["41 MB of the 58 MB", "demo in March", "nine minutes"] {
+                assert!(
+                    !line.contains(banned),
+                    "body swallowed the message: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// The simple case must not get heavier: a plain yes/no carries labels and no descriptions at
+    /// all, never an empty string standing in for one.
+    #[test]
+    fn a_plain_permission_prompt_has_labels_and_no_descriptions() {
+        let pane = include_str!("fixtures/claude_permission_prompt.txt");
+        let d = detect_dialog(pane).expect("permission prompt");
+        assert_eq!(d.question, "Do you want to proceed?");
+        assert_eq!(d.title.as_deref(), Some("Bash command"));
+        assert_eq!(
+            d.options
+                .iter()
+                .map(|o| (o.number, o.text.as_str(), o.description.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(Some(1), "Yes", None), (Some(2), "No", None)]
+        );
+        assert!(d.options.iter().all(|o| o.description.is_none()));
+    }
+
+    /// The column split, measured against a real capture: Claude's model picker prints the same
+    /// label-then-description shape, and single spaces inside a label must not split it.
+    #[test]
+    fn the_label_column_split_matches_a_real_claude_menu() {
+        let pane = include_str!("fixtures/claude_model_picker.txt");
+        let rows: Vec<_> = pane
+            .lines()
+            .filter_map(parse_option_line)
+            .map(|(_, n, t)| DialogOption::parse(n, &t))
+            .filter(|o| o.number.is_some())
+            .collect();
+        assert!(rows.len() >= 5, "{rows:#?}");
+        let first = &rows[0];
+        assert_eq!(first.text, "Default (recommended)");
+        assert_eq!(
+            first.description.as_deref(),
+            Some("Opus 5 with 1M context \u{b7} Best for everyday, complex tasks")
+        );
+        // A label keeps its own single spaces and its trailing mark.
+        assert!(rows.iter().any(|o| o.text == "Opus (1M context) \u{2714}"));
+    }
+
     #[test]
     fn extracts_structured_dialog_from_boxed_permission() {
         let pane = "● Running cargo test…\n\
@@ -1191,15 +1335,18 @@ mod tests {
             vec![
                 DialogOption {
                     number: Some(1),
-                    text: "Yes".into()
+                    text: "Yes".into(),
+                    description: None
                 },
                 DialogOption {
                     number: Some(2),
-                    text: "Yes, and don't ask again for cargo".into()
+                    text: "Yes, and don't ask again for cargo".into(),
+                    description: None
                 },
                 DialogOption {
                     number: Some(3),
-                    text: "No, and tell Claude what to do".into()
+                    text: "No, and tell Claude what to do".into(),
+                    description: None
                 },
             ]
         );
@@ -1279,14 +1426,17 @@ mod tests {
                 DialogOption {
                     number: Some(1),
                     text: "Yes".into(),
+                    description: None,
                 },
                 DialogOption {
                     number: Some(2),
                     text: "Yes, always".into(),
+                    description: None,
                 },
                 DialogOption {
                     number: Some(3),
                     text: "No".into(),
+                    description: None,
                 },
             ],
             selected: Some(0),
@@ -1311,10 +1461,12 @@ mod tests {
                 DialogOption {
                     number: Some(1),
                     text: "Yes".into(),
+                    description: None,
                 },
                 DialogOption {
                     number: Some(2),
                     text: "No".into(),
+                    description: None,
                 },
             ],
             selected: None,
@@ -1560,6 +1712,7 @@ Do you want to proceed?
         assert!(is_antigravity_menu_hint("  ↑/↓ Navigate · enter Confirm"));
     }
     /// Menu navigation hints must not make an active permission prompt look like scrollback.
+
     #[test]
     fn antigravity_permission_dialog_is_a_pending_prompt() {
         let pane = include_str!("fixtures/antigravity_permission_dialog.txt");
