@@ -947,14 +947,21 @@ async fn catch_up_pending(
     *last = std::time::Instant::now();
     let scanned = {
         let source = source.clone();
-        tokio::task::spawn_blocking(move || scan_range(&source, floor, None))
-            .await
-            .ok()
-            .and_then(Result::ok)
+        tokio::task::spawn_blocking(move || {
+            let len = std::fs::metadata(source.path.as_ref()?).ok()?.len();
+            // A source shorter than the cursor was rewritten underneath it, so the ground already
+            // covered is no longer the ground that is there. Start over rather than read past it.
+            let from = if len < floor { 0 } else { floor };
+            (len > from).then(|| scan_range(&source, from, None).ok())?
+        })
+        .await
+        .ok()
+        .flatten()
     };
     let Some(scan) = scanned else {
         return;
     };
+    let next = scan.next_offset;
     let rows: Vec<_> = scan
         .transcript
         .into_iter()
@@ -963,6 +970,7 @@ async fn catch_up_pending(
     let retired = ctx
         .transcript_inputs
         .retire_confirmed(window, source, &rows);
+    ctx.transcript_inputs.mark_swept(window, source, next);
     if retired > 0 {
         crate::chat_open_trace::input_caught_up(retired, floor, rows.len());
     }

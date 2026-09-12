@@ -13,6 +13,11 @@ pub struct Inputs {
 struct WindowInputs {
     pending: Vec<Ticket>,
     aliases: HashMap<String, String>,
+    /// How far a catch-up read has already looked, and in which source. A transcript only grows,
+    /// so ground already covered cannot start holding a ticket's evidence later. Without this a
+    /// ticket whose evidence never arrives re-reads the whole range on every sweep for as long as
+    /// it stays pending, which on a long session is megabytes every few seconds, forever.
+    swept: Option<(PathBuf, u64)>,
 }
 pub struct Ticket {
     source: Option<Source>,
@@ -250,8 +255,8 @@ impl Inputs {
     pub(super) fn catch_up_floor(&self, window: &str, source: &Source) -> Option<u64> {
         let now = chrono::Utc::now();
         let windows = self.windows.lock().unwrap();
-        windows
-            .get(window)?
+        let state = windows.get(window)?;
+        let floor = state
             .pending
             .iter()
             .filter(|ticket| {
@@ -267,7 +272,25 @@ impl Inputs {
                     .is_none_or(|sent| (now - sent).num_milliseconds() >= STUCK_MS)
             })
             .map(|ticket| ticket.floor)
-            .min()
+            .min()?;
+        // Resume where the last read stopped, and only for the source it read.
+        let swept = state
+            .swept
+            .as_ref()
+            .filter(|(path, _)| source.path.as_ref() == Some(path))
+            .map_or(0, |(_, offset)| *offset);
+        Some(floor.max(swept))
+    }
+
+    /// Record how far a catch-up read got, so the next one starts there instead of repeating it.
+    pub(super) fn mark_swept(&self, window: &str, source: &Source, next: u64) {
+        let Some(path) = source.path.clone() else {
+            return;
+        };
+        let mut windows = self.windows.lock().unwrap();
+        if let Some(state) = windows.get_mut(window) {
+            state.swept = Some((path, next));
+        }
     }
 
     /// Retire tickets whose evidence a catch-up read found outside the display page. The rows are
@@ -688,6 +711,140 @@ mod tests {
         let states = states.as_object().unwrap().clone();
         assert_eq!(states.len(), 1, "the mail with no row stays pinned");
         assert_eq!(states.values().next().unwrap(), "sent");
+    }
+
+    /// A ticket whose evidence never arrives is never abandoned, so the sweep that looks for it
+    /// must not cost more each time it runs. Measured before this cursor existed: one stuck ticket
+    /// on a 26 MB session re-read up to 26 MB every five seconds, about 5 MB/s sustained and
+    /// unbounded. A transcript only grows, so ground already covered cannot start holding the
+    /// evidence later, and re-reading it buys nothing.
+    #[tokio::test]
+    async fn a_ticket_that_can_never_pair_rereads_only_what_the_source_has_newly_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        // The ticket's own mail id is never written, so no sweep can ever retire it.
+        let path = transcript_with_mail_behind_the_page(dir.path(), "a-different-mail", "other");
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        ctx.transcript_inputs.sent(
+            &ctx,
+            "lane-1",
+            mail_ticket(&source, "never-written", "absent", sent),
+        );
+
+        let sweep = |source: &Source| {
+            let from = ctx
+                .transcript_inputs
+                .catch_up_floor("lane-1", source)
+                .expect("a stuck ticket still asks to be looked for");
+            let len = std::fs::metadata(source.path.as_ref().unwrap())
+                .unwrap()
+                .len();
+            let read = len.saturating_sub(from);
+            if len > from {
+                let scan = scan_range(source, from, None).unwrap();
+                ctx.transcript_inputs
+                    .mark_swept("lane-1", source, scan.next_offset);
+            }
+            read
+        };
+
+        let first = sweep(&source);
+        assert!(first > 128 * 1024, "the first read covers the whole range");
+        // What remains is the trailing assistant group, which the scanner deliberately rewinds to
+        // so a message still being streamed is re-read until it is complete. That is one message,
+        // not one transcript, and it does not grow with the file.
+        let repeat = sweep(&source);
+        assert!(
+            repeat * 10 < first,
+            "a source that has not grown must not cost another full read: {repeat} vs {first}"
+        );
+        assert_eq!(sweep(&source), repeat, "and it stays flat, tick after tick");
+
+        // Only what the agent has newly written is read, which is what tailing costs anyway.
+        let appended = format!(
+            "{}\n",
+            json!({"type":"assistant","message":{"content":"y"}})
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+        drop(file);
+        let after = sweep(&source);
+        assert!(
+            after >= appended.len() as u64 && after <= repeat + appended.len() as u64,
+            "the read covers the new bytes and no more than the re-read group: {after}"
+        );
+
+        // The ticket is still pending and still reads as unread: nothing was silently dropped and
+        // nothing was marked paired on no evidence.
+        let mut items = Vec::new();
+        let mut order = Vec::new();
+        let states = ctx
+            .transcript_inputs
+            .append("lane-1", &source, "", &mut items, &mut order);
+        assert_eq!(states.as_object().unwrap().values().next().unwrap(), "sent");
+    }
+
+    /// A rewritten source is shorter than the cursor that was reading it, so the cursor no longer
+    /// describes ground that exists. The next read starts over rather than reading past the end.
+    #[tokio::test]
+    async fn a_source_rewritten_shorter_than_the_cursor_is_swept_from_the_start_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::transcript::round5_tests::context(dir.path()).await;
+        let path = transcript_with_mail_behind_the_page(dir.path(), "a-different-mail", "other");
+        let source = Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some("s1".into()),
+        };
+        let sent = chrono::Utc::now() - chrono::Duration::milliseconds(STUCK_MS + 1_000);
+        let id = "2dd190b818e0323bb958c845ab7d2f0b";
+        ctx.transcript_inputs
+            .sent(&ctx, "lane-1", mail_ticket(&source, id, "body", sent));
+        let long = std::fs::metadata(&path).unwrap().len();
+        ctx.transcript_inputs.mark_swept("lane-1", &source, long);
+        assert_eq!(
+            ctx.transcript_inputs
+                .catch_up_floor("lane-1", &source)
+                .unwrap(),
+            long
+        );
+
+        // The provider rewrites the session shorter, and the evidence now sits below the cursor.
+        let rewritten = transcript_with_mail_behind_the_page(dir.path(), id, "body");
+        assert_eq!(rewritten, path);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user","message":{"content":format!("[REPOMAIL id={id} from=lane-2/1 reply_to=none] body [{id}] [END REPOMAIL]")}})
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        let floor = ctx
+            .transcript_inputs
+            .catch_up_floor("lane-1", &source)
+            .unwrap();
+        assert!(len < floor, "the cursor is past the end of the new source");
+        let from = if len < floor { 0 } else { floor };
+        let scan = scan_range(&source, from, None).unwrap();
+        let rows: Vec<_> = scan.transcript.into_iter().map(|e| e.item).collect();
+        assert_eq!(
+            ctx.transcript_inputs
+                .retire_confirmed("lane-1", &source, &rows),
+            1,
+            "starting over finds the evidence the stale cursor would have skipped"
+        );
     }
 
     fn ticket_for(
