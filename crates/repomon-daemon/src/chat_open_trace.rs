@@ -76,21 +76,26 @@ fn write(fields: std::fmt::Arguments<'_>) {
 
 /// The append itself, shared by the chat-open and stall budgets.
 fn write_line(fields: std::fmt::Arguments<'_>) {
-    let path = path();
+    append_line(&path(), fields);
+}
+
+/// One `write_all` per line: under `O_APPEND` a single write is atomic, but `writeln!` emits one
+/// write per format fragment, so writers that wake on the same alarm interleaved mid-line.
+fn append_line(path: &std::path::Path, fields: std::fmt::Arguments<'_>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
-        let _ = std::fs::remove_file(&path);
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_BYTES) {
+        let _ = std::fs::remove_file(path);
     }
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let _ = writeln!(file, "{at} {fields}");
+        let _ = file.write_all(format!("{at} {fields}\n").as_bytes());
     }
 }
 
@@ -213,6 +218,14 @@ pub fn chain_head(method: &str, elapsed_ms: u64, connection: u64) {
     ));
 }
 
+/// An allowlisted read still running. It joins no ordering chain, so unlike [`chain_head`] nothing
+/// is queued behind it: this says a read is slow without claiming it is holding anything.
+pub fn slow_read(method: &str, elapsed_ms: u64, connection: u64) {
+    stall(format_args!(
+        "slow_read method={method} elapsed_ms={elapsed_ms} conn={connection} blocking=none"
+    ));
+}
+
 /// A catch-up read found evidence the display page could not reach. Pairs with `input_stuck`:
 /// that line names a ticket nothing could retire, this one names the read that retired it.
 pub fn input_caught_up(retired: usize, floor: u64, rows: usize) {
@@ -227,4 +240,68 @@ pub fn price_table(since: Instant, models: usize) {
         "price_table build_ms={:.1} models={models}",
         millis(since)
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every watchdog wakes on the same alarm boundary, so the trace is written by many tasks at
+    /// one instant. `writeln!` shredded those lines on the operator's machine; this is the shape
+    /// of that failure, and it reproduced here before the single `write_all`.
+    #[test]
+    fn concurrent_writers_never_interleave_a_line() {
+        const WRITERS: usize = 16;
+        const PER_WRITER: usize = 64;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat-open-trace.log");
+
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let path = path.clone();
+                scope.spawn(move || {
+                    for seq in 0..PER_WRITER {
+                        append_line(
+                            &path,
+                            format_args!(
+                                "chain_head method=m{writer} elapsed_ms={seq} conn={writer} still_running=true"
+                            ),
+                        );
+                    }
+                });
+            }
+        });
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for line in body.lines() {
+            // A shredded line carries a second timestamp or a second record glued into it.
+            assert_eq!(line.matches('Z').count(), 1, "interleaved: {line}");
+            assert_eq!(line.matches("chain_head").count(), 1, "interleaved: {line}");
+            let (at, fields) = line.split_once(' ').expect("timestamp and fields");
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(at).is_ok(),
+                "bad timestamp: {line}"
+            );
+            let writer: usize = fields
+                .split("method=m")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|w| w.parse().ok())
+                .unwrap_or_else(|| panic!("unparsable method: {line}"));
+            let seq: usize = fields
+                .split("elapsed_ms=")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("unparsable elapsed_ms: {line}"));
+            assert!(
+                writer < WRITERS && seq < PER_WRITER,
+                "invented values: {line}"
+            );
+            assert!(seen.insert((writer, seq)), "duplicated: {line}");
+        }
+        // Nothing lost and nothing merged: every writer's every line survived intact.
+        assert_eq!(seen.len(), WRITERS * PER_WRITER);
+    }
 }

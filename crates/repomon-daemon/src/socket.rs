@@ -264,18 +264,26 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
             }
             let method = req.method.clone();
             let own = std::time::Instant::now();
-            // Report this request while it is still the chain head. Aborted the moment dispatch
-            // returns, so only a request that outlives its own ceiling ever writes a line.
+            // Report this request while it still runs. Aborted the moment dispatch returns, so
+            // only a request that outlives its own ceiling ever writes a line.
             let watchdog = {
                 let method = method.clone();
                 let conn = sess.id;
+                let kind = in_flight_kind(&method);
                 tokio::spawn(async move {
-                    for ms in CHAIN_HEAD_ALARMS {
+                    for ms in IN_FLIGHT_ALARMS {
                         tokio::time::sleep_until(
                             (own + std::time::Duration::from_millis(ms)).into(),
                         )
                         .await;
-                        crate::chat_open_trace::chain_head(&method, ms, conn);
+                        match kind {
+                            InFlight::ChainHead => {
+                                crate::chat_open_trace::chain_head(&method, ms, conn)
+                            }
+                            InFlight::SlowRead => {
+                                crate::chat_open_trace::slow_read(&method, ms, conn)
+                            }
+                        }
                     }
                 })
             };
@@ -371,9 +379,27 @@ fn ordering_key(method: &str, params: &Option<serde_json::Value>) -> OrderKey {
     window.map_or(OrderKey::Fleet, OrderKey::Window)
 }
 
-/// When a still-running ordered request is reported. The last is past the client's own 15 s
-/// ceiling, so a request that blows through it is named even though its caller has already gone.
-const CHAIN_HEAD_ALARMS: [u64; 3] = [1_000, 5_000, 15_000];
+/// When a still-running request is reported. The last is past the client's own 15 s ceiling, so a
+/// request that blows through it is named even though its caller has already gone.
+const IN_FLIGHT_ALARMS: [u64; 3] = [1_000, 5_000, 15_000];
+
+/// Which verb the in-flight watchdog writes. An allowlisted read joins no chain, so it is the head
+/// of nothing and blocks nothing; reporting it as a chain head made the trace lie in exactly the
+/// case it exists to diagnose. It still earns a line, because a read slow enough to trip the alarm
+/// is worth seeing.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum InFlight {
+    ChainHead,
+    SlowRead,
+}
+
+fn in_flight_kind(method: &str) -> InFlight {
+    if independent_read(method) {
+        InFlight::SlowRead
+    } else {
+        InFlight::ChainHead
+    }
+}
 
 /// A request joins the connection's FIFO chain if and only if a later request on that same
 /// connection could observe its effect. That is the whole rule, and it has two consequences.
@@ -490,6 +516,46 @@ mod tests {
         );
         // A pane method naming no pane at all cannot be narrowed.
         assert_eq!(ordering_key("agent.send_input", &None), OrderKey::Fleet);
+    }
+
+    #[test]
+    fn allowlisted_reads_are_never_reported_as_chain_heads() {
+        // Every method in `independent_read`. The live trace named `repo.pull_requests` a chain
+        // head at 5000 ms while it did GitHub I/O and held nothing.
+        for method in [
+            "ping",
+            "agent.detect",
+            "lane.list",
+            "agent.transcript_page",
+            "agent.command_catalog",
+            "agent.input_history",
+            "agent.capture",
+            "daemon.status",
+            "repo.pull_requests",
+            "repomind.status",
+            "repo.list",
+            "config.get",
+            "usage.get",
+            "usage.summary",
+            "terminal.list_all",
+            "lane.headline",
+            "file.index",
+        ] {
+            assert!(independent_read(method), "{method}");
+            assert_eq!(in_flight_kind(method), InFlight::SlowRead, "{method}");
+        }
+        // A request that joins a chain really is holding whatever queued behind it.
+        for method in [
+            "agent.send_input",
+            "agent.fit",
+            "viewport.set",
+            "message.send",
+            "lane.get",
+            "agent.spawn",
+        ] {
+            assert!(!independent_read(method), "{method}");
+            assert_eq!(in_flight_kind(method), InFlight::ChainHead, "{method}");
+        }
     }
 
     #[tokio::test]
