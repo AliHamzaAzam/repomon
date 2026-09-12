@@ -528,18 +528,28 @@ impl Ctx {
         let mut watchers = self.lane_watchers.lock().await;
         watchers.retain(|lane_id, _| active_lanes.contains(lane_id));
 
-        for lane_id in active_lanes {
-            if let std::collections::hash_map::Entry::Vacant(e) = watchers.entry(lane_id) {
-                if let Ok(lane) = self.lanes.get(lane_id).await {
-                    let root = lane.worktree.path.clone();
-                    if let Ok(w) = worktree_watch::start_lane_watcher(
-                        self.events.clone(),
-                        self.file_indices.clone(),
-                        lane_id,
-                        root,
-                    ) {
-                        e.insert(w);
-                    }
+        // `Lanes::get` is a whole `list()` behind the scenes, so asking per lane put two store
+        // jobs on the single worker for every newly visible lane at once. A `file.list` arriving
+        // during that burst queues behind all of them before it can read its own lane.
+        let missing: Vec<LaneId> = active_lanes
+            .into_iter()
+            .filter(|id| !watchers.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let Ok(lanes) = self.lanes.list().await else {
+            return;
+        };
+        for lane in lanes.into_iter().filter(|l| missing.contains(&l.id)) {
+            if let std::collections::hash_map::Entry::Vacant(e) = watchers.entry(lane.id) {
+                if let Ok(w) = worktree_watch::start_lane_watcher(
+                    self.events.clone(),
+                    self.file_indices.clone(),
+                    lane.id,
+                    lane.worktree.path.clone(),
+                ) {
+                    e.insert(w);
                 }
             }
         }
@@ -1017,6 +1027,28 @@ mod stream_tests {
 
     async fn test_ctx() -> Arc<Ctx> {
         Ctx::new(Store::open_in_memory().unwrap(), Config::default(), None)
+    }
+
+    /// The reconcile used to ask the store for each newly visible lane separately, and
+    /// `Lanes::get` is a whole `list()` each time, so a viewport of N lanes enqueued 2N store jobs
+    /// in one burst. A `file.list` arriving during that burst waited behind all of them. One
+    /// listing now covers the whole viewport, and a viewport whose lanes are all watched already
+    /// does not list at all.
+    #[tokio::test]
+    async fn reconciling_watchers_reads_the_lane_set_once_and_skips_it_when_nothing_is_new() {
+        let ctx = test_ctx().await;
+        let s = ctx.open_session(ConnKind::Local).await;
+        *s.viewport.lock().await = vec![7, 9, 11];
+
+        // No repos in this store, so no lane resolves and no watcher can start. What matters is
+        // that the pass completes without leaving partial state behind.
+        ctx.reconcile_lane_watchers().await;
+        assert!(ctx.lane_watchers.lock().await.is_empty());
+
+        // An empty viewport retires every watcher and needs no listing to do it.
+        s.viewport.lock().await.clear();
+        ctx.reconcile_lane_watchers().await;
+        assert!(ctx.lane_watchers.lock().await.is_empty());
     }
 
     #[tokio::test]
