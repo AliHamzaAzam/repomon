@@ -203,9 +203,12 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     // Independent reads may overtake other requests. Everything else, including input,
     // viewport changes and watch/unwatch, executes in wire order. Clients match replies by ID.
     let mut requests = tokio::task::JoinSet::new();
-    // Carries the predecessor's method and duration, so a stalled successor can name what held
-    // the chain ahead of it.
-    let mut ordered_tail: Option<tokio::sync::oneshot::Receiver<(String, f64)>> = None;
+    // One tail per ordering key. Each carries its predecessor's method and duration so a stalled
+    // successor can name what held its chain.
+    let mut ordered_tails: std::collections::HashMap<
+        OrderKey,
+        tokio::sync::oneshot::Receiver<(String, f64)>,
+    > = std::collections::HashMap::new();
     while let Some(frame) = in_rx.recv().await {
         while requests.try_join_next().is_some() {}
         if requests.len() >= 128 {
@@ -241,7 +244,8 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
             (None, None)
         } else {
             let (done, next) = tokio::sync::oneshot::channel::<(String, f64)>();
-            (ordered_tail.replace(next), Some(done))
+            let key = ordering_key(&req.method, &req.params);
+            (ordered_tails.insert(key, next), Some(done))
         };
         let ctx = ctx.clone();
         let sess = sess.clone();
@@ -299,6 +303,72 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     drop(out_tx);
     forwarder.abort();
     let _ = writer.await;
+}
+
+/// What a request is ordered against. The chain used to be the whole connection, so a fleet mail
+/// was a predecessor of every keystroke in every pane; the desktop holds one connection, which is
+/// how one slow unrelated request froze all twelve panes at once.
+///
+/// The key is the narrowest thing a later request could observe the effect through.
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+enum OrderKey {
+    /// Steering or watching one pane. Two sends to the same window stay ordered; sends to
+    /// different windows do not need to be, and never did.
+    Window(String),
+    /// This connection's own viewport, focus and subscription state. Claims must apply in the
+    /// order the client made them, and `agent.fit` arbitrates on those claims, so it shares the
+    /// key rather than being scoped to the window it resizes.
+    Session,
+    /// Everything else ordered: fleet and store mutations, and the reads that must see them.
+    /// Kept as one chain rather than split per method, because a create and the call that acts on
+    /// what it created are routinely different methods.
+    Fleet,
+}
+
+/// Methods that steer or watch an existing pane. Window lifecycle (`agent.spawn`, `agent.adopt`,
+/// `agent.stop`) is deliberately absent: fleet-wide readers observe those, so they stay on
+/// `Fleet`.
+const PANE_SCOPED: [&str; 10] = [
+    "agent.send_input",
+    "agent.answer",
+    "agent.key",
+    "agent.signal",
+    "agent.scroll",
+    "agent.resize",
+    "agent.target",
+    "agent.watch_bytes",
+    "agent.prompt",
+    "agent.transcript_watch",
+];
+
+/// The per-connection state claims, ordered against each other only.
+///
+/// `agent.fit` is here rather than on its window because it reads the focus and fit windows that
+/// `viewport.set` writes: `fit_allowed` compares the caller's `focus_at` against every other
+/// session's, so a fit that overtakes the claim granting it ownership is refused and the client
+/// repaints at the old grid. Scoping the release to the windows a claim names would still miss a
+/// claim that drops one. `agent.resize` needs none of this; it arbitrates nothing.
+const SESSION_SCOPED: [&str; 4] = ["viewport.set", "subscribe", "watcher.park", "agent.fit"];
+
+fn ordering_key(method: &str, params: &Option<serde_json::Value>) -> OrderKey {
+    if SESSION_SCOPED.contains(&method) {
+        return OrderKey::Session;
+    }
+    if !PANE_SCOPED.contains(&method) {
+        return OrderKey::Fleet;
+    }
+    let window = params.as_ref().and_then(|p| {
+        p.get("window")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                p.get("lane_id")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|lane| format!("lane-{lane}"))
+            })
+    });
+    // A pane method that names no pane cannot be scoped to one, so it keeps the broad chain.
+    window.map_or(OrderKey::Fleet, OrderKey::Window)
 }
 
 /// When a still-running ordered request is reported. The last is past the client's own 15 s
@@ -368,6 +438,107 @@ fn independent_read(method: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ordering_keys_separate_panes_sessions_and_the_fleet() {
+        let win = |w: &str| Some(serde_json::json!({ "lane_id": 7, "window": w }));
+        let lane_only = Some(serde_json::json!({ "lane_id": 7 }));
+
+        // Two sends to one window share a key, so they stay in the order they were typed.
+        assert_eq!(
+            ordering_key("agent.send_input", &win("lane-7")),
+            ordering_key("agent.key", &win("lane-7"))
+        );
+        // Sends to different windows do not, which is the freeze: one slow pane held the rest.
+        assert_ne!(
+            ordering_key("agent.send_input", &win("lane-7")),
+            ordering_key("agent.send_input", &win("lane-9"))
+        );
+        // A mail send and a lane read share nothing with any pane.
+        assert_eq!(ordering_key("message.send", &None), OrderKey::Fleet);
+        assert_ne!(
+            ordering_key("message.send", &None),
+            ordering_key("agent.send_input", &win("lane-7"))
+        );
+        // Viewport claims are ordered against each other, and against the fits that arbitrate on
+        // them: `agent.fit` reads the focus and fit windows `viewport.set` writes, so a fit must
+        // not overtake the claim that grants it ownership. Fits to different windows share the key
+        // for the same reason, since the claim they read is per connection, not per window.
+        assert_eq!(
+            ordering_key("viewport.set", &win("lane-7")),
+            OrderKey::Session
+        );
+        assert_eq!(
+            ordering_key("viewport.set", &win("lane-7")),
+            ordering_key("agent.fit", &win("lane-7"))
+        );
+        assert_eq!(
+            ordering_key("agent.fit", &win("lane-7")),
+            ordering_key("agent.fit", &win("lane-9"))
+        );
+        // `agent.resize` arbitrates on nothing, so it stays scoped to its own pane.
+        assert_eq!(
+            ordering_key("agent.resize", &win("lane-7")),
+            OrderKey::Window("lane-7".into())
+        );
+        // Window lifecycle stays on the broad chain: fleet readers observe it.
+        assert_eq!(ordering_key("agent.spawn", &win("lane-7")), OrderKey::Fleet);
+        assert_eq!(ordering_key("agent.stop", &win("lane-7")), OrderKey::Fleet);
+        // A pane method naming only a lane still resolves to that lane's window.
+        assert_eq!(
+            ordering_key("agent.send_input", &lane_only),
+            OrderKey::Window("lane-7".into())
+        );
+        // A pane method naming no pane at all cannot be narrowed.
+        assert_eq!(ordering_key("agent.send_input", &None), OrderKey::Fleet);
+    }
+
+    #[tokio::test]
+    async fn a_slow_request_does_not_delay_an_ordered_request_with_a_different_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        let ctx = Ctx::new_with_paths(
+            repomon_core::Store::open_in_memory().unwrap(),
+            repomon_core::Config::default(),
+            None,
+            dir.path().join("config"),
+            dir.path().join("notes"),
+        );
+        // `lane.get` cannot finish while this is held; it is on the Fleet chain.
+        let blocked = ctx.overlay_flight.lock().await;
+        let task = tokio::spawn(handle_conn(ctx.clone(), server));
+        protocol::write_message(
+            &mut client,
+            &Request::new(1, "lane.get", Some(serde_json::json!({"lane_id": 1}))),
+        )
+        .await
+        .unwrap();
+        // A session-scoped request behind it, on its own key.
+        protocol::write_message(
+            &mut client,
+            &Request::new(
+                2,
+                "agent.fit",
+                Some(serde_json::json!({"lane_id": 7, "window": "lane-7"})),
+            ),
+        )
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(2), protocol::read_frame(&mut client))
+            .await
+            .expect("pane request queued behind an unrelated Fleet request")
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["id"], 2, "the pane request must answer first");
+        drop(blocked);
+        task.abort();
+    }
+
     #[tokio::test]
     async fn slow_overlay_does_not_delay_ping_on_the_same_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -419,6 +590,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_input_sends_to_one_window_still_arrive_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inorder.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&path))
+            .await
+            .unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        let ctx = Ctx::new_with_paths(
+            repomon_core::Store::open_in_memory().unwrap(),
+            repomon_core::Config::default(),
+            None,
+            dir.path().join("config"),
+            dir.path().join("notes"),
+        );
+        let task = tokio::spawn(handle_conn(ctx.clone(), server));
+        for (id, text) in [(1, "first"), (2, "second")] {
+            protocol::write_message(
+                &mut client,
+                &Request::new(
+                    id,
+                    "agent.send_input",
+                    Some(serde_json::json!({
+                        "lane_id": 7, "window": "lane-7", "text": text, "enter": true
+                    })),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        // Same window, same key: the replies must come back in the order they were sent, whatever
+        // each one answers.
+        for expected in 1..=2 {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(5), protocol::read_frame(&mut client))
+                    .await
+                    .expect("input send answered")
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Response>(&frame).unwrap().id,
+                Some(expected)
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn ordered_mutations_keep_wire_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ordered.sock");
@@ -436,20 +655,20 @@ mod tests {
         );
         let blocked = ctx.config.write().await;
         let task = tokio::spawn(handle_conn(ctx.clone(), server));
-        // A pending configuration write must hold later ordered requests, while ping bypasses it.
-        protocol::write_message(
-            &mut client,
-            &Request::new(
-                1,
-                "agent.add",
-                Some(serde_json::json!({"name":"qa-ordered", "command":"echo"})),
-            ),
-        )
-        .await
-        .unwrap();
-        protocol::write_message(&mut client, &Request::new(2, "subscribe", None))
+        // A pending configuration write must hold later requests on the same ordering key, while
+        // ping bypasses it. Both mutations are `Fleet`, so this is the chain that still exists.
+        for (id, name) in [(1, "qa-ordered-one"), (2, "qa-ordered-two")] {
+            protocol::write_message(
+                &mut client,
+                &Request::new(
+                    id,
+                    "agent.add",
+                    Some(serde_json::json!({"name": name, "command": "echo"})),
+                ),
+            )
             .await
             .unwrap();
+        }
         protocol::write_message(&mut client, &Request::new(3, "ping", None))
             .await
             .unwrap();
