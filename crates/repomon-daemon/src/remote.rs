@@ -47,7 +47,8 @@ fn remote_method_allowed(method: &str) -> bool {
 
         | "repo.list" | "lane.list" | "lane.get"
         | "commit.today" | "commit.range" | "commit.search" | "commit.recent"
-        | "agent.capture" | "agent.transcript" | "agent.transcript_page" | "agent.transcript_watch" | "lane.set_view"
+        | "agent.capture" | "agent.transcript" | "agent.transcript_page" | "agent.transcript_watch"
+        | "agent.input_history" | "lane.set_view"
         | "usage.get" | "daemon.status"
         // Allow remote usage reads while keeping host mutations and probes local.
         | "usage.summary" | "usage.timeline" | "usage.sessions" | "usage.findings"

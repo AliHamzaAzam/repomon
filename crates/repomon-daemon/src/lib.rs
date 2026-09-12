@@ -9,6 +9,7 @@ pub mod conn;
 pub mod ext;
 pub mod files;
 pub mod inject;
+pub mod input_history;
 pub mod mail;
 pub mod notify_watch;
 pub mod path_env;
