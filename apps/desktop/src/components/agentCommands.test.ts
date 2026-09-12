@@ -16,7 +16,7 @@ describe("bareAlias", () => {
   });
 });
 
-const catalog = (commands: CommandCatalog["commands"]): CommandCatalog => ({ commands, models: [], model_command: null });
+const catalog = (commands: CommandCatalog["commands"]): CommandCatalog => ({ commands, models: [], model_command: null, efforts: [], effort_command: null });
 
 describe("resolveCommand", () => {
   it("sends a one_shot command as a fully specified line, arguments included, never opening the terminal", () => {

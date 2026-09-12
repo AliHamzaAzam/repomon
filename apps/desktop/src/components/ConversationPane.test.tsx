@@ -26,7 +26,7 @@ beforeEach(() => {
     if (method === "agent.transcript_page") return { items:[row("old:1", "Earlier history")], next_before:40 };
     if (method === "agent.capture") return { content:"line one\nline two\nline three" };
     if (method === "agent.prompt") return { dialog:null };
-    if (method === "agent.command_catalog") return { commands:[{name:"model",description:"",source:"builtin",one_shot:true}], models:[], model_command:"/model" };
+    if (method === "agent.command_catalog") return { commands:[{name:"model",description:"",source:"builtin",one_shot:true}], models:[], model_command:"/model", efforts: [], effort_command: null };
     return null;
   });
 });

@@ -9,12 +9,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke:vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open:vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-const emptyCatalog: CommandCatalog = { commands: [], models: [], model_command: null };
+const emptyCatalog: CommandCatalog = { commands: [], models: [], model_command: null, efforts: [], effort_command: null };
 function props(overrides: Partial<Parameters<typeof AttachmentComposer>[0]> = {}) {
   return {
     kind: "codex", disabled: false, busy: false, onSend: vi.fn(),
     catalog: emptyCatalog, catalogError: false, catalogLoading: false,
-    onSelectModel: vi.fn(), displayed: () => true,
+    onSelectEffort: () => {}, onSelectModel: vi.fn(), displayed: () => true,
     history: [] as string[], historyUnavailable: false, historyError: null as string | null,
     ...overrides,
   };
@@ -192,7 +192,7 @@ describe("native slash-command palette (round 10)", () => {
       { name: "myplugin:review", description: "Review the diff", source: "plugin", one_shot: true },
     ],
     models: [],
-    model_command: null,
+    model_command: null, efforts: [], effort_command: null,
   };
 
   it("opens on a bare slash, filters as the operator types, and shows the highlighted row's description", () => {
@@ -297,7 +297,7 @@ describe("native model picker (round 10)", () => {
       { id: "sonnet", label: "Claude Sonnet", current: true },
       { id: "haiku", label: "Claude Haiku", current: false },
     ],
-    model_command: "/model",
+    model_command: "/model", efforts: [], effort_command: null,
   };
 
   it("opens a panel from the model chip listing every model, a check on the current one", () => {
@@ -328,7 +328,7 @@ describe("native model picker (round 10)", () => {
     const unconfirmed: CommandCatalog = {
       commands: [],
       models: [{ id: "gpt-6-astra", label: "GPT-6-Astra", current: true }],
-      model_command: null,
+      model_command: null, efforts: [], effort_command: null,
     };
     render(() => <AttachmentComposer {...props({ catalog: unconfirmed })} />);
     fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));

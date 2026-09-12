@@ -2,7 +2,7 @@ import { createEffect, createSignal, onCleanup } from "solid-js";
 import { daemonCall } from "../ipc/rpc";
 import type { CommandCatalog } from "../bindings";
 
-const EMPTY_CATALOG: CommandCatalog = { commands: [], models: [], model_command: null };
+const EMPTY_CATALOG: CommandCatalog = { commands: [], models: [], model_command: null, efforts: [], effort_command: null };
 
 // Per-pane client cache, keyed by (lane_id, window): the palette opens on a keystroke and must
 // feel instant, so a pane's catalog is fetched once on mount and reused for the rest of that

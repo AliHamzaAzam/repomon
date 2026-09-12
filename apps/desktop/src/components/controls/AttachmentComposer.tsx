@@ -66,6 +66,7 @@ export default function AttachmentComposer(props: {
   catalogError: boolean;
   catalogLoading: boolean;
   onSelectModel: (id: string) => void;
+  onSelectEffort: (id: string) => void;
   // The same "is this pane actually on screen right now" notion ConversationPane already uses
   // for its dialog polling. A pane that isn't displayed stays mounted (tab switching keeps it
   // warm), but its palette/model panel portal into document.body regardless, so without this
@@ -301,7 +302,7 @@ export default function AttachmentComposer(props: {
       </div>
     </div>
     <Show when={modelOpen() && modelButtonRef && props.displayed()}>
-      <ModelPanel models={props.catalog.models} modelCommand={props.catalog.model_command} kind={props.kind} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
+      <ModelPanel models={props.catalog.models} modelCommand={props.catalog.model_command} efforts={props.catalog.efforts} effortCommand={props.catalog.effort_command} kind={props.kind} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onSelectEffort={(id) => { setModelOpen(false); props.onSelectEffort(id); }} onClose={() => setModelOpen(false)} />
     </Show>
     <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>
     <Show when={error()}><p class="text-xs text-fault" role="alert">{error()}</p></Show>

@@ -566,6 +566,8 @@ const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
       { id:"grok-4", label:"Grok 4", current:false },
     ],
     model_command: "/model",
+    efforts: [],
+    effort_command: null,
   },
   "native-palette": {
     commands: [
@@ -582,8 +584,16 @@ const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
       { id:"claude-sonnet-5", label:"Sonnet 5", current:true },
     ],
     model_command: "/model",
+    efforts: [
+      { id:"low", label:"Low", current:false },
+      { id:"medium", label:"Medium", current:false },
+      { id:"high", label:"High", current:true },
+      { id:"xhigh", label:"Xhigh", current:false },
+      { id:"max", label:"Max", current:false },
+    ],
+    effort_command: "/effort",
   },
-  "native-empty": { commands: [], models: [], model_command: null },
+  "native-empty": { commands: [], models: [], model_command: null, efforts: [], effort_command: null },
   "native-model-dull": {
     commands: [{ name:"model", description:"Change the active model", source:"builtin", one_shot:true }],
     models: [
@@ -591,6 +601,8 @@ const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
       { id:"anthropic/claude-fable-5.1", label:"Claude Fable 5.1", current:false },
     ],
     model_command: "/model",
+    efforts: [],
+    effort_command: null,
   },
   // Defect ONE: a kind with models but no confirmed one-shot switch form (codex, opencode) must
   // never fall back to the terminal - the panel says so instead of offering a selection it can't
@@ -602,12 +614,14 @@ const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
       { id:"gpt-5.6-luna", label:"gpt-5.6-luna", current:false },
     ],
     model_command: null,
+    efforts: [],
+    effort_command: null,
   },
 };
 const nativeCatalog = NATIVE_CATALOGS[scenario];
 
 const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
-  "agent.command_catalog": () => nativeCatalog ?? { commands: [], models: [], model_command: null },
+  "agent.command_catalog": () => nativeCatalog ?? { commands: [], models: [], model_command: null, efforts: [], effort_command: null },
   "repo.list": () => fixtureRepos,
   "lane.list": () => fixtureLanes,
   "usage.get": () => [],
