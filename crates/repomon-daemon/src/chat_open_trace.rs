@@ -201,6 +201,14 @@ pub fn input_stuck(
     ));
 }
 
+/// A catch-up read found evidence the display page could not reach. Pairs with `input_stuck`:
+/// that line names a ticket nothing could retire, this one names the read that retired it.
+pub fn input_caught_up(retired: usize, floor: u64, rows: usize) {
+    stall(format_args!(
+        "input_caught_up retired={retired} floor={floor} rows={rows}"
+    ));
+}
+
 /// Built once per daemon start, on the first conversation that has costed events to price.
 pub fn price_table(since: Instant, models: usize) {
     write(format_args!(

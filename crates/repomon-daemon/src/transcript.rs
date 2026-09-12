@@ -921,6 +921,53 @@ async fn capture_page(ctx: &Arc<Ctx>, p: &Params) -> Result<Value, String> {
     )
 }
 
+/// How often a window with a stuck ticket may re-read behind its page. The read is bounded by the
+/// oldest pending ticket's floor, and a healthy window never performs one at all.
+const CATCH_UP_EVERY: Duration = Duration::from_secs(5);
+
+/// Look for a stuck ticket's evidence behind the display page and retire it if the row is there.
+///
+/// The page is the last [`PAGE_BYTES`], which is a display bound. A session writing faster than
+/// that carries a row out of the window between two passes, and `reconcile` then never sees the
+/// one row that would have paired. Reading from the ticket's own floor is where the evidence has
+/// to be if it exists, so this asks that question directly rather than waiting for a page that
+/// will never contain the answer.
+async fn catch_up_pending(
+    ctx: &Arc<Ctx>,
+    window: &str,
+    source: &Source,
+    last: &mut std::time::Instant,
+) {
+    if source.path.is_none() || last.elapsed() < CATCH_UP_EVERY {
+        return;
+    }
+    let Some(floor) = ctx.transcript_inputs.catch_up_floor(window, source) else {
+        return;
+    };
+    *last = std::time::Instant::now();
+    let scanned = {
+        let source = source.clone();
+        tokio::task::spawn_blocking(move || scan_range(&source, floor, None))
+            .await
+            .ok()
+            .and_then(Result::ok)
+    };
+    let Some(scan) = scanned else {
+        return;
+    };
+    let rows: Vec<_> = scan
+        .transcript
+        .into_iter()
+        .map(|entry| entry.item)
+        .collect();
+    let retired = ctx
+        .transcript_inputs
+        .retire_confirmed(window, source, &rows);
+    if retired > 0 {
+        crate::chat_open_trace::input_caught_up(retired, floor, rows.len());
+    }
+}
+
 // A second subscription may resolve a shared input before this watch's history worker catches
 // up. Keep its existing pending row until this watch can upsert the durable alias, with no gap.
 fn retain_pending_until_consumed(
@@ -1094,6 +1141,7 @@ pub async fn watch(
         let mut previous_inputs = Value::Null;
         let mut previous_pending = initial_pending;
         let mut input_source = initial_source.clone();
+        let mut caught_up = std::time::Instant::now() - CATCH_UP_EVERY;
         loop {
             tokio::select! {
                 Some(result) = reads.join_next(), if !reads.is_empty() => {
@@ -1189,6 +1237,7 @@ pub async fn watch(
                         );
                         live.retain(|i| matches!(i.kind.as_deref(), Some("dialog" | "status")));
                     }
+                    catch_up_pending(&task_ctx, &task_window, &initial_source, &mut caught_up).await;
                     let replaced = task_ctx.transcript_inputs.reconcile(&task_window, &initial_source, &mut finals);
                     let replaced: Vec<_> = replaced.into_iter().filter(|id| state.forget_replaced_user(id)).collect();
                     let mut update = state.update(finals, live, active);

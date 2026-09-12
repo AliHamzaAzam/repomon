@@ -353,6 +353,24 @@ describe("pending queued/sent user turns", () => {
     expect(seated?.textContent).not.toContain("Queued");
     expect(seated?.textContent).not.toContain("Sent");
   });
+  it("attributes inbound mail to its sender rather than to the operator, pinned or seated", async () => {
+    const mail = { id: "2dd190b818e0323bb958c845ab7d2f0b", sender: "lane-48358676/1", reply_to: null };
+    items = [{ id: "m1", kind: "mail", role: "user", text: "Gates are green.", at: null, partial: true, mail }];
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => {
+      if (method === "agent.transcript_watch") return (args[0] as {on:boolean}).on ? { items, next_before:null, input_states:{m1:"sent"} } : null;
+      return original(method, ...args);
+    });
+    const result = mount();
+    await screen.findByText("Gates are green.");
+    // Mail is typed into the agent's pane, so it arrives on the input path carrying role "user".
+    // That is a mechanism, not authorship: it must never be labelled or aligned as the operator's.
+    const pinned = result.container.querySelector('.conversation-pending-queue [data-transcript-id="m1"]');
+    expect(pinned).not.toBeNull();
+    expect(pinned?.querySelector(".conversation-gutter")?.textContent).toContain("lane-48358676/1");
+    expect(pinned?.querySelector(".conversation-gutter")?.textContent).not.toContain("you");
+    expect(pinned?.classList.contains("conversation-user")).toBe(false);
+  });
   it("seats an unobservable agent's message in the ledger marked Delivered, never pinned as unread", async () => {
     items = [{ id:"u1", kind:"user", role:"user", text:"Do the thing", at:null, partial:true }];
     const original = vi.mocked(daemonCall).getMockImplementation()!;
