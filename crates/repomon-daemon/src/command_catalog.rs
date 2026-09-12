@@ -180,7 +180,16 @@ pub async fn build(ctx: &Ctx, lane: &Lane, window: Option<String>) -> CommandCat
                 .await
                 .unwrap_or(None)
         }
-        _ => None,
+        AgentKind::Antigravity => tokio::task::spawn_blocking(antigravity::current_model)
+            .await
+            .unwrap_or(None),
+        AgentKind::OpenCode => {
+            let sid = session_id.clone();
+            tokio::task::spawn_blocking(move || opencode::current_model(sid.as_deref()))
+                .await
+                .unwrap_or(None)
+        }
+        AgentKind::Cursor | AgentKind::Other(_) => None,
     };
     if let Some(current_id) = current {
         match models.iter_mut().find(|m| m.id == current_id) {
@@ -835,6 +844,30 @@ mod opencode {
         }
     }
 
+    /// OpenCode keeps no model in its config file; it records one per session, in the same store
+    /// the transcript scanner already reads, as `{"id":...,"providerID":...}`. Without the
+    /// window's session there is nothing to look up, and an unknown model is left unknown.
+    pub fn current_model(session_id: Option<&str>) -> Option<String> {
+        current_model_at(&repomon_core::agent::opencode::database_path(), session_id?)
+    }
+
+    fn current_model_at(path: &Path, session_id: &str) -> Option<String> {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        let model: String = conn
+            .query_row(
+                "SELECT model FROM session WHERE id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_str(&model).ok()?;
+        Some(value.get("id")?.as_str()?.to_string())
+    }
+
     fn file_commands(repo_root: &Path) -> Vec<CatalogCommand> {
         let mut out = Vec::new();
         if let Some(home) = directories::BaseDirs::new() {
@@ -912,6 +945,33 @@ mod opencode {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The model lives in the session row as a JSON object, so the chip needs the `id` out of
+        /// it. Without a session there is nothing to read, and that stays `None` rather than
+        /// becoming a default.
+        #[test]
+        fn the_session_row_supplies_the_model_id_and_an_unknown_session_supplies_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("opencode.db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, model TEXT)", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_a', '{\"id\":\"nemotron-3-ultra-free\",\"providerID\":\"opencode\"}')",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO session VALUES ('ses_blank', '')", [])
+                .unwrap();
+            drop(conn);
+            assert_eq!(
+                current_model_at(&path, "ses_a").as_deref(),
+                Some("nemotron-3-ultra-free")
+            );
+            assert!(current_model_at(&path, "ses_missing").is_none());
+            assert!(current_model_at(&path, "ses_blank").is_none());
+            assert!(current_model(None).is_none(), "no session, no claim");
+        }
 
         #[test]
         fn models_builtin_is_marked_not_one_shot() {
@@ -1030,6 +1090,28 @@ mod antigravity {
         }
     }
 
+    /// The CLI persists the chosen model in its own settings file, as the picker's display name
+    /// ("Gemini 3.8 Flash (High)") rather than the id the `/model` argument takes. Normalising the
+    /// display name back to that id is what lets the chip match a catalog entry; a name that does
+    /// not normalise to a known id is returned as read, never guessed at.
+    pub fn current_model() -> Option<String> {
+        let settings = directories::BaseDirs::new()?
+            .home_dir()
+            .join(".gemini/antigravity-cli/settings.json");
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(settings).ok()?).ok()?;
+        let name = value.get("model")?.as_str()?;
+        Some(model_id_from_display(name))
+    }
+
+    fn model_id_from_display(name: &str) -> String {
+        name.split_whitespace()
+            .map(|part| part.trim_matches(['(', ')']).to_lowercase())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+
     fn plugin_commands(plugins_dir: &Path) -> Vec<CatalogCommand> {
         let Ok(entries) = fs::read_dir(plugins_dir) else {
             return Vec::new();
@@ -1053,6 +1135,23 @@ mod antigravity {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The settings file stores the picker's display name, the `/model` argument takes an id,
+        /// and the chip only lights up when the two meet. Pinning the normalisation against the
+        /// real catalog ids is what keeps a switch the operator just made visible in the chip.
+        #[test]
+        fn the_settings_display_name_normalises_onto_a_catalog_model_id() {
+            assert_eq!(
+                model_id_from_display("Gemini 3.8 Flash (High)"),
+                "gemini-3.8-flash-high"
+            );
+            assert!(MODELS.contains(&model_id_from_display("Gemini 3.8 Flash (High)").as_str()));
+            assert!(MODELS.contains(&model_id_from_display("Gemini 3.1 Pro (Low)").as_str()));
+            // An id the list does not carry stays as read rather than being coerced onto a near
+            // match: an absent chip is better than a wrong one.
+            assert_eq!(model_id_from_display("Some New Model"), "some-new-model");
+            assert!(!MODELS.contains(&model_id_from_display("Some New Model").as_str()));
+        }
 
         #[test]
         fn label_for_title_cases_each_hyphen_separated_part() {
