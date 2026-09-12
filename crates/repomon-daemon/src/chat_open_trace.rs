@@ -201,6 +201,18 @@ pub fn input_stuck(
     ));
 }
 
+/// An ordered request still running, reported while it runs rather than after it finishes.
+///
+/// `ordered_wait` can only ever describe a stall that already ended: it is written by the
+/// successor once its predecessor completes and reports its own duration. A request that never
+/// returns therefore leaves no line at all, its successors' clients give up at their own ceiling,
+/// and the trace shows only the worst stall that happened to finish. This is the other half.
+pub fn chain_head(method: &str, elapsed_ms: u64, connection: u64) {
+    stall(format_args!(
+        "chain_head method={method} elapsed_ms={elapsed_ms} conn={connection} still_running=true"
+    ));
+}
+
 /// Built once per daemon start, on the first conversation that has costed events to price.
 pub fn price_table(since: Instant, models: usize) {
     write(format_args!(
