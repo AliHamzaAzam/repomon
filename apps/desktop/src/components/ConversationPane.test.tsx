@@ -80,6 +80,27 @@ describe("ConversationPane", () => {
     await waitFor(() => expect(screen.getByRole("textbox", { name:"Reply to codex" })).not.toBeDisabled());
     expect(dialogSummary({ ...dialog, question:"x".repeat(140) })).toHaveLength(120);
   });
+  it("drives the decision with digits, arrow keys, and Enter, and drops a trailing period from the label", async () => {
+    const dialog = { title:null, question:"Do you want to proceed?", body:[], options:[{number:1,text:"Type something."},{number:2,text:"Leave it"},{number:3,text:"Cancel"}], selected:0 };
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => method === "agent.prompt" ? {dialog} : original(method, ...args));
+    mount();
+    const first = await screen.findByRole("button", { name:"Type something" });
+    await waitFor(() => expect(first).toHaveFocus());
+    fireEvent.keyDown(first, { key:"ArrowDown" });
+    expect(screen.getByRole("button", { name:"Leave it" })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("button", { name:"Leave it" }), { key:"Enter" });
+    await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.answer", { lane_id:7, window:"lane-7/1", choice:1, expect_summary:"Do you want to proceed?" }));
+  });
+  it("answers immediately on a digit key, without needing Enter", async () => {
+    const dialog = { title:null, question:"Pick one", body:[], options:[{number:1,text:"Yes"},{number:2,text:"No"}], selected:0 };
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => method === "agent.prompt" ? {dialog} : original(method, ...args));
+    mount();
+    const first = await screen.findByRole("button", { name:"Yes" });
+    fireEvent.keyDown(first, { key:"2" });
+    await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.answer", { lane_id:7, window:"lane-7/1", choice:1, expect_summary:"Pick one" }));
+  });
   it("sends a reply on Enter, leaving Shift+Enter for a newline", async () => {
     mount();
     await screen.findByText("Still writing");

@@ -304,6 +304,14 @@ const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode
 // tools, partial assistant output, working status and live:dialog; transcript.rs emits pane:<window>
 // terminal_block when there is no source. All fixture rows satisfy the merged generated binding.
 const fixtureDialog: PendingDialog = { title: "Bash command", question: "Do you want to proceed?", body: ["bun run build"], options: [{ number:1, text:"Yes" }, { number:2, text:"No" }], selected:0 };
+// Anticipates the daemon's split-field option shape (see the desktop's optionLabel/optionDescription)
+// ahead of the real bindings; drop the cast once agent.prompt's wire type carries label/description.
+const longOption = (number: number, label: string, description: string) => ({ number, text:label, label, description }) as unknown as PendingDialog["options"][number];
+const fixtureDialogLong: PendingDialog = { title: "Migration cleanup", question: "The migration touched three tables that still have unindexed foreign keys. How should this proceed?", body: Array.from({ length: 12 }, (_, i) => `Table ${i + 1}: fk_table_${i + 1}_parent references table_${i + 1}(id), no index found.`), options: [
+  longOption(1, "Add the missing indexes", "Runs CREATE INDEX CONCURRENTLY for each of the three foreign keys before continuing the migration. Adds a few minutes but avoids locking writes on the affected tables."),
+  longOption(2, "Leave it", "No deletion. Everything currently works, but future joins on these foreign keys will do a full table scan until they are indexed later."),
+  longOption(3, "Cancel the migration", "Rolls back the schema changes made so far and leaves the tables exactly as they were before this run started."),
+], selected:0 };
 const item = (id: string, kind: string, text: string, extra: Partial<TranscriptItem> = {}): TranscriptItem => ({ id, kind, role: kind === "user" ? "user" : kind === "assistant" ? "assistant" : "tools", text, at:"2026-09-10T09:41:00Z", ...extra });
 const richItems: TranscriptItem[] = [
   item("u1", "user", "Add collections to the charms page. Keep the existing grid and let customers filter by collection."),
@@ -376,7 +384,7 @@ function transcriptItems(): TranscriptItem[] {
   if (scenario === "dull") return [];
   if (scenario === "attachments") return [item("u1", "user", "Check the README."), item("a1", "assistant", "The README matches the current setup. No changes needed.")];
   if (scenario === "broken") return brokenItems;
-  if (scenario === "dialog") return richItems.slice(0, -2);
+  if (scenario === "dialog" || scenario === "dialog-long") return richItems.slice(0, -2);
   if (scenario === "notices") return [richItems[0],
     item("started", "status", "Turn started", { status_kind:"turn_started" }),
     ...richItems.slice(1).filter((row) => !row.partial && row.id !== "live:working").map((row) => row.status === "running" ? {...row,status:"ok" as const} : row),
@@ -579,7 +587,7 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "config.set": (params) => (fixtureConfig = params as typeof fixtureConfig),
   "lane.set_view": () => null,
   "agent.capture": () => ({ content: scenario === "broken" ? "Error: Cannot find module './collections'\nBuild exited with code 1.\n› " : scenario === "no-source" ? "$ hermes\nWaiting for input.\n› " : scenario === "streaming" ? "Checking collection filters\nBuild running\n› " : "Build completed in 1.4s\nReady for your review\n› " }),
-  "agent.prompt": () => ({ dialog: scenario === "dialog" && !promptAnswered ? fixtureDialog : null }),
+  "agent.prompt": () => ({ dialog: promptAnswered ? null : scenario === "dialog" ? fixtureDialog : scenario === "dialog-long" ? fixtureDialogLong : null }),
   "agent.answer": () => { promptAnswered = true; return { answered:"Yes", sent:["Enter"] }; },
   "agent.send_input": () => { if (scenario === "commands") { commandFinished = false; drawCommandFixture(); } return null; },
   "agent.key": (params) => {
