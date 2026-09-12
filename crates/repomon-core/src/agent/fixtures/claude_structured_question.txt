@@ -1,0 +1,16 @@
+⏺ Analysed the preview build
+
+  The bundle now carries four sample documents that nothing references. They were added for the
+  demo in March and the loader stopped reading them in June, but they still ship, and they are the
+  single largest contributor to the bundle at 41 MB of the 58 MB total.
+
+  Removing them is safe as far as I can tell, though I cannot prove the loader is the only reader
+  without running the full preview build, which takes nine minutes.
+
+⏺ What should I do about the unused sample documents?
+
+ ❯ 1. Leave it           No deletion. Everything currently works, but the next preview build will almost certainly fail on space
+   2. Delete them        Drops 41 MB immediately. Reversible from git if a reader turns up
+   3. Move to a fixture  Keeps them for tests without shipping them, but needs the loader path changed first
+
+   Enter to confirm · Esc to cancel

@@ -52,10 +52,12 @@ mod tests {
                 DialogOption {
                     number: Some(1),
                     text: "Yes".into(),
+                    description: None,
                 },
                 DialogOption {
                     number: Some(2),
                     text: "No".into(),
+                    description: None,
                 },
             ],
             selected: Some(0),
