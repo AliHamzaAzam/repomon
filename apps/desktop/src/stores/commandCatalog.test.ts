@@ -13,6 +13,8 @@ describe("createCommandCatalog", () => {
       commands: [{ name: "compact", description: "", source: "builtin", one_shot: true }],
       models: [],
       model_command: null,
+      efforts: [],
+      effort_command: null,
     });
     const first = createRoot((dispose) => ({ store: createCommandCatalog(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -31,7 +33,7 @@ describe("createCommandCatalog", () => {
     // The catalog itself still reads as empty (there is nothing else honest to show), but
     // `error` is the signal that distinguishes "the daemon said nothing known" from "we never
     // actually heard back" - the same swallowed-.catch() pattern fixed for the clipboard write.
-    expect(store.catalog()).toEqual({ commands: [], models: [], model_command: null });
+    expect(store.catalog()).toEqual({ commands: [], models: [], model_command: null, efforts: [], effort_command: null });
     expect(store.error()).toMatch(/daemon unreachable/);
     dispose();
   });
@@ -46,6 +48,8 @@ describe("createCommandCatalog", () => {
       commands: [{ name: "model", description: "", source: "builtin", one_shot: true }],
       models: [],
       model_command: "/model",
+      efforts: [],
+      effort_command: null,
     });
     const second = createRoot((dispose) => ({ store: createCommandCatalog(() => ({ lane_id: 3, window: "lane-3" })), dispose }));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -57,6 +61,7 @@ describe("createCommandCatalog", () => {
   it("refetches for a different (lane_id, window) instead of reusing another pane's cache entry", async () => {
     vi.mocked(daemonCall).mockImplementation(async (_method, params) => ({
       commands: [], models: [], model_command: (params as { window?: string }).window ?? null,
+      efforts: [], effort_command: null,
     }));
     const a = createRoot((dispose) => ({ store: createCommandCatalog(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use repomon_core::agent::backend::CaptureOpts;
 use repomon_core::agent::conversation_activity::pane_activity;
-use repomon_core::command_catalog::{CatalogCommand, CatalogModel, CatalogSource, CommandCatalog};
+use repomon_core::command_catalog::{
+    CatalogCommand, CatalogEffort, CatalogModel, CatalogSource, CommandCatalog,
+};
 use repomon_core::model::{AgentKind, Lane};
 use serde_json::Value;
 
@@ -191,7 +193,7 @@ pub async fn build(ctx: &Ctx, lane: &Lane, window: Option<String>) -> CommandCat
         }
         AgentKind::Cursor | AgentKind::Other(_) => None,
     };
-    if let Some(current_id) = current {
+    if let Some(current_id) = current.clone() {
         match models.iter_mut().find(|m| m.id == current_id) {
             Some(m) => m.current = true,
             None => models.push(CatalogModel {
@@ -201,10 +203,45 @@ pub async fn build(ctx: &Ctx, lane: &Lane, window: Option<String>) -> CommandCat
             }),
         }
     }
+
+    // Only claude-code has an effort concept this can read. For every other kind the lists stay
+    // empty, which the panel renders as no control at all rather than a dead one.
+    let (efforts, effort_command) = match &kind {
+        AgentKind::ClaudeCode => {
+            let model = current.clone();
+            let active =
+                tokio::task::spawn_blocking(move || claude_code::current_effort(model.as_deref()))
+                    .await
+                    .unwrap_or(None);
+            let efforts = claude_code::EFFORTS
+                .iter()
+                .map(|id| CatalogEffort {
+                    id: (*id).into(),
+                    label: effort_label(id),
+                    current: active.as_deref() == Some(*id),
+                })
+                .collect();
+            (efforts, Some("/effort".to_string()))
+        }
+        _ => (Vec::new(), None),
+    };
+
     CommandCatalog {
         commands,
         models,
         model_command,
+        efforts,
+        effort_command,
+    }
+}
+
+/// "xhigh" reads as one word, so the label is the level with its first letter raised rather than
+/// a split on any separator.
+fn effort_label(id: &str) -> String {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -580,6 +617,65 @@ mod claude_code {
             }
             v.get("message")?.get("model")?.as_str().map(String::from)
         })
+    }
+
+    /// The levels `claude --help` lists for `--effort` on this machine, in its own order. The
+    /// in-session form is `/effort <level>`, which the shipped binary's own guidance quotes
+    /// ("try /effort medium"), so it takes an argument on one line exactly as `/model` does.
+    pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+    /// Effort is stored globally as `effortLevel`, and a model the operator has tuned separately
+    /// gets an entry under `modelSettings`. The per-model value wins when one exists, because it
+    /// is what the session actually runs at.
+    pub fn current_effort(model: Option<&str>) -> Option<String> {
+        let settings = crate::ext::claude_home()?.join("settings.json");
+        let value: Value = serde_json::from_str(&fs::read_to_string(settings).ok()?).ok()?;
+        let per_model = model
+            .and_then(|model| value.get("modelSettings")?.get(model))
+            .and_then(|entry| entry.get("effortLevel"))
+            .and_then(Value::as_str);
+        per_model
+            .or_else(|| value.get("effortLevel").and_then(Value::as_str))
+            .map(String::from)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The levels are the ones `claude --help` prints for `--effort` on this machine. Pinning
+        /// them here is what makes a CLI that drops or renames one fail a test rather than offer
+        /// the operator a level the agent will reject.
+        #[test]
+        fn effort_levels_are_the_ones_the_cli_documents() {
+            assert_eq!(EFFORTS, &["low", "medium", "high", "xhigh", "max"]);
+        }
+
+        /// A model the operator tuned separately runs at its own level, so that entry wins over
+        /// the global one. With neither present the answer is absent, never a default.
+        #[test]
+        fn a_per_model_effort_override_wins_over_the_global_one() {
+            let read = |json: &str, model: Option<&str>| -> Option<String> {
+                let value: Value = serde_json::from_str(json).ok()?;
+                model
+                    .and_then(|model| value.get("modelSettings")?.get(model))
+                    .and_then(|entry| entry.get("effortLevel"))
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("effortLevel").and_then(Value::as_str))
+                    .map(String::from)
+            };
+            let settings = r#"{"effortLevel":"high","modelSettings":{"claude-fable-5-1":{"effortLevel":"medium"}}}"#;
+            assert_eq!(read(settings, None).as_deref(), Some("high"));
+            assert_eq!(
+                read(settings, Some("claude-opus-5")).as_deref(),
+                Some("high")
+            );
+            assert_eq!(
+                read(settings, Some("claude-fable-5-1")).as_deref(),
+                Some("medium")
+            );
+            assert!(read("{}", Some("claude-opus-5")).is_none());
+        }
     }
 }
 

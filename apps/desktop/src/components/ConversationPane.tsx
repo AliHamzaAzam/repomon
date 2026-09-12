@@ -569,6 +569,18 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   }
+  // Same one-shot rule as the model: `effort_command` only appears when the daemon has a form it
+  // can send with an argument on one line.
+  async function selectEffort(id: string) {
+    const command = catalog().effort_command;
+    if (!command) return;
+    setBusy(true); setError(null);
+    try {
+      await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text: `${command} ${id}`, enter: true });
+      setFollowing(true);
+    } catch (cause) { setError(String(cause)); }
+    finally { setBusy(false); }
+  }
   async function controls(text?: string) {
     setError(null);
     try { await props.onCommand?.(text); }
@@ -620,7 +632,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>
       <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><Show when={props.onCommand}><button class="conversation-controls focus-ring" onClick={() => void controls()}>Agent controls</button></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <PendingDecision dialog={pending()} busy={busy()} onAnswer={(index) => void answer(index)} />}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
-      <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
+      <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSelectEffort={(id) => void selectEffort(id)} onSend={send}
         catalog={catalog()} catalogError={!!catalogError()} catalogLoading={catalogLoading()} onSelectModel={(id) => void selectModel(id)}
         displayed={displayed}
         history={inputHistory().entries.map((entry) => entry.text)} historyUnavailable={inputHistory().source === "none"} historyError={inputHistoryError()} />

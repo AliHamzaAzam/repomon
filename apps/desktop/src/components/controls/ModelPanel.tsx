@@ -1,12 +1,12 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { IconCheck, IconChevronRight } from "../icons";
-import type { CatalogModel } from "../../bindings";
+import type { CatalogEffort, CatalogModel } from "../../bindings";
 
 // Reference: a small panel anchored to the composer's model chip. Rows are model names, the
 // active one carries a check, the rest carry a number shortcut, then (past a handful) a "More
-// models" disclosure. No toggle section here: the catalog contract carries nothing to back one -
-// inventing a control with no data behind it is the same mistake as inventing a command.
+// models" disclosure. Effort, where a kind has one, is a second and smaller axis under the
+// models: chips rather than rows, so the model stays the primary decision in the panel.
 const VISIBLE_BEFORE_MORE = 5;
 
 export default function ModelPanel(props: {
@@ -14,9 +14,15 @@ export default function ModelPanel(props: {
   // Null means this kind has models to show but nothing on this machine confirmed a one-shot
   // switch form for them - the panel must say so, not offer selection it cannot actually drive.
   modelCommand: string | null;
+  // Empty for a kind with no effort concept, which renders nothing at all rather than a control
+  // the agent would reject. A kind that has one but whose level could not be read lists the
+  // levels with none marked current.
+  efforts: CatalogEffort[];
+  effortCommand: string | null;
   kind: string;
   anchor: HTMLElement;
   onSelect: (id: string) => void;
+  onSelectEffort: (id: string) => void;
   onClose: () => void;
 }) {
   const selectable = () => !!props.modelCommand;
@@ -155,6 +161,29 @@ export default function ModelPanel(props: {
               </button>
             </Show>
           </Show>
+        </Show>
+        <Show when={props.efforts.length && props.effortCommand}>
+          <div class="my-1 border-t border-line" />
+          <div class="px-2.5 pb-1 pt-1.5" role="group" aria-label="Effort">
+            <p class="pb-1.5 font-mono text-[10px] text-muted">Effort</p>
+            <div class="flex flex-wrap gap-1">
+              <For each={props.efforts}>
+                {(effort) => (
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={effort.current}
+                    class={`rounded-md px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
+                      effort.current ? "bg-raised text-signal" : "text-muted hover:bg-raised hover:text-foreground"
+                    }`}
+                    onClick={() => props.onSelectEffort(effort.id)}
+                  >
+                    {effort.label}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
         </Show>
       </div>
     </Portal>

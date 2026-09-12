@@ -8,6 +8,7 @@ export type { ApprovalRule } from "./ApprovalRule";
 export type { BrowseEntry } from "./BrowseEntry";
 export type { BrowseResult } from "./BrowseResult";
 export type { CatalogCommand } from "./CatalogCommand";
+export type { CatalogEffort } from "./CatalogEffort";
 export type { CatalogModel } from "./CatalogModel";
 export type { CatalogSource } from "./CatalogSource";
 export type { Classification } from "./Classification";

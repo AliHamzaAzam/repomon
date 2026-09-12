@@ -45,8 +45,21 @@ pub struct CatalogModel {
     pub current: bool,
 }
 
+/// One selectable effort level, as the model panel shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+pub struct CatalogEffort {
+    pub id: String,
+    pub label: String,
+    pub current: bool,
+}
+
 /// The full answer to `agent.command_catalog`. `models` is empty when the kind's model set is
 /// not knowable; `model_command` is `None` when this kind has no way to set a model at all.
+/// `efforts` is empty for a kind with no effort concept at all, which is a different statement
+/// from a kind that has one whose current value could not be read: there, the levels are listed
+/// and none of them carries `current`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(export))]
@@ -54,6 +67,8 @@ pub struct CommandCatalog {
     pub commands: Vec<CatalogCommand>,
     pub models: Vec<CatalogModel>,
     pub model_command: Option<String>,
+    pub efforts: Vec<CatalogEffort>,
+    pub effort_command: Option<String>,
 }
 
 impl CommandCatalog {
@@ -62,6 +77,8 @@ impl CommandCatalog {
             commands: Vec::new(),
             models: Vec::new(),
             model_command: None,
+            efforts: Vec::new(),
+            effort_command: None,
         }
     }
 }
