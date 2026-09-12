@@ -1,4 +1,4 @@
-import type { CatalogCommand, CommandCatalog } from "../ipc/rpc";
+import type { CatalogCommand, CommandCatalog } from "../bindings";
 
 // Match the daemon's command grammar. Paths and multiline prompts stay ordinary messages.
 export function isAgentCommand(text: string): boolean {

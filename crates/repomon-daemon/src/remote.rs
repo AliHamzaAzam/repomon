@@ -63,6 +63,9 @@ fn remote_method_allowed(method: &str) -> bool {
         | "agent.prompt" | "agent.answer" | "agent.watch_bytes"
         // agent.detect exposes selectable agents without granting access to config secrets.
         | "agent.spawn" | "agent.stop" | "agent.adopt" | "agent.detect"
+        // Command names and model ids only, the same class of read as agent.detect - no config
+        // secrets, no file contents beyond what a command's own name/description already are.
+        | "agent.command_catalog"
         | "lane.create" | "lane.delete" | "lane.merge"
         | "lane.diff" | "lane.focus"
         // Remote clients may interact with a running orchestrator, but starting or stopping one

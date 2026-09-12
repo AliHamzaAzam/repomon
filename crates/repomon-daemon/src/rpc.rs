@@ -566,6 +566,12 @@ struct AgentPrompt {
     #[serde(default)]
     window: Option<String>,
 }
+#[derive(Deserialize)]
+struct AgentCommandCatalog {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 enum ExtScope {
@@ -4310,6 +4316,12 @@ pub async fn dispatch(
                 ),
             );
             Ok(json!({ "dialog": dialog }))
+        }
+        // Discovery and caching live in `command_catalog`, a self-contained module: never drive
+        // an agent's interactive picker blind, never invent a command or model that isn't real.
+        "agent.command_catalog" => {
+            let p: AgentCommandCatalog = parse(params)?;
+            to_value(crate::command_catalog::build(ctx, p.lane_id, p.window).await)
         }
         "agent.answer" => {
             let p: AgentAnswer = parse(params)?;

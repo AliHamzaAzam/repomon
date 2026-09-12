@@ -6,7 +6,7 @@ import AttachmentChip, { attachmentFromPath, isImageAttachment, type ChatAttachm
 import ModelPanel from "./ModelPanel";
 import SlashPalette from "./SlashPalette";
 import { bareAlias } from "../agentCommands";
-import type { CatalogCommand, CommandCatalog } from "../../ipc/rpc";
+import type { CatalogCommand, CommandCatalog } from "../../bindings";
 
 export type { ChatAttachment } from "./AttachmentChip";
 // Claude TUI style: attaching an image drops a friendly [Image #N] marker into the draft at the

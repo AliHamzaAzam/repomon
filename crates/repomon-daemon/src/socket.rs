@@ -271,7 +271,7 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
 fn independent_read(method: &str) -> bool {
     matches!(
         method,
-        "ping" | "agent.detect" | "lane.list" | "agent.transcript_page"
+        "ping" | "agent.detect" | "lane.list" | "agent.transcript_page" | "agent.command_catalog"
     )
 }
 

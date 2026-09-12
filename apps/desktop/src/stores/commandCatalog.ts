@@ -1,5 +1,6 @@
 import { createEffect, createSignal, onCleanup } from "solid-js";
-import { daemonCall, type CommandCatalog } from "../ipc/rpc";
+import { daemonCall } from "../ipc/rpc";
+import type { CommandCatalog } from "../bindings";
 
 const EMPTY_CATALOG: CommandCatalog = { commands: [], models: [], model_command: null };
 

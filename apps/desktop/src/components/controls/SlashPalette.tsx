@@ -1,7 +1,7 @@
 import { For, Show, createEffect, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { bareAlias } from "../agentCommands";
-import type { CatalogCommand } from "../../ipc/rpc";
+import type { CatalogCommand } from "../../bindings";
 
 // Reference: typing "/m" opens a filtered list above the composer. Each row is the command name,
 // the typed prefix visually distinguished from the rest, plugin commands shown namespaced with

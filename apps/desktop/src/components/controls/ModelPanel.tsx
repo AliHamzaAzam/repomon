@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { IconCheck, IconChevronRight } from "../icons";
-import type { CatalogModel } from "../../ipc/rpc";
+import type { CatalogModel } from "../../bindings";
 
 // Reference: a small panel anchored to the composer's model chip. Rows are model names, the
 // active one carries a check, the rest carry a number shortcut, then (past a handful) a "More

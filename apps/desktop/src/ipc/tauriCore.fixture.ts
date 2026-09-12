@@ -9,8 +9,7 @@
 /// their own commands. Shimming `invoke` itself, one level lower, covers every one of those
 /// without touching each file, and lets the real `daemonCall`/`getConnectionStatus`/etc. run
 /// unmodified against fixture data.
-import type { AgentSession, Lane, Repo, TranscriptItem, PendingDialog } from "../bindings";
-import type { CommandCatalog } from "./rpc";
+import type { AgentSession, CommandCatalog, Lane, Repo, TranscriptItem, PendingDialog } from "../bindings";
 // The native Channel constructor needs window.__TAURI_INTERNALS__. Screenshot callbacks
 // remain local and use the same onmessage interface; no native bridge is installed.
 export class Channel<T> { onmessage: (message: T) => void = () => undefined; }

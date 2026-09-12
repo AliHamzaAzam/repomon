@@ -5,6 +5,7 @@ import type {
   AgentChoice,
   ApprovalRule,
   BrowseResult,
+  CommandCatalog,
   Commit,
   CommitShow,
   DialogClass,
@@ -120,35 +121,6 @@ export interface TranscriptPage {
 }
 // subscription_id is daemon-internal connection routing, never a UI row identity.
 export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }
-
-// Hand-authored to the contract in fleet/repomon/tasks/2026-09-12-native-commands.md; the daemon
-// half (RPC agent.command_catalog) had not shipped when this was written. Replace with the
-// generated `bindings/CommandCatalog.ts` (and friends) the moment it does - these are not ts-rs
-// output, just this file's usual hand-typed wire shapes, like TranscriptPage above.
-export interface CatalogCommand {
-  // Without the leading slash.
-  name: string;
-  // Empty, never invented - the daemon must not guess what a command does.
-  description: string;
-  source: "builtin" | "user" | "plugin" | "unknown";
-  // True when the command can be sent as one fully specified line with its argument, with no
-  // interactive state to steer. False means the terminal route is the only honest option.
-  one_shot: boolean;
-}
-export interface CatalogModel {
-  id: string;
-  label: string;
-  // The active model. May be absent from the whole list if the agent reports one the daemon has
-  // no catalog entry for - the daemon still includes it, with the label the agent itself reports.
-  current: boolean;
-}
-export interface CommandCatalog {
-  commands: CatalogCommand[];
-  models: CatalogModel[];
-  // The command that sets a model for this kind, or null when there is none. Independent of
-  // `models` being empty - a kind can have a real model_command but no knowable model list.
-  model_command: string | null;
-}
 
 export interface ConfigView {
   agent_views?: Record<string, string>;
@@ -402,8 +374,7 @@ interface RpcMap {
     result: TranscriptPage;
   };
   "agent.transcript_watch": { params: TranscriptTarget & { on: boolean }; result: TranscriptPage | null };
-  // Not yet shipped by the daemon (fleet/repomon/tasks/2026-09-12-native-commands.md); built
-  // against this shape ahead of it. A read, cached daemon-side per kind.
+  // A read, cached daemon-side per (kind, repo root); see crates/repomon-daemon/src/command_catalog.rs.
   "agent.command_catalog": { params: { lane_id: number; window?: string }; result: CommandCatalog };
   "lane.set_view": { params: { lane_id: number; view_mode: "terminal" | "conversation" | null }; result: null };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };

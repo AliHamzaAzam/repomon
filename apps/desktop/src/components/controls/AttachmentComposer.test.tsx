@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import AttachmentComposer from "./AttachmentComposer";
-import type { CommandCatalog } from "../../ipc/rpc";
+import type { CommandCatalog } from "../../bindings";
 vi.mock("@tauri-apps/api/core", () => ({ invoke:vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open:vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });

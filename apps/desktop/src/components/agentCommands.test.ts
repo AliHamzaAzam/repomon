@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bareAlias, isAgentCommand, resolveCommand } from "./agentCommands";
-import type { CommandCatalog } from "../ipc/rpc";
+import type { CommandCatalog } from "../bindings";
 
 describe("agent commands", () => {
   it("distinguishes commands from paths and multiline prompts", () => {
