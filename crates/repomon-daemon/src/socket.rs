@@ -289,9 +289,17 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
 /// connection could observe its effect. That is the whole rule, and it has two consequences.
 ///
 /// Mutations stay ordered, including the ones whose semantics *are* the order: input sends and
-/// dialog answers must arrive as they were typed, a viewport change must be visible to the
-/// capture that follows it, and `subscribe` must be live before the events it is meant to carry.
+/// dialog answers must arrive as they were typed, two viewport claims must apply in the order the
+/// client made them, and `subscribe` must be live before the events it is meant to carry.
 /// Correctness beats latency there.
+///
+/// A correctly sized capture is not one of those orderings and never was. `viewport.set` resizes
+/// nothing; it records this session's claims and wakes the capture loop. The only RPC that
+/// resizes is `agent.fit`, which stays ordered, and every `agent.capture` reply carries the
+/// authoritative `size` the capture was taken at, so a client renders the grid it was given
+/// rather than one it assumed. A capture that overtakes a resize returns an older frame
+/// correctly labelled, which is not the stale-size repaint that `fix/terminal-repaint-race`
+/// addressed.
 ///
 /// Pure reads do not, and neither do reads that write only their own memoisation cache, because
 /// nothing can observe that cache except the same read. Every method added below was either
@@ -310,9 +318,9 @@ fn independent_read(method: &str) -> bool {
             | "agent.transcript_page"
             | "agent.command_catalog"
             | "agent.input_history"
-            // Polled per pane on every tick; pure reads of a pane or of a memoised prompt.
+            // Polled per pane on every tick, and self describing: the reply carries the size it
+            // was taken at. `agent.prompt` deliberately stays ordered, see below.
             | "agent.capture"
-            | "agent.prompt"
             // Measured holding the chain on the operator's machine; all pure reads.
             | "daemon.status"
             | "repo.pull_requests"
@@ -326,6 +334,15 @@ fn independent_read(method: &str) -> bool {
             | "file.index"
     )
 }
+
+// `agent.prompt` is a pure read and was measured waiting 11.5 s, but it is not here. Answering a
+// dialog clears it from the pane only when the agent repaints, so a poll can return a
+// just-answered dialog and flash the composer back to blocked. Ordering does not close that
+// window, which is why this is not a correctness argument: `agent.answer` returns once its keys
+// are sent, not once the pane has repainted. What ordering does is stop the poll starting before
+// the keys are sent at all, which is the only part of the window this side of the wire controls.
+// With the two slow methods fixed the chain is short, so keeping it ordered costs little and
+// strictly narrows a window the operator has already complained about.
 
 #[cfg(all(test, unix))]
 mod tests {
