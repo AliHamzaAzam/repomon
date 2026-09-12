@@ -575,16 +575,40 @@ mod claude_code {
 }
 
 mod codex {
-    //! Enabled plugins' commands (`~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/
-    //! commands/*.md`, enabled state from `~/.codex/config.toml`'s `[plugins."<id>"]` tables) are
-    //! discovered from disk - codex's plugin system otherwise exposes skills and MCP servers, not
-    //! commands, so this is the only command source found for it. No user command directory
-    //! exists (`codex --help` documents none). The model list is real, from
-    //! `~/.codex/models_cache.json`'s `models[]` (filtered to `visibility == "list"`), not
-    //! curated. `model_command` is `null`: nothing on this machine confirms codex's in-session
-    //! model switch accepts a one-shot argument rather than only opening its own interactive
-    //! picker, and the operator's rule treats unverified exactly like "cannot".
+    //! Plugin commands are discovered from disk (`~/.codex/plugins/cache/<marketplace>/<plugin>/
+    //! <version>/commands/*.md`, enabled state from `~/.codex/config.toml`'s
+    //! `[plugins."<id>"]` tables). No user command directory exists. Built-ins are curated from
+    //! typing `/` in a live spawned codex session, which opens its own real palette; models are
+    //! real, from `~/.codex/models_cache.json`'s `models[]` (`visibility == "list"`).
+    //!
+    //! `model_command` is `null`, confirmed rather than merely unverified: sending
+    //! `/model gpt-6-astra` as one line to a live session did not switch the model - codex
+    //! answered "I can't change the model from within the conversation," treating the whole line
+    //! as a chat prompt instead of a command with an argument.
     use super::*;
+
+    const BUILTINS: &[(&str, &str, bool)] = &[
+        (
+            "model",
+            "choose what model and reasoning effort to use",
+            false,
+        ),
+        ("fast", "1.5x speed, increased usage", true),
+        (
+            "ide",
+            "include current selection, open files, and other context from your IDE",
+            true,
+        ),
+        ("permissions", "choose what Codex is allowed to do", false),
+        ("keymap", "remap TUI shortcuts", false),
+        ("vim", "toggle Vim mode for the composer", true),
+        ("experimental", "toggle experimental features", false),
+        (
+            "approve",
+            "approve one retry of a recent auto-review denial",
+            true,
+        ),
+    ];
 
     pub fn discover(repo_root: &Path) -> StaticValue {
         let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().join(".codex")) else {
@@ -594,8 +618,17 @@ mod codex {
                 model_command: None,
             };
         };
-        let _ = repo_root; // codex has no repo-scoped plugin enablement on this machine's config shape
-        let commands = plugin_commands(&home);
+        let _ = repo_root;
+        let mut commands: Vec<CatalogCommand> = BUILTINS
+            .iter()
+            .map(|(name, description, one_shot)| CatalogCommand {
+                name: (*name).into(),
+                description: (*description).into(),
+                source: CatalogSource::Builtin,
+                one_shot: *one_shot,
+            })
+            .collect();
+        commands.extend(plugin_commands(&home));
         let models = models_cache(&home);
         StaticValue {
             commands,
@@ -741,24 +774,59 @@ mod codex {
             let dir = tempfile::tempdir().unwrap();
             assert!(models_cache(dir.path()).is_empty());
         }
+
+        #[test]
+        fn model_builtin_is_marked_not_one_shot() {
+            let (_, _, one_shot) = BUILTINS.iter().find(|(name, ..)| *name == "model").unwrap();
+            assert!(!one_shot);
+        }
     }
 }
 
 mod opencode {
     //! User/project command files (`~/.config/opencode/command(s)/*.md` and `<repo>/.opencode/
     //! command(s)/*.md`) are discovered from disk. opencode's `plugin` config array names npm
-    //! packages, not a file cache the way Claude's and codex's plugins do, so plugin-sourced
-    //! commands are not resolved here - an unhandled case stated plainly rather than guessed at.
-    //! The model list comes from actually running `opencode models` (no local manifest exists);
-    //! that call is slow enough on this machine (several seconds for ~100 entries) to need its
-    //! own long-lived cache and a hard timeout, kept separate from `STATIC_TTL` above.
+    //! packages, not a file cache, so plugin-sourced commands are not resolved. Built-ins are
+    //! curated from typing `/` in a live spawned session, which opens opencode's own real
+    //! palette. The model list comes from actually running `opencode models` (no local manifest
+    //! exists); that call is slow enough on this machine (several seconds for ~100 entries) to
+    //! need its own long-lived cache and a hard timeout, kept separate from `STATIC_TTL` above.
+    //!
+    //! `model_command` is `null`, confirmed rather than merely unverified: sending
+    //! `/model <id>` and `/models <id>` as one line both landed as chat prompts, not commands;
+    //! `/models` alone (no argument) opened an interactive fuzzy-search picker requiring
+    //! arrow-key navigation, confirming it has no one-shot form.
     use super::*;
+
+    const BUILTINS: &[(&str, &str, bool)] = &[
+        ("agents", "Switch agent", true),
+        ("connect", "Connect provider", false),
+        ("debug", "View debug info", true),
+        ("diff", "Open diff viewer", true),
+        ("editor", "Open editor", true),
+        ("exit", "Exit the app", true),
+        ("help", "Help", true),
+        ("init", "guided AGENTS.md setup", false),
+        ("mcps", "Toggle MCPs", true),
+        ("models", "Switch model", false),
+    ];
 
     pub async fn discover(ctx: &Ctx, repo_root: &Path) -> StaticValue {
         let root = repo_root.to_path_buf();
-        let commands = tokio::task::spawn_blocking(move || file_commands(&root))
-            .await
-            .unwrap_or_default();
+        let mut commands: Vec<CatalogCommand> = BUILTINS
+            .iter()
+            .map(|(name, description, one_shot)| CatalogCommand {
+                name: (*name).into(),
+                description: (*description).into(),
+                source: CatalogSource::Builtin,
+                one_shot: *one_shot,
+            })
+            .collect();
+        commands.extend(
+            tokio::task::spawn_blocking(move || file_commands(&root))
+                .await
+                .unwrap_or_default(),
+        );
         let models = models_via_cli(ctx).await;
         StaticValue {
             commands,
@@ -840,6 +908,20 @@ mod opencode {
             .unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), models.clone()));
         models
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn models_builtin_is_marked_not_one_shot() {
+            let (_, _, one_shot) = BUILTINS
+                .iter()
+                .find(|(name, ..)| *name == "models")
+                .unwrap();
+            assert!(!one_shot);
+        }
+    }
 }
 
 type TimestampedModels = Option<(Instant, Vec<CatalogModel>)>;
@@ -852,15 +934,77 @@ fn opencode_models_cache() -> &'static Mutex<TimestampedModels> {
 mod antigravity {
     //! Plugin commands (`~/.gemini/config/plugins/<name>/commands/*.md` and `~/.gemini/plugins/
     //! <name>/commands/*.md`, plus the same two paths under the repo's `.gemini/`), the same
-    //! directories `ext::scan_antigravity` already treats as a plugin's install root. On this
-    //! machine every installed plugin has only `skills/`/`references/`/`examples/` - no
-    //! `commands/` dir anywhere - so this is real scanning that currently, correctly, finds
-    //! nothing; not a hardcoded empty answer. No user command convention or model list was found
-    //! for antigravity, so both stay empty rather than curated.
+    //! directories `ext::scan_antigravity` already treats as a plugin's install root - real
+    //! scanning, currently empty on this machine since every installed plugin has only
+    //! `skills/`/`references/`/`examples/`, no `commands/` dir. Built-ins are curated from
+    //! typing `/` in a live spawned session: its own palette mixes ~7 core commands with over a
+    //! thousand bundled third-party skill/plugin prompts (e.g. `/m365-agents-dotnet`); only the
+    //! clearly-core ones are curated here. Models are the exact ids from a live session's own
+    //! rejection message after sending an invalid `/model` argument - authoritative, not typed
+    //! from the picker's grouped display names.
+    //!
+    //! `model_command` is `"/model"`, confirmed: sending `/model gemini-3.7-flash-high` as one
+    //! line to a live session changed both the header and status bar to that model.
     use super::*;
 
+    const BUILTINS: &[(&str, &str, bool)] = &[
+        (
+            "model",
+            "Set a model, or run a single prompt on another model",
+            true,
+        ),
+        ("mcp", "Manage MCP servers", false),
+        ("add-dir", "Add a directory to the workspace", true),
+        ("agents", "List available custom agents", true),
+        ("artifact", "View and review artifacts", true),
+        (
+            "btw",
+            "Ask a side question without interrupting the current task",
+            false,
+        ),
+        ("changelog", "Show release notes and changes", true),
+    ];
+
+    const MODELS: &[&str] = &[
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "gemini-3.7-flash-high",
+        "gemini-3.7-flash-medium",
+        "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high",
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ];
+
+    fn label_for(id: &str) -> String {
+        id.split('-')
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     pub fn discover(repo_root: &Path) -> StaticValue {
-        let mut commands = Vec::new();
+        let mut commands: Vec<CatalogCommand> = BUILTINS
+            .iter()
+            .map(|(name, description, one_shot)| CatalogCommand {
+                name: (*name).into(),
+                description: (*description).into(),
+                source: CatalogSource::Builtin,
+                one_shot: *one_shot,
+            })
+            .collect();
         if let Some(home) = directories::BaseDirs::new() {
             let gemini = home.home_dir().join(".gemini");
             commands.extend(plugin_commands(&gemini.join("config/plugins")));
@@ -871,10 +1015,18 @@ mod antigravity {
         commands.extend(plugin_commands(&repo_gemini.join("plugins")));
         commands.sort_by(|a, b| a.name.cmp(&b.name));
         commands.dedup_by(|a, b| a.name == b.name);
+        let models = MODELS
+            .iter()
+            .map(|id| CatalogModel {
+                id: (*id).into(),
+                label: label_for(id),
+                current: false,
+            })
+            .collect();
         StaticValue {
             commands,
-            models: Vec::new(),
-            model_command: None,
+            models,
+            model_command: Some("/model".into()),
         }
     }
 
@@ -897,19 +1049,68 @@ mod antigravity {
         }
         out
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn label_for_title_cases_each_hyphen_separated_part() {
+            assert_eq!(label_for("gemini-3.7-flash-high"), "Gemini 3.7 Flash High");
+            assert_eq!(
+                label_for("claude-opus-4-6-thinking"),
+                "Claude Opus 4 6 Thinking"
+            );
+        }
+
+        #[test]
+        fn model_builtin_is_marked_one_shot() {
+            let (_, _, one_shot) = BUILTINS.iter().find(|(name, ..)| *name == "model").unwrap();
+            assert!(one_shot);
+        }
+    }
 }
 
 mod hermes {
-    //! No user command directory or plugin/command mechanism was found for hermes - its
-    //! `skills` are a distinct, separate mechanism from a slash-command palette, so they are not
-    //! surfaced as commands here. The model list is real, from `~/.hermes/cache/
+    //! No user command directory or plugin/command mechanism was found; `skills` are a distinct
+    //! mechanism from a slash-command palette. Built-ins are curated from a live session's own
+    //! `/help`, which lists 40+ commands across several categories - only a representative,
+    //! clearly-core subset is kept here. The model list is real, from `~/.hermes/cache/
     //! model_catalog.json`'s per-provider `models[]`. `current` is the real configured default,
     //! `~/.hermes/config.yaml`'s `model.default`, read with a small hand-rolled scan rather than
-    //! pulling in a YAML crate for two fields (matches this codebase's existing frontmatter
-    //! parsing precedent in `ext.rs` rather than adding a new dependency for one config file).
-    //! `model_command` is `null`: `hermes model` is a documented CLI subcommand, but its own
-    //! `--help` describes an interactive OAuth-backed picker, not a one-shot chat command.
+    //! pulling in a YAML crate for two fields.
+    //!
+    //! `model_command` is `"/model"`, confirmed: sending `/model z-ai/glm-5.2` as one line to a
+    //! live session changed the status bar to that model, with no interactive follow-up (the
+    //! transcript showed only `model → z-ai/glm-5.2`, no chat turn). `/help` also documents a
+    //! genuine bidirectional toggle, `/fast [normal|fast|status]`, but reading its current on/off
+    //! state would need an extra live pane read this RPC does not otherwise do - shown as a
+    //! regular command, not as the model panel's toggle section, since a toggle whose displayed
+    //! state cannot be trusted is the same dishonesty the empty-catalog rule forbids.
     use super::*;
+
+    const BUILTINS: &[(&str, &str, bool)] = &[
+        (
+            "model",
+            "Switch model (session-scoped; --global to persist)",
+            true,
+        ),
+        (
+            "fast",
+            "Toggle fast mode - OpenAI Priority Processing / Anthropic Fast Mode",
+            true,
+        ),
+        ("help", "Show available commands", true),
+        ("usage", "Show token usage and rate limits", true),
+        ("version", "Show Hermes Agent version", true),
+        ("config", "Show current configuration", true),
+        (
+            "whoami",
+            "Show your slash command access (admin / user)",
+            true,
+        ),
+        ("tools", "Manage tools: list, disable, or enable", true),
+    ];
 
     pub fn discover() -> StaticValue {
         let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().join(".hermes")) else {
@@ -919,11 +1120,20 @@ mod hermes {
                 model_command: None,
             };
         };
+        let commands = BUILTINS
+            .iter()
+            .map(|(name, description, one_shot)| CatalogCommand {
+                name: (*name).into(),
+                description: (*description).into(),
+                source: CatalogSource::Builtin,
+                one_shot: *one_shot,
+            })
+            .collect();
         let models = model_catalog(&home);
         StaticValue {
-            commands: Vec::new(),
+            commands,
             models,
-            model_command: None,
+            model_command: Some("/model".into()),
         }
     }
 
@@ -1033,6 +1243,12 @@ mod hermes {
         #[test]
         fn default_from_config_yaml_is_none_without_a_model_block() {
             assert_eq!(default_from_config_yaml("agent:\n  max_turns: 60\n"), None);
+        }
+
+        #[test]
+        fn model_builtin_is_marked_one_shot() {
+            let (_, _, one_shot) = BUILTINS.iter().find(|(name, ..)| *name == "model").unwrap();
+            assert!(one_shot);
         }
     }
 }

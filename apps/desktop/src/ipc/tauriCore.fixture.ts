@@ -425,7 +425,7 @@ if (scenario === "attachments" || scenario.startsWith("defect-composer")) {
     field.focus(); clearInterval(timer);
   }, 100);
 }
-if (scenario === "native-model") {
+if (scenario.startsWith("native-model")) {
   const timer = setInterval(() => {
     const chip = document.querySelector<HTMLButtonElement>(".composer-model");
     if (!chip) return;
@@ -564,6 +564,25 @@ const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
     model_command: "/model",
   },
   "native-empty": { commands: [], models: [], model_command: null },
+  "native-model-dull": {
+    commands: [{ name:"model", description:"Change the active model", source:"builtin", one_shot:true }],
+    models: [
+      { id:"z-ai/glm-5.2", label:"GLM 5.2", current:true },
+      { id:"anthropic/claude-fable-5.1", label:"Claude Fable 5.1", current:false },
+    ],
+    model_command: "/model",
+  },
+  // Defect ONE: a kind with models but no confirmed one-shot switch form (codex, opencode) must
+  // never fall back to the terminal - the panel says so instead of offering a selection it can't
+  // actually drive.
+  "native-model-unconfirmed": {
+    commands: [],
+    models: [
+      { id:"gpt-6-astra", label:"GPT-6-Astra", current:true },
+      { id:"gpt-5.6-luna", label:"gpt-5.6-luna", current:false },
+    ],
+    model_command: null,
+  },
 };
 const nativeCatalog = NATIVE_CATALOGS[scenario];
 

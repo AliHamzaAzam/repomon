@@ -13,8 +13,8 @@ const emptyCatalog: CommandCatalog = { commands: [], models: [], model_command: 
 function props(overrides: Partial<Parameters<typeof AttachmentComposer>[0]> = {}) {
   return {
     kind: "codex", disabled: false, busy: false, onSend: vi.fn(),
-    catalog: emptyCatalog, catalogError: false, hasTerminalFallback: false,
-    onSelectModel: vi.fn(), onModelFallback: vi.fn(), displayed: () => true,
+    catalog: emptyCatalog, catalogError: false, catalogLoading: false,
+    onSelectModel: vi.fn(), displayed: () => true,
     history: [] as string[], historyUnavailable: false, historyError: null as string | null,
     ...overrides,
   };
@@ -266,6 +266,13 @@ describe("native slash-command palette (round 10)", () => {
     expect(screen.queryByText("No commands known for this agent.")).not.toBeInTheDocument();
   });
 
+  it("shows a loading message instead of the empty-catalog wording while the first fetch is in flight", () => {
+    render(() => <AttachmentComposer {...props({ catalogLoading: true })} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
+    expect(screen.getByText("Loading commands…")).toBeInTheDocument();
+    expect(screen.queryByText("No commands known for this agent.")).not.toBeInTheDocument();
+  });
+
   it("never portals the palette into a pane that is not the one on screen", () => {
     render(() => <AttachmentComposer {...props({ catalog, displayed: () => false })} />);
     fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
@@ -311,18 +318,24 @@ describe("native model picker (round 10)", () => {
     expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
   });
 
-  it("falls back to opening the terminal route when the model list is empty but a model_command exists", () => {
-    const onModelFallback = vi.fn();
-    render(() => <AttachmentComposer {...props({ catalog: { commands: [], models: [], model_command: "/model" }, hasTerminalFallback: true, onModelFallback })} />);
-    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
-    expect(onModelFallback).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
-  });
-
-  it("shows the plain non-interactive label when the catalog has no model_command at all", () => {
+  it("shows the plain non-interactive label when the catalog has no models at all", () => {
     const result = render(() => <AttachmentComposer {...props({ model: "gpt-5-codex" })} />);
     expect(screen.queryByRole("button", { name: "Change codex model" })).not.toBeInTheDocument();
     expect(result.container.querySelector(".composer-agent")?.textContent).toBe("codex · gpt-5-codex");
+  });
+
+  it("never falls back to a terminal route: a kind with models but no confirmed one-shot form still opens the native panel", () => {
+    const unconfirmed: CommandCatalog = {
+      commands: [],
+      models: [{ id: "gpt-6-astra", label: "GPT-6-Astra", current: true }],
+      model_command: null,
+    };
+    render(() => <AttachmentComposer {...props({ catalog: unconfirmed })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
+    const panel = screen.getByRole("menu", { name: "Choose model" });
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveTextContent(/can't switch codex's model/i);
+    expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
   });
 
   it("tears the model panel portal down the moment the pane stops being displayed", () => {
