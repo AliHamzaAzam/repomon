@@ -551,6 +551,14 @@ struct AgentKey {
     window: Option<String>,
 }
 #[derive(Deserialize)]
+struct AgentInputHistory {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
 struct AgentCapture {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
@@ -4102,6 +4110,21 @@ pub async fn dispatch(
                 }),
             );
             Ok(json!({ "lane_id": p.lane_id, "window": window }))
+        }
+        // The agent's own up arrow recall, so the chat composer and the TUI walk one history.
+        "agent.input_history" => {
+            let p: AgentInputHistory = parse(params)?;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            if TmuxRuntime::parse_lane_window(&window).is_none_or(|(lane, _)| lane != p.lane_id) {
+                return Err(RpcError::invalid_params(
+                    "window does not belong to lane_id",
+                ));
+            }
+            crate::input_history::history(ctx, p.lane_id, window, p.limit)
+                .await
+                .map_err(internal)
         }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
