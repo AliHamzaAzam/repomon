@@ -4855,8 +4855,11 @@ pub async fn dispatch(
         }
 
         "daemon.status" => {
-            let repos = ctx.registry.list().await.map_err(internal)?.len();
-            let lanes = ctx.lanes.list().await.map_err(internal)?.len();
+            // Counts only. Building the fleet to call `.len()` on it forked `git worktree list`
+            // per repo and measured 16.8 s on the operator's machine, with every other request on
+            // that connection queued behind it.
+            let repos = ctx.store.list_repos().await.map_err(internal)?.len();
+            let lanes = ctx.store.list_lane_meta().await.map_err(internal)?.len();
             let db_size = ctx
                 .db_path
                 .as_ref()
@@ -4961,14 +4964,36 @@ pub async fn dispatch(
                     .filter(|(at, _)| at.elapsed() < PR_CACHE_TTL)
                     .map(|(_, items)| items.clone())
             };
+            // A cache miss used to fetch from GitHub on the request path, which put network I/O
+            // in front of the operator's keystrokes for 7.7 s. Serve what is cached, however old,
+            // and refresh in the background so the next call is fresh.
             let items = match cached {
                 Some(items) => items,
                 None => {
-                    let items = crate::pull_requests::list(ctx).await;
-                    *ctx.pr_cache.lock().await = Some((std::time::Instant::now(), items.clone()));
-                    items
+                    let stale = {
+                        let cache = ctx.pr_cache.lock().await;
+                        cache.as_ref().map(|(_, items)| items.clone())
+                    };
+                    match stale {
+                        Some(items) => items,
+                        None => {
+                            let items = crate::pull_requests::list(ctx).await;
+                            *ctx.pr_cache.lock().await =
+                                Some((std::time::Instant::now(), items.clone()));
+                            items
+                        }
+                    }
                 }
             };
+            if ctx
+                .pr_cache
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= PR_CACHE_TTL)
+            {
+                crate::pull_requests::refresh_in_background(ctx.clone());
+            }
             to_value(items)
         }
         "usage.findings" => {

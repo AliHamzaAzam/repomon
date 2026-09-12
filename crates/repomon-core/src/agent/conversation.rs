@@ -333,6 +333,56 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
 }
 
 /// Find the end of a prior answer despite terminal wrapping, retaining original byte boundaries.
+/// A pane preview must never seat text the conversation already knows: a durable answer it is
+/// still showing, or the echo of what the operator just submitted. Both are the same defect and
+/// this is the single guard for them.
+///
+/// The capture window is the hard part. A long submission is echoed by the CLI and then clipped,
+/// so the pane holds only its tail and begins mid sentence. Equality cannot see that, which is how
+/// the operator's own message came to be seated as an assistant reply starting part way through a
+/// word. Matching therefore accepts the pane beginning with any sufficiently long suffix of the
+/// known text, as well as containing the whole of it.
+const CLIPPED_ECHO_MIN: usize = 24;
+
+fn known_text_end(pane: &str, known: &str) -> Option<usize> {
+    prior_answer_end(pane, known).or_else(|| clipped_echo_end(pane, known))
+}
+
+/// Where a clipped echo ends: the pane opens with a suffix of `known`, because the capture cut the
+/// start of it away.
+fn clipped_echo_end(pane: &str, known: &str) -> Option<usize> {
+    let wanted: String = known.chars().filter(|c| !c.is_whitespace()).collect();
+    if wanted.chars().count() < CLIPPED_ECHO_MIN {
+        return None;
+    }
+    let mut flat = String::new();
+    let mut boundaries = Vec::new();
+    for (at, c) in pane.char_indices() {
+        if !c.is_whitespace() {
+            flat.push(c);
+            boundaries.push((flat.len(), at + c.len_utf8()));
+        }
+    }
+    // Longest opening run of the pane that is a tail of the known text, stepping by characters so
+    // a multi-byte glyph at the boundary cannot split.
+    let cuts: Vec<usize> = flat
+        .char_indices()
+        .map(|(at, _)| at)
+        .skip(1)
+        .chain(std::iter::once(flat.len()))
+        .collect();
+    let best = cuts
+        .iter()
+        .rev()
+        .copied()
+        .filter(|end| flat[..*end].chars().count() >= CLIPPED_ECHO_MIN)
+        .find(|end| wanted.ends_with(&flat[..*end]))?;
+    boundaries
+        .into_iter()
+        .find(|(n, _)| *n == best)
+        .map(|(_, original)| original)
+}
+
 fn prior_answer_end(pane: &str, answer: &str) -> Option<usize> {
     let answer = answer.trim();
     if answer.chars().filter(|c| !c.is_whitespace()).count() < 16 {
@@ -361,6 +411,10 @@ fn same_tool_name(a: Option<&str>, b: Option<&str>) -> bool {
     a.map(|name| name.rsplit('.').next().unwrap_or(name))
         == b.map(|name| name.rsplit('.').next().unwrap_or(name))
 }
+
+/// How many of the newest durable rows a preview is checked against. The echo of a submission and
+/// the answer it produced are both within a couple of rows of the end.
+const KNOWN_REACH: usize = 4;
 
 /// Upserts retain their ID as a pane preview becomes a durable row. Removed IDs clear ephemeral
 /// dialogs and working indicators without asking clients to discard older history pages.
@@ -416,8 +470,39 @@ impl ConversationStream {
         if active && !self.was_active {
             self.settled_tools.clear();
         }
-        // A pane contains recent scrollback too. Strip the last durable answer when it is still
-        // visible so a new preview contains only the text that follows it.
+        // A pane contains recent scrollback and the echo of whatever was just submitted. A
+        // preview is only ever the text that follows everything already known, whichever kind of
+        // row that text came from.
+        let known: Vec<&TranscriptItem> = final_rows
+            .iter()
+            .rev()
+            .filter(|i| {
+                matches!(i.kind.as_deref(), Some("assistant") | Some("user"))
+                    && !i.text.trim().is_empty()
+            })
+            .take(KNOWN_REACH)
+            .collect();
+        for item in &mut live {
+            if !matches!(
+                item.kind.as_deref(),
+                Some("assistant") | Some("terminal_block")
+            ) {
+                continue;
+            }
+            if let Some(end) = known
+                .iter()
+                .filter_map(|row| known_text_end(&item.text, &row.text))
+                .max()
+            {
+                item.text = item.text[end..].trim().to_string();
+            }
+        }
+        live.retain(|i| {
+            !matches!(
+                i.kind.as_deref(),
+                Some("assistant") | Some("terminal_block")
+            ) || !i.text.is_empty()
+        });
         if let Some(answer) = final_rows
             .iter()
             .rev()
@@ -991,6 +1076,59 @@ mod tests {
             !quiet.items.iter().any(|i| i.text.contains(answer)),
             "the already durable answer was previewed again: {:#?}",
             quiet.items
+        );
+    }
+
+    /// The operator's own message, seated as an assistant reply attributed to Claude and
+    /// beginning mid sentence. The CLI echoed his prompt, the capture held only its tail, so the
+    /// echo matched no durable row by equality and was taken for fresh prose.
+    ///
+    /// This is the same defect as Antigravity's duplicated answer and OpenCode's orphaned
+    /// excerpt: a preview seating text the conversation already knows. One guard covers all
+    /// three, and the clipping is why it cannot be equality.
+    #[test]
+    fn a_clipped_echo_of_the_operators_own_prompt_is_never_seated_as_an_answer() {
+        let pane = include_str!("fixtures/claude_clipped_prompt_echo.txt");
+        let submitted = "codex does not work and says not supported in repomon yet so complete \
+                         that implementation. for agy you can switch model but the active model \
+                         that shows in the chat box doesn't update.";
+        let mut durable = TranscriptItem::new("user", submitted, None);
+        durable.id = Some("/db:user".into());
+        let mut stream = ConversationStream::default();
+        stream.update(vec![durable.clone()], Vec::new(), false);
+        let update = stream.update(vec![durable], pane_items("claude-code", pane), true);
+        for item in &update.items {
+            assert!(
+                !item.text.contains("so complete that implementation"),
+                "the echo was seated as an answer: {:?}",
+                item.text
+            );
+            assert!(
+                !item.text.contains("chat box doesn't update"),
+                "the clipped tail was seated: {:?}",
+                item.text
+            );
+        }
+    }
+
+    /// The clipped matcher must not fire on a short or unrelated opening, or every preview would
+    /// be eaten by coincidence.
+    #[test]
+    fn a_clipped_match_needs_a_real_run_of_the_known_text() {
+        let known = "a submission long enough to be recognised from its tail alone";
+        // The pane opens with the tail of it: matched, and the preview is what follows.
+        let pane = "enough to be recognised from its tail alone\nAnd then the real answer.";
+        let end = known_text_end(pane, known).expect("tail should match");
+        assert_eq!(pane[end..].trim(), "And then the real answer.");
+        // A short opening is coincidence, not an echo.
+        assert_eq!(
+            known_text_end("alone\nAnd then the real answer.", known),
+            None
+        );
+        // Unrelated text never matches.
+        assert_eq!(
+            known_text_end("A completely different answer entirely.", known),
+            None
         );
     }
 

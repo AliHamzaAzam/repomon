@@ -342,6 +342,8 @@ pub struct Ctx {
     /// The home screen's PR-strip cache: one `gh pr list` pass across tracked repos, TTL'd
     /// because `gh` shells out per repo. See `pull_requests::list`.
     pub pr_cache: Mutex<Option<(Instant, Vec<repomon_core::model::PullRequestSummary>)>>,
+    /// Serializes background pull-request refreshes so a burst of misses costs one fetch.
+    pub pr_refresh: Mutex<()>,
     pub shutdown: Notify,
 }
 
@@ -492,6 +494,7 @@ impl Ctx {
             lane_watchers: Mutex::new(HashMap::new()),
             headline_cache: Mutex::new(HashMap::new()),
             pr_cache: Mutex::new(None),
+            pr_refresh: Mutex::new(()),
             shutdown: Notify::new(),
         })
     }

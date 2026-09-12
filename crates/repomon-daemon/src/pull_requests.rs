@@ -69,3 +69,16 @@ fn run_gh_pr_list(repo_path: &Path) -> Vec<GhPr> {
     }
     serde_json::from_slice(&output.stdout).unwrap_or_default()
 }
+
+/// Refresh the cache off the request path. A cache miss must never put GitHub network I/O in
+/// front of whatever the operator is typing on the same connection; the caller serves what it
+/// has and the next call picks up the result. One refresh at a time.
+pub fn refresh_in_background(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let Ok(_guard) = ctx.pr_refresh.try_lock() else {
+            return;
+        };
+        let items = list(&ctx).await;
+        *ctx.pr_cache.lock().await = Some((std::time::Instant::now(), items));
+    });
+}

@@ -1,0 +1,6 @@
+repomon yet so complete that implementation. for agy you can switch model but the active model
+  that shows in the chat box doesn't update.
+
+  Update installed, Restart to update
+
+✳ Crunched for 9s

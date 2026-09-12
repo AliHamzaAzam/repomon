@@ -285,7 +285,22 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     let _ = writer.await;
 }
 
-/// Keep the allowlist small: new methods default to ordered execution, including all mutations.
+/// A request joins the connection's FIFO chain if and only if a later request on that same
+/// connection could observe its effect. That is the whole rule, and it has two consequences.
+///
+/// Mutations stay ordered, including the ones whose semantics *are* the order: input sends and
+/// dialog answers must arrive as they were typed, a viewport change must be visible to the
+/// capture that follows it, and `subscribe` must be live before the events it is meant to carry.
+/// Correctness beats latency there.
+///
+/// Pure reads do not, and neither do reads that write only their own memoisation cache, because
+/// nothing can observe that cache except the same read. Every method added below was either
+/// measured holding the chain on the operator's machine or is polled per pane on every tick:
+/// `daemon.status` at 16.8 s and `repo.pull_requests` at 7.7 s were the two worst, and behind them
+/// `agent.prompt` waited 11.5 s while every pane stalled at once.
+///
+/// New methods still default to ordered. Adding one here means showing it cannot be observed out
+/// of order.
 fn independent_read(method: &str) -> bool {
     matches!(
         method,
@@ -295,6 +310,20 @@ fn independent_read(method: &str) -> bool {
             | "agent.transcript_page"
             | "agent.command_catalog"
             | "agent.input_history"
+            // Polled per pane on every tick; pure reads of a pane or of a memoised prompt.
+            | "agent.capture"
+            | "agent.prompt"
+            // Measured holding the chain on the operator's machine; all pure reads.
+            | "daemon.status"
+            | "repo.pull_requests"
+            | "repomind.status"
+            | "repo.list"
+            | "config.get"
+            | "usage.get"
+            | "usage.summary"
+            | "terminal.list_all"
+            | "lane.headline"
+            | "file.index"
     )
 }
 
