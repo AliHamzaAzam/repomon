@@ -122,6 +122,18 @@ export interface TranscriptPage {
 // subscription_id is daemon-internal connection routing, never a UI row identity.
 export interface TranscriptUpdate extends TranscriptPage { lane_id: number; window: string; subscription_id: number; removed_ids: string[] }
 
+export interface InputHistoryEntry {
+  text: string;
+  at: string | null;
+}
+export interface InputHistory {
+  // Oldest first, duplicates already collapsed daemon-side.
+  entries: InputHistoryEntry[];
+  // "none" means this kind has no readable history store at all - a genuinely different fact
+  // from "session"/"project" coming back empty, and must never be papered over as a local guess.
+  source: "session" | "project" | "none";
+}
+
 export interface ConfigView {
   agent_views?: Record<string, string>;
   agent_status_rows?: Record<string, string[]>;
@@ -376,6 +388,10 @@ interface RpcMap {
   "agent.transcript_watch": { params: TranscriptTarget & { on: boolean }; result: TranscriptPage | null };
   // A read, cached daemon-side per (kind, repo root); see crates/repomon-daemon/src/command_catalog.rs.
   "agent.command_catalog": { params: { lane_id: number; window?: string }; result: CommandCatalog };
+  // The agent's own recall store (its CLI's history file, or the equivalent scanner), not a
+  // desktop-local list - see crates/repomon-daemon/src/input_history.rs. `window` must belong to
+  // `lane_id`, exactly like the transcript RPCs; an unrelated pair is a real invalid_params error.
+  "agent.input_history": { params: { lane_id: number; window?: string; limit?: number }; result: InputHistory };
   "lane.set_view": { params: { lane_id: number; view_mode: "terminal" | "conversation" | null }; result: null };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
   "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: { answered: string; sent: string[] } };

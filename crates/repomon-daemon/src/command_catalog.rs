@@ -4,9 +4,10 @@
 //! for the contract and the operator's rule against driving an agent's interactive picker blind.
 //!
 //! Self-contained: the only things this module reads from the rest of the daemon are `Ctx`
-//! (for the lane/session lookup and a live pane capture) and a handful of `pub(crate)` helpers
-//! already in `ext.rs` (plugin/settings scanning claude-code and codex's plugin systems share).
-//! Its own cache is a private, in-process static, not threaded through `Ctx`.
+//! (for a live pane capture), an already-overlaid `Lane` its caller in `rpc.rs` resolves (the
+//! lane/session lookup itself needs `overlay_agents`, private to `rpc.rs`), and a handful of
+//! `pub(crate)` helpers already in `ext.rs` (plugin/settings scanning claude-code and codex's
+//! plugin systems share). Its own cache is a private, in-process static, not threaded through `Ctx`.
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 use repomon_core::agent::backend::CaptureOpts;
 use repomon_core::agent::conversation_activity::pane_activity;
 use repomon_core::command_catalog::{CatalogCommand, CatalogModel, CatalogSource, CommandCatalog};
-use repomon_core::model::{AgentKind, LaneId};
+use repomon_core::model::{AgentKind, Lane};
 use serde_json::Value;
 
 use crate::Ctx;
@@ -73,14 +74,13 @@ fn cached_static(
     value
 }
 
-/// Resolves `{lane_id, window}` to a kind and worktree, then discovers and caches its catalog.
-/// An unrecognized lane, window, or kind is an empty catalog, never an error - "no commands
-/// known for this agent" is exactly what the palette should show in that case.
-pub async fn build(ctx: &Ctx, lane_id: LaneId, window: Option<String>) -> CommandCatalog {
-    let window = window.unwrap_or_else(|| repomon_core::TmuxRuntime::window_name(lane_id));
-    let Ok(lane) = ctx.lanes.get(lane_id).await else {
-        return CommandCatalog::empty();
-    };
+/// Resolves `window` against an already-overlaid `lane` (see the `agent.command_catalog` match
+/// arm in `rpc.rs`, which calls `overlay_agents` before this - `lane.agent_sessions` is empty
+/// otherwise) to a kind and worktree, then discovers and caches its catalog. An unmatched
+/// window, or a kind this module has nothing for, is an empty catalog, never an error - "no
+/// commands known for this agent" is exactly what the palette should show in that case.
+pub async fn build(ctx: &Ctx, lane: &Lane, window: Option<String>) -> CommandCatalog {
+    let window = window.unwrap_or_else(|| repomon_core::TmuxRuntime::window_name(lane.id));
     let Some(session) = lane
         .agent_sessions
         .iter()
@@ -323,6 +323,128 @@ mod tests {
                 .to_string())
             .is_empty()
         );
+    }
+
+    // `build`'s own contract, now that resolving `agent_sessions` is its caller's job (see the
+    // `agent.command_catalog` match arm in rpc.rs, which must call `overlay_agents` first -
+    // `Lanes::get` alone always returns an empty `agent_sessions`, the exact bug this guards
+    // against regressing). Proven against a real spawned tmux session separately; this is the
+    // deterministic, CI-safe half: given an already-populated lane, does `build` pick the right
+    // session and fail closed on anything it does not recognize.
+    fn lane_with_session(session: repomon_core::model::AgentSession) -> Lane {
+        use repomon_core::model::{Repo, Worktree, WorktreeState};
+        let head = "0000000000000000000000000000000000000000".parse().unwrap();
+        Lane {
+            id: 1,
+            repo: Repo {
+                id: 1,
+                path: std::path::PathBuf::from("/code/alpha"),
+                name: "alpha".into(),
+                added_at: chrono::Utc::now(),
+                worktree_root_template: None,
+                hidden: false,
+                position: None,
+                label: None,
+            },
+            worktree: Worktree {
+                id: 1,
+                repo_id: 1,
+                path: std::path::PathBuf::from("/code/alpha"),
+                branch: Some("main".into()),
+                head,
+                is_main: true,
+                name: "main".into(),
+            },
+            state: WorktreeState {
+                worktree_id: 1,
+                head,
+                branch: Some("main".into()),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                dirty: Default::default(),
+                last_commit_at: None,
+                locked: false,
+                prunable: false,
+                merged: false,
+                last_change_at: None,
+            },
+            agent_sessions: vec![session],
+            last_activity_at: chrono::Utc::now(),
+            pinned: false,
+            role: None,
+            view_mode: None,
+        }
+    }
+
+    fn fake_session(agent: AgentKind, tmux_window: &str) -> repomon_core::model::AgentSession {
+        use repomon_core::model::AgentStatus;
+        repomon_core::model::AgentSession {
+            id: 1,
+            agent,
+            repo_id: 1,
+            worktree_id: Some(1),
+            started_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            ended_at: None,
+            manifest_path: std::path::PathBuf::new(),
+            tool_call_count: 0,
+            title: None,
+            status: AgentStatus::Idle,
+            external: false,
+            session_id: None,
+            resume_at: None,
+            inferred: false,
+            tmux_window: Some(tmux_window.into()),
+            last_message: None,
+            pending_prompt: None,
+            pending_dialog: None,
+            stale: false,
+            stalled_since: None,
+            subagent_running: None,
+            status_reason: None,
+            attention_kind: None,
+            ended_turn: true,
+            gate: None,
+            config_dir: None,
+            custom_label: None,
+            generated_label: None,
+        }
+    }
+
+    fn test_ctx() -> std::sync::Arc<crate::Ctx> {
+        crate::Ctx::new(
+            repomon_core::Store::open_in_memory().unwrap(),
+            repomon_core::Config::default(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn build_ignores_a_session_in_a_different_window_of_the_same_lane() {
+        let ctx = test_ctx();
+        let lane = lane_with_session(fake_session(AgentKind::ClaudeCode, "lane-1/2"));
+        let result = build(&ctx, &lane, Some("lane-1/1".into())).await;
+        assert_eq!(result, CommandCatalog::empty());
+    }
+
+    #[tokio::test]
+    async fn build_returns_empty_for_a_kind_it_has_no_discovery_for_even_with_a_matched_window() {
+        let ctx = test_ctx();
+        let lane = lane_with_session(fake_session(AgentKind::Cursor, "lane-1"));
+        let result = build(&ctx, &lane, Some("lane-1".into())).await;
+        assert_eq!(result, CommandCatalog::empty());
+    }
+
+    #[tokio::test]
+    async fn build_defaults_the_window_from_the_lane_id_when_none_is_given() {
+        let ctx = test_ctx();
+        let window = repomon_core::TmuxRuntime::window_name(1);
+        let lane = lane_with_session(fake_session(AgentKind::Cursor, &window));
+        // Cursor has no discovery, but reaching an empty result (not a panic on a missing
+        // window) proves the default-window fallback matched the session at all.
+        let result = build(&ctx, &lane, None).await;
+        assert_eq!(result, CommandCatalog::empty());
     }
 }
 

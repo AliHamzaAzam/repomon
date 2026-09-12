@@ -551,6 +551,14 @@ struct AgentKey {
     window: Option<String>,
 }
 #[derive(Deserialize)]
+struct AgentInputHistory {
+    lane_id: repomon_core::model::LaneId,
+    #[serde(default)]
+    window: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
 struct AgentCapture {
     lane_id: repomon_core::model::LaneId,
     #[serde(default)]
@@ -4103,6 +4111,21 @@ pub async fn dispatch(
             );
             Ok(json!({ "lane_id": p.lane_id, "window": window }))
         }
+        // The agent's own up arrow recall, so the chat composer and the TUI walk one history.
+        "agent.input_history" => {
+            let p: AgentInputHistory = parse(params)?;
+            let window = p
+                .window
+                .unwrap_or_else(|| TmuxRuntime::window_name(p.lane_id));
+            if TmuxRuntime::parse_lane_window(&window).is_none_or(|(lane, _)| lane != p.lane_id) {
+                return Err(RpcError::invalid_params(
+                    "window does not belong to lane_id",
+                ));
+            }
+            crate::input_history::history(ctx, p.lane_id, window, p.limit)
+                .await
+                .map_err(internal)
+        }
         "agent.capture" => {
             let p: AgentCapture = parse(params)?;
             let opts = CaptureOpts {
@@ -4319,9 +4342,16 @@ pub async fn dispatch(
         }
         // Discovery and caching live in `command_catalog`, a self-contained module: never drive
         // an agent's interactive picker blind, never invent a command or model that isn't real.
+        // `Lanes::get` alone never populates `agent_sessions` (that's `overlay_agents`'s job,
+        // the same live tmux/transcript resolution `lane.get` uses below) - without it every
+        // session lookup misses and the catalog comes back empty for every kind, indistinguishable
+        // from a real "nothing known" answer.
         "agent.command_catalog" => {
             let p: AgentCommandCatalog = parse(params)?;
-            to_value(crate::command_catalog::build(ctx, p.lane_id, p.window).await)
+            let mut lanes = vec![ctx.lanes.get(p.lane_id).await.map_err(internal)?];
+            overlay_agents(ctx, &mut lanes).await;
+            let lane = lanes.into_iter().next().unwrap();
+            to_value(crate::command_catalog::build(ctx, &lane, p.window).await)
         }
         "agent.answer" => {
             let p: AgentAnswer = parse(params)?;

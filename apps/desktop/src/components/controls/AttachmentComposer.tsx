@@ -63,19 +63,32 @@ export default function AttachmentComposer(props: {
   kind: string; model?: string; disabled: boolean; busy: boolean;
   onSend: (text: string) => Promise<boolean>;
   catalog: CommandCatalog;
+  catalogError: boolean;
   hasTerminalFallback: boolean;
   onSelectModel: (id: string) => void;
   onModelFallback: () => void;
+  // The same "is this pane actually on screen right now" notion ConversationPane already uses
+  // for its dialog polling. A pane that isn't displayed stays mounted (tab switching keeps it
+  // warm), but its palette/model panel portal into document.body regardless, so without this
+  // gate a panel opened in one pane keeps floating on screen over whichever pane is shown next.
+  displayed: () => boolean;
+  // The agent's own recall history (its CLI's history file, or the equivalent scanner), oldest
+  // first - never a desktop-local list built from what this pane happened to send. `stores/
+  // inputHistory.ts` fetches and caches it per (lane_id, window).
+  history: string[];
+  // True when this kind has no readable history store at all ("source: none"), distinct from a
+  // real store that simply has nothing in it yet.
+  historyUnavailable: boolean;
+  historyError: string | null;
 }) {
   const [text, setText] = createSignal("");
   const [files, setFiles] = createSignal<ChatAttachment[]>([]);
   const [staging, setStaging] = createSignal(false);
   const [error, setError] = createSignal<string>();
   const [dragging, setDragging] = createSignal(false);
-  // TUI-style history: Up/Down recall previously sent messages, oldest to newest, only ever
+  // TUI-style history: Up/Down recall the agent's own submissions, oldest to newest, only ever
   // starting from an empty composer so an in-progress draft can never be clobbered by an arrow
-  // press. Local to this mount, like the draft itself - a fresh pane starts with empty history.
-  const [history, setHistory] = createSignal<string[]>([]);
+  // press.
   const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
   const [modelOpen, setModelOpen] = createSignal(false);
   const [paletteDismissed, setPaletteDismissed] = createSignal(false);
@@ -186,7 +199,6 @@ export default function AttachmentComposer(props: {
     if (locked() || (!text().trim() && !files().length)) return;
     const draft = text();
     if (await props.onSend(attachmentPrompt(draft, files()))) {
-      if (draft.trim()) setHistory((current) => [...current, draft].slice(-50));
       setText(""); setFiles([]); setError(undefined); setHistoryIndex(null);
     }
   }
@@ -196,8 +208,16 @@ export default function AttachmentComposer(props: {
     void send();
   }
   function recallOlder() {
-    const items = history();
-    if (!items.length) return;
+    const items = props.history;
+    if (!items.length) {
+      // A real answer ("this kind has no history store at all") is worth saying; a store that
+      // is merely empty so far, or one whose fetch has not resolved yet, says nothing - the
+      // operator will simply find there is nothing to recall, same as before this history came
+      // from the daemon.
+      if (props.historyUnavailable) setError(`No input history available for ${props.kind}.`);
+      else if (props.historyError) setError(props.historyError);
+      return;
+    }
     const current = historyIndex();
     const next = current === null ? items.length - 1 : Math.max(0, current - 1);
     setHistoryIndex(next);
@@ -206,7 +226,7 @@ export default function AttachmentComposer(props: {
   function recallNewer() {
     const current = historyIndex();
     if (current === null) return;
-    const items = history();
+    const items = props.history;
     if (current >= items.length - 1) { setHistoryIndex(null); setText(""); return; }
     setHistoryIndex(current + 1);
     setText(items[current + 1]);
@@ -255,7 +275,7 @@ export default function AttachmentComposer(props: {
             recallNewer();
           }
         }} />
-      <Show when={paletteOpen() && field}>
+      <Show when={paletteOpen() && field && props.displayed()}>
         <SlashPalette
           commands={filteredCommands()}
           query={paletteQuery() ?? ""}
@@ -263,6 +283,7 @@ export default function AttachmentComposer(props: {
           anchor={field}
           onHighlight={setHighlightedIndex}
           onRun={runPaletteCommand}
+          loadError={props.catalogError}
         />
       </Show>
       <div class="composer-actions">
@@ -280,7 +301,7 @@ export default function AttachmentComposer(props: {
         </div>
       </div>
     </div>
-    <Show when={modelOpen() && modelButtonRef}>
+    <Show when={modelOpen() && modelButtonRef && props.displayed()}>
       <ModelPanel models={props.catalog.models} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
     </Show>
     <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>
