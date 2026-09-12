@@ -11,7 +11,7 @@ use crate::model::Repo;
 pub const MAX_NOTES_BYTES: usize = 8192;
 
 /// Marker appended when a hand-edited file over the cap is truncated on read.
-pub const TRUNCATION_MARKER: &str = "[notes truncated at 8 KB — edit the file to trim]";
+pub const TRUNCATION_MARKER: &str = "[notes truncated at 8 KB: edit the file to trim]";
 
 /// Reduce a repo name to a filesystem-safe slug: keep `[A-Za-z0-9._-]`, map runs of anything
 /// else to `-`, trim leading/trailing `.` and `-` (no dotfiles, no `..`), cap at 64 chars.
@@ -74,7 +74,7 @@ pub fn write(dir: &Path, repo: &Repo, all: &[Repo], content: &str) -> Result<Pat
     use std::io::Write;
     if content.len() > MAX_NOTES_BYTES {
         return Err(Error::Config(format!(
-            "notes are {} bytes; the cap is {MAX_NOTES_BYTES} bytes — trim before writing",
+            "notes are {} bytes; the cap is {MAX_NOTES_BYTES} bytes: trim before writing",
             content.len()
         )));
     }

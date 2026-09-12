@@ -206,9 +206,9 @@ async fn start_background_tasks(ctx: Arc<Ctx>) {
                         }
                     });
                 }
-                None => tracing::warn!(
-                    "[remote] enabled but bind missing — run `repomon remote enable`"
-                ),
+                None => {
+                    tracing::warn!("[remote] enabled but bind missing: run `repomon remote enable`")
+                }
             }
         }
     }

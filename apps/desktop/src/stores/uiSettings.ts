@@ -144,7 +144,7 @@ export function recordShortcutsHintLaunch(): void {
   try {
     localStorage.setItem(SHORTCUTS_HINT_LAUNCH_COUNT_KEY, String(readShortcutsHintLaunchCount() + 1));
   } catch {
-    // localStorage can throw (quota, private mode) — persistence is best-effort.
+    // localStorage can throw (quota, private mode): persistence is best-effort.
   }
 }
 
@@ -168,7 +168,7 @@ export function saveRightPanelActiveTab(id: string): void {
   try {
     localStorage.setItem(RIGHT_PANEL_ACTIVE_TAB_KEY, id);
   } catch {
-    // localStorage can throw (quota, private mode) — persistence is best-effort.
+    // localStorage can throw (quota, private mode): persistence is best-effort.
   }
 }
 

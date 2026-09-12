@@ -786,7 +786,7 @@ fn file_read_error(e: crate::files::ReadError) -> RpcError {
     match e {
         crate::files::ReadError::Binary => RpcError::invalid_params("binary file"),
         crate::files::ReadError::TooLarge(size) => RpcError::invalid_params(format!(
-            "file too large to edit ({size} bytes; cap is {} bytes) — rejected rather than \
+            "file too large to edit ({size} bytes; cap is {} bytes): rejected rather than \
              truncated, since a truncated read risks the editor saving a truncated copy back \
              over the real file",
             crate::files::READ_CAP_BYTES
@@ -5603,7 +5603,7 @@ pub async fn dispatch(
             // and refuse to type into a corpse instead of silently no-op'ing at the tmux layer.
             if !reconcile_orchestrator(ctx).await {
                 return Err(RpcError::invalid_params(
-                    "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
+                    "repomind isn't running: start it from the command-center or 'repomon orchestrate'",
                 ));
             }
             // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
@@ -5634,7 +5634,7 @@ pub async fn dispatch(
             // as a successful keystroke.
             if !reconcile_orchestrator(ctx).await {
                 return Err(RpcError::invalid_params(
-                    "repomind isn't running — start it from the command-center or 'repomon orchestrate'",
+                    "repomind isn't running: start it from the command-center or 'repomon orchestrate'",
                 ));
             }
             // Resolved for liveness, not read raw off the tracked/recorded window: a spawn since
@@ -6235,7 +6235,7 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
                     ended_at: None,
                     manifest_path: std::path::PathBuf::new(),
                     tool_call_count: 0,
-                    title: Some("active — file activity".into()),
+                    title: Some("active: file activity".into()),
                     status: AgentStatus::Running,
                     external: true,
                     session_id: None,
@@ -10665,7 +10665,7 @@ mod tests {
         );
         assert!(
             !direct_bind_allowed(1, 1, 2),
-            "a second window exists in the lane — the sid could already be bound to it"
+            "a second window exists in the lane: the sid could already be bound to it"
         );
         assert!(
             !direct_bind_allowed(1, 1, 7),

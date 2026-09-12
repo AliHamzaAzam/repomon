@@ -97,7 +97,7 @@ async fn antigravity_backend_starts_degrades_transcript_and_stops() {
     assert_eq!(status["autonomy"], json!("read-only"), "status: {status}");
     assert!(
         status["session_id"].is_null(),
-        "antigravity can't pin a session id — must be null, got: {status}"
+        "antigravity can't pin a session id: must be null, got: {status}"
     );
 
     assert!(mcp_cfg.exists(), "mcp_config.json should be registered");

@@ -105,7 +105,7 @@ impl Policy {
     /// per-session action cap (a runaway backstop).
     pub fn record_mutation(&self) -> Result<u64, String> {
         if !self.autonomy.allows_mutation() {
-            return Err("autonomy is read-only — this tool only observes. \
+            return Err("autonomy is read-only: this tool only observes. \
                  Report what you see and let the human decide."
                 .into());
         }
@@ -115,7 +115,7 @@ impl Policy {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *a >= self.max_actions {
             return Err(format!(
-                "action cap reached ({} actions this session). Pausing for safety — \
+                "action cap reached ({} actions this session). Pausing for safety: \
                  summarize progress and check in with the human before continuing.",
                 self.max_actions
             ));
@@ -147,7 +147,7 @@ impl Policy {
         if let Some((prev, when)) = m.get(&lane) {
             if prev == text && when.elapsed() < Duration::from_secs(15) {
                 return Err("duplicate message suppressed (identical text to this lane within 15s). \
-                     Don't resend — use wait_for_change to let it work, or read_agent to see where it's stuck."
+                     Don't resend: use wait_for_change to let it work, or read_agent to see where it's stuck."
                     .into());
             }
         }
@@ -185,17 +185,17 @@ impl Policy {
         let result = match m.get(token) {
             None => Err(
                 "confirmation token not recognized (it may already have been used, \
-                 never existed, or the server restarted) — re-run without confirm to get a \
+                 never existed, or the server restarted): re-run without confirm to get a \
                  fresh impact summary."
                     .to_string(),
             ),
             Some(p) if p.minted.elapsed() >= self.confirm_ttl => Err(
-                "confirmation token expired — re-run without confirm to get a fresh impact \
+                "confirmation token expired: re-run without confirm to get a fresh impact \
                  summary."
                     .to_string(),
             ),
             Some(p) if p.lane_id != lane_id || p.flags != flags => Err(
-                "confirmation token does not match this lane or action — tokens are single-use \
+                "confirmation token does not match this lane or action: tokens are single-use \
                  and bound to the exact request that minted them. Re-run without confirm to get \
                  a fresh impact summary."
                     .to_string(),

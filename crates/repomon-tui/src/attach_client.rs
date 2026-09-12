@@ -244,7 +244,7 @@ fn utf8_complete_len(bytes: &[u8]) -> usize {
 pub async fn run(_session: &str, _window: &str) -> Result<()> {
     bail!(
         "`repomon attach-host` is Windows-only: it attaches to a repomon-agent-host named \
-         pipe. On macOS/Linux agents run under tmux — attach from the TUI instead."
+         pipe. On macOS/Linux agents run under tmux: attach from the TUI instead."
     )
 }
 

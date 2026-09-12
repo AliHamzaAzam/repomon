@@ -82,7 +82,7 @@ export function ResizableSplit(props: ResizableSplitProps): JSX.Element {
       try {
         localStorage.setItem(props.storageKey, String(value));
       } catch {
-        // localStorage can throw (quota, private mode) — persistence is best-effort.
+        // localStorage can throw (quota, private mode): persistence is best-effort.
       }
     }, PERSIST_DEBOUNCE_MS);
   }

@@ -115,7 +115,7 @@ async fn waiting_badges_distinguish_attention() {
     // A routine permission ask: the fleet row wears pause; the lane switcher names it.
     app.lanes[0].agent_sessions = vec![fake_session(
         AgentStatus::Waiting,
-        Some("Bash command — Do you want to proceed?"),
+        Some("Bash command: Do you want to proceed?"),
     )];
     let fleet = render_to_string(&app, 100, 40).unwrap();
     assert!(
@@ -632,7 +632,7 @@ async fn renders_fleet_with_a_registered_repo() {
         lane_id: app.lanes[0].id,
         session_id: None,
         read: true,
-        title: "⏸ claude needs you — alpha".into(),
+        title: "⏸ claude needs you: alpha".into(),
         body: "main · “want me to continue?”".into(),
     });
     app.notifications.push_back(NotifEvent {
@@ -641,7 +641,7 @@ async fn renders_fleet_with_a_registered_repo() {
         lane_id: app.lanes[0].id,
         session_id: None,
         read: false,
-        title: "⏳ claude hit a usage limit — beta".into(),
+        title: "⏳ claude hit a usage limit: beta".into(),
         body: "main · resets 06:00".into(),
     });
     app.view = View::Fleet;
@@ -661,7 +661,7 @@ async fn renders_fleet_with_a_registered_repo() {
         .find(|l| l.trim_start().starts_with('▸'))
         .expect("cursor row missing");
     assert!(
-        cursor_row.contains("needs you — alpha"),
+        cursor_row.contains("needs you: alpha"),
         "cursor not on the selected (older) event:\n{nf}"
     );
 

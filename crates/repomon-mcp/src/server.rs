@@ -418,14 +418,14 @@ impl Server {
             Attention::Decision => {
                 return Err(
                     "this lane is on a DECISION, not a routine permission. Refusing to \
-                     auto-answer — surface the exact question to the human, then relay their \
+                     auto-answer: surface the exact question to the human, then relay their \
                      choice with approve_agent {choice: <number>} or send_to_agent."
                         .into(),
                 );
             }
             Attention::EndOfTurn | Attention::DoneCandidate => {
                 return Err(
-                    "the agent ended its turn (no open dialog) — use send_to_agent to \
+                    "the agent ended its turn (no open dialog): use send_to_agent to \
                      give it the next instruction, not approve_agent."
                         .into(),
                 );
@@ -715,7 +715,7 @@ impl Server {
         }
         if !lane.state.dirty.is_clean() {
             return Err(
-                "the worker has uncommitted changes that would NOT be merged — have it commit \
+                "the worker has uncommitted changes that would NOT be merged: have it commit \
                  first (send_to_agent), then merge."
                     .into(),
             );
@@ -1375,7 +1375,7 @@ pub fn approve_key(choice: Option<&Value>) -> Result<(String, String), String> {
                     Ok((digits.to_string(), format!("option {digits}")))
                 }
                 other => Err(format!(
-                    "choice must be \"yes\", \"no\", or an option number — got '{other}'"
+                    "choice must be \"yes\", \"no\", or an option number, got '{other}'"
                 )),
             }
         }
@@ -1617,7 +1617,7 @@ fn tool_catalog() -> Vec<ToolDef> {
             name: "approve_agent",
             description: "Answer a pending PERMISSION dialog (attention=permission). Default/'yes' \
                 accepts; 'no' cancels; a number picks that option. Refuses on a decision-class \
-                prompt — those must be escalated to the human. Read the proposed action first if \
+                prompt: those must be escalated to the human. Read the proposed action first if \
                 it could be destructive.",
             input_schema: obj(
                 json!({
@@ -1644,7 +1644,7 @@ fn tool_catalog() -> Vec<ToolDef> {
             name: "stop_agent",
             description: "End an agent's session by closing its terminal window. Use for a \
                 finished or hung agent. The lane, its worktree files, and the conversation \
-                transcript all survive — only the live process ends. If the lane is dirty (see \
+                transcript all survive. Only the live process ends. If the lane is dirty (see \
                 fleet_status/read_agent), mention the uncommitted work when you report.",
             input_schema: obj(
                 json!({
@@ -1658,7 +1658,7 @@ fn tool_catalog() -> Vec<ToolDef> {
             name: "create_lane",
             description: "Create a new branch + worktree (a lane) in a repo, ready to spawn an \
                 agent into. In supervised mode this asks for human confirmation first. The \
-                result embeds repo_notes (the repo's durable notes) when any exist — fold them \
+                result embeds repo_notes (the repo's durable notes) when any exist: fold them \
                 into the task you give the worker you spawn here.",
             input_schema: obj(
                 json!({
@@ -1671,7 +1671,7 @@ fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "delete_lane",
-            description: "Delete a lane (its worktree; with delete_branch also its branch — a \
+            description: "Delete a lane (its worktree; with delete_branch also its branch, a \
                 force delete). DESTRUCTIVE: requires explicit human approval. First call returns \
                 an impact summary and a confirmation token; relay the impact to the human and \
                 re-call with confirm=<token> only after they say yes. Refuses dirty worktrees.",
@@ -1705,13 +1705,13 @@ fn tool_catalog() -> Vec<ToolDef> {
                 branch (with diffstat, via commits/committed_stat), plus uncommitted changes \
                 (uncommitted_stat). Use to verify a worker's claim of 'done' before merge_lane, \
                 or to check for work worth keeping before stop_agent/delete_lane. Set \
-                include_patch for the actual diff text, capped — but that patch covers \
+                include_patch for the actual diff text, capped, but that patch covers \
                 uncommitted changes only ('git diff HEAD'); committed work is visible via \
                 commits/committed_stat, not in the patch text.",
             input_schema: obj(
                 json!({
                     "lane_id": { "type": "integer", "description": "The lane to inspect." },
-                    "include_patch": { "type": "boolean", "description": "Include the diff text for uncommitted changes only ('git diff HEAD'), capped at max_patch_chars (default false). Committed work is NOT in this text — see commits/committed_stat." },
+                    "include_patch": { "type": "boolean", "description": "Include the diff text for uncommitted changes only ('git diff HEAD'), capped at max_patch_chars (default false). Committed work is NOT in this text: see commits/committed_stat." },
                     "max_patch_chars": { "type": "integer", "description": "Cap on the patch text in characters, up to 20000 (default 8000)." }
                 }),
                 &["lane_id"],
@@ -1725,7 +1725,7 @@ fn tool_catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "repo_notes",
             description: "Read a repo's durable notes (the fleet's per-repo memory): build/test \
-                commands, conventions, gotchas, standing instructions — recorded across sessions \
+                commands, conventions, gotchas, standing instructions, recorded across sessions \
                 and hand-editable by the human. Check them before planning work in a repo, and \
                 fold them into every worker task. Also embedded automatically in \
                 create_lane/spawn_agent results as repo_notes.",
@@ -1739,7 +1739,7 @@ fn tool_catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "repo_notes_write",
             description: "Replace a repo's durable notes wholesale (full replace, max 8192 \
-                bytes). Read repo_notes first, integrate the new lesson, and rewrite concisely — \
+                bytes). Read repo_notes first, integrate the new lesson, and rewrite concisely: \
                 edit, don't append forever. Record durable lessons here after a merge, a \
                 corrected mistake, or a human-stated preference; don't store live fleet state \
                 (that comes from fleet_status).",

@@ -110,7 +110,7 @@ async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
     assert_eq!(status["autonomy"], json!("read-only"), "status: {status}");
     assert!(
         status["session_id"].is_null(),
-        "codex can't pin a session id — must be null, got: {status}"
+        "codex can't pin a session id: must be null, got: {status}"
     );
 
     // An empty Codex chat must return before scanning Claude transcripts to prevent cross-session
