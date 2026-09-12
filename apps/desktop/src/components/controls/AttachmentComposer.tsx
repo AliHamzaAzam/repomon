@@ -63,9 +63,15 @@ export default function AttachmentComposer(props: {
   kind: string; model?: string; disabled: boolean; busy: boolean;
   onSend: (text: string) => Promise<boolean>;
   catalog: CommandCatalog;
+  catalogError: boolean;
   hasTerminalFallback: boolean;
   onSelectModel: (id: string) => void;
   onModelFallback: () => void;
+  // The same "is this pane actually on screen right now" notion ConversationPane already uses
+  // for its dialog polling. A pane that isn't displayed stays mounted (tab switching keeps it
+  // warm), but its palette/model panel portal into document.body regardless, so without this
+  // gate a panel opened in one pane keeps floating on screen over whichever pane is shown next.
+  displayed: () => boolean;
 }) {
   const [text, setText] = createSignal("");
   const [files, setFiles] = createSignal<ChatAttachment[]>([]);
@@ -255,7 +261,7 @@ export default function AttachmentComposer(props: {
             recallNewer();
           }
         }} />
-      <Show when={paletteOpen() && field}>
+      <Show when={paletteOpen() && field && props.displayed()}>
         <SlashPalette
           commands={filteredCommands()}
           query={paletteQuery() ?? ""}
@@ -263,6 +269,7 @@ export default function AttachmentComposer(props: {
           anchor={field}
           onHighlight={setHighlightedIndex}
           onRun={runPaletteCommand}
+          loadError={props.catalogError}
         />
       </Show>
       <div class="composer-actions">
@@ -280,7 +287,7 @@ export default function AttachmentComposer(props: {
         </div>
       </div>
     </div>
-    <Show when={modelOpen() && modelButtonRef}>
+    <Show when={modelOpen() && modelButtonRef && props.displayed()}>
       <ModelPanel models={props.catalog.models} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
     </Show>
     <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>

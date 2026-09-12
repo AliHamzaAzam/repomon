@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -12,8 +13,8 @@ const emptyCatalog: CommandCatalog = { commands: [], models: [], model_command: 
 function props(overrides: Partial<Parameters<typeof AttachmentComposer>[0]> = {}) {
   return {
     kind: "codex", disabled: false, busy: false, onSend: vi.fn(),
-    catalog: emptyCatalog, hasTerminalFallback: false,
-    onSelectModel: vi.fn(), onModelFallback: vi.fn(),
+    catalog: emptyCatalog, catalogError: false, hasTerminalFallback: false,
+    onSelectModel: vi.fn(), onModelFallback: vi.fn(), displayed: () => true,
     ...overrides,
   };
 }
@@ -260,6 +261,28 @@ describe("native slash-command palette (round 10)", () => {
     expect(field).toHaveValue("/");
     expect(screen.getAllByRole("option")[2]).toHaveAttribute("aria-selected", "true");
   });
+
+  it("shows a distinct message for a failed catalog fetch, not the empty-catalog wording", () => {
+    render(() => <AttachmentComposer {...props({ catalogError: true })} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
+    expect(screen.getByRole("alert")).toHaveTextContent(/Couldn't load commands/);
+    expect(screen.queryByText("No commands known for this agent.")).not.toBeInTheDocument();
+  });
+
+  it("never portals the palette into a pane that is not the one on screen", () => {
+    render(() => <AttachmentComposer {...props({ catalog, displayed: () => false })} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
+    expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+  });
+
+  it("tears the palette portal down the moment the pane stops being displayed", () => {
+    const [displayed, setDisplayed] = createSignal(true);
+    render(() => <AttachmentComposer {...props({ catalog, displayed })} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    setDisplayed(false);
+    expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+  });
 });
 
 describe("native model picker (round 10)", () => {
@@ -303,5 +326,14 @@ describe("native model picker (round 10)", () => {
     const result = render(() => <AttachmentComposer {...props({ model: "gpt-5-codex" })} />);
     expect(screen.queryByRole("button", { name: "Change codex model" })).not.toBeInTheDocument();
     expect(result.container.querySelector(".composer-agent")?.textContent).toBe("codex · gpt-5-codex");
+  });
+
+  it("tears the model panel portal down the moment the pane stops being displayed", () => {
+    const [displayed, setDisplayed] = createSignal(true);
+    render(() => <AttachmentComposer {...props({ catalog, displayed })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
+    expect(screen.getByRole("menu", { name: "Choose model" })).toBeInTheDocument();
+    setDisplayed(false);
+    expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
   });
 });

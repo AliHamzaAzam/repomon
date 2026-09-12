@@ -28,6 +28,9 @@ export default function SlashPalette(props: {
   anchor: HTMLElement;
   onHighlight: (index: number) => void;
   onRun: (command: CatalogCommand) => void;
+  // True when the catalog fetch itself failed - a distinct message from a confirmed empty
+  // catalog, so "no commands known" is never shown for a case where the daemon was never asked.
+  loadError: boolean;
 }) {
   let listRef!: HTMLDivElement;
   const style = (): JSX.CSSProperties => {
@@ -56,7 +59,14 @@ export default function SlashPalette(props: {
         style={style()}
         class="z-[100] max-h-72 overflow-y-auto rounded-xl border border-line bg-surface p-1 shadow-[0_12px_36px_var(--shadow)] outline-none backdrop-blur-md"
       >
-        <Show when={props.commands.length} fallback={<p class="px-2.5 py-2 text-xs text-muted">No commands known for this agent.</p>}>
+        <Show
+          when={props.commands.length}
+          fallback={
+            props.loadError
+              ? <p class="px-2.5 py-2 text-xs text-fault" role="alert">Couldn't load commands for this agent. Try again.</p>
+              : <p class="px-2.5 py-2 text-xs text-muted">No commands known for this agent.</p>
+          }
+        >
           <For each={props.commands}>
             {(command, index) => {
               const alias = () => bareAlias(command.name);

@@ -4319,9 +4319,16 @@ pub async fn dispatch(
         }
         // Discovery and caching live in `command_catalog`, a self-contained module: never drive
         // an agent's interactive picker blind, never invent a command or model that isn't real.
+        // `Lanes::get` alone never populates `agent_sessions` (that's `overlay_agents`'s job,
+        // the same live tmux/transcript resolution `lane.get` uses below) - without it every
+        // session lookup misses and the catalog comes back empty for every kind, indistinguishable
+        // from a real "nothing known" answer.
         "agent.command_catalog" => {
             let p: AgentCommandCatalog = parse(params)?;
-            to_value(crate::command_catalog::build(ctx, p.lane_id, p.window).await)
+            let mut lanes = vec![ctx.lanes.get(p.lane_id).await.map_err(internal)?];
+            overlay_agents(ctx, &mut lanes).await;
+            let lane = lanes.into_iter().next().unwrap();
+            to_value(crate::command_catalog::build(ctx, &lane, p.window).await)
         }
         "agent.answer" => {
             let p: AgentAnswer = parse(params)?;

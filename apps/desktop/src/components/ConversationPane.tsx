@@ -221,7 +221,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   const transcript = createTranscript(() => subscribed() ? props.target : null);
   // Fetched once the pane is genuinely shown, same gate as the transcript watch - the palette
   // opens on a keystroke and needs this to already be sitting there, not to fetch it fresh.
-  const { catalog } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
+  const { catalog, error: catalogError } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
   const detail = () => props.detail ?? "normal";
   const [dialog, setDialog] = createSignal<PendingDialog | null>(null);
   const [revealed, setRevealed] = createSignal(0);
@@ -414,7 +414,14 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     if (hidden > 0) setRevealed((n) => n + hidden);
     else { const fetched = await transcript.loadOlder(); if (fetched) setRevealed((n) => n + fetched); }
     loadingOlder = false;
-    requestAnimationFrame(() => { scroll.scrollTop = top + scroll.scrollHeight - height; });
+    // Synchronous, not requestAnimationFrame: Solid has already patched the DOM by the time
+    // setRevealed/loadOlder above returns (fine-grained reactivity applies a signal write's
+    // dependent DOM updates in the same tick, not on a later frame), so reading scrollHeight and
+    // writing scrollTop right here lands before the browser's next paint. Deferring this one
+    // frame with rAF let the browser paint the newly-taller content at the *old* scrollTop first
+    // - a real, visible one-frame jump to unrelated content, confirmed with a real browser (this
+    // sequence is invisible in jsdom, which never paints).
+    scroll.scrollTop = top + scroll.scrollHeight - height;
   }
   // Re-armed only by leaving the near-top zone (older()'s own anchor-preserving scroll jump does
   // this on a successful load, since the newly prepended content pushes scrollTop back down) - so
@@ -550,8 +557,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       </div>}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
       <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
-        catalog={catalog()} hasTerminalFallback={!!props.onCommand} onSelectModel={(id) => void selectModel(id)}
-        onModelFallback={() => void controls(catalog().model_command ?? undefined)} />
+        catalog={catalog()} catalogError={!!catalogError()} hasTerminalFallback={!!props.onCommand} onSelectModel={(id) => void selectModel(id)}
+        onModelFallback={() => void controls(catalog().model_command ?? undefined)} displayed={displayed} />
     </footer>
     </div>
     <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} onFocusAgent={props.onFocusAgent} />}</Show>
