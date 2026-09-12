@@ -31,6 +31,9 @@ export default function SlashPalette(props: {
   // True when the catalog fetch itself failed - a distinct message from a confirmed empty
   // catalog, so "no commands known" is never shown for a case where the daemon was never asked.
   loadError: boolean;
+  // True while the first fetch is still in flight - distinct from both of the above, so "no
+  // commands known" is never shown before the daemon has actually answered.
+  loading: boolean;
 }) {
   let listRef!: HTMLDivElement;
   const style = (): JSX.CSSProperties => {
@@ -64,7 +67,9 @@ export default function SlashPalette(props: {
           fallback={
             props.loadError
               ? <p class="px-2.5 py-2 text-xs text-fault" role="alert">Couldn't load commands for this agent. Try again.</p>
-              : <p class="px-2.5 py-2 text-xs text-muted">No commands known for this agent.</p>
+              : props.loading
+                ? <p class="px-2.5 py-2 text-xs text-muted">Loading commands…</p>
+                : <p class="px-2.5 py-2 text-xs text-muted">No commands known for this agent.</p>
           }
         >
           <For each={props.commands}>

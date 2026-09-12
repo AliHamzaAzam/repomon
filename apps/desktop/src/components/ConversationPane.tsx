@@ -222,7 +222,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   const transcript = createTranscript(() => subscribed() ? props.target : null);
   // Fetched once the pane is genuinely shown, same gate as the transcript watch - the palette
   // opens on a keystroke and needs this to already be sitting there, not to fetch it fresh.
-  const { catalog, error: catalogError } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
+  const { catalog, loading: catalogLoading, error: catalogError } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
   // Same gate as the catalog above: fetched once the pane is genuinely shown, so Up/Down feel
   // instant once the operator actually reaches for them. The agent's own history file, not a
   // desktop-local list - see stores/inputHistory.ts.
@@ -562,8 +562,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       </div>}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
       <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
-        catalog={catalog()} catalogError={!!catalogError()} hasTerminalFallback={!!props.onCommand} onSelectModel={(id) => void selectModel(id)}
-        onModelFallback={() => void controls(catalog().model_command ?? undefined)} displayed={displayed}
+        catalog={catalog()} catalogError={!!catalogError()} catalogLoading={catalogLoading()} onSelectModel={(id) => void selectModel(id)}
+        displayed={displayed}
         history={inputHistory().entries.map((entry) => entry.text)} historyUnavailable={inputHistory().source === "none"} historyError={inputHistoryError()} />
     </footer>
     </div>

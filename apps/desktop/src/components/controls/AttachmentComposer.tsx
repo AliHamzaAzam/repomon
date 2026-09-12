@@ -64,9 +64,8 @@ export default function AttachmentComposer(props: {
   onSend: (text: string) => Promise<boolean>;
   catalog: CommandCatalog;
   catalogError: boolean;
-  hasTerminalFallback: boolean;
+  catalogLoading: boolean;
   onSelectModel: (id: string) => void;
-  onModelFallback: () => void;
   // The same "is this pane actually on screen right now" notion ConversationPane already uses
   // for its dialog polling. A pane that isn't displayed stays mounted (tab switching keeps it
   // warm), but its palette/model panel portal into document.body regardless, so without this
@@ -233,8 +232,7 @@ export default function AttachmentComposer(props: {
   }
   function onModelChipClick() {
     if (locked()) return;
-    if (props.catalog.models.length > 0) { setModelOpen(true); return; }
-    if (props.hasTerminalFallback) props.onModelFallback();
+    setModelOpen(true);
   }
   return <form class="conversation-compose" onSubmit={(event) => { event.preventDefault(); void send(); }}>
     <div class="conversation-reply rounded" classList={{ "is-drag-target": dragging() }}
@@ -284,6 +282,7 @@ export default function AttachmentComposer(props: {
           onHighlight={setHighlightedIndex}
           onRun={runPaletteCommand}
           loadError={props.catalogError}
+          loading={props.catalogLoading}
         />
       </Show>
       <div class="composer-actions">
@@ -292,7 +291,7 @@ export default function AttachmentComposer(props: {
         <Show when={files().length}><ul class="attachment-list" aria-label="Attachments"><For each={files()}>{(file) => <li><AttachmentChip file={file} disabled={locked()} onRemove={() => removeFile(file)} /></li>}</For></ul></Show>
         </div>
         <div class="composer-trailing">
-        <Show when={props.catalog.model_command} fallback={<span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>}>
+        <Show when={props.catalog.models.length > 0} fallback={<span class="composer-agent">{props.kind}<Show when={props.model}><span class="text-muted"> · {props.model}</span></Show></span>}>
           <button ref={modelButtonRef} type="button" class="composer-model focus-ring rounded" aria-label={`Change ${props.kind} model`} aria-haspopup="menu" aria-expanded={modelOpen()} title={props.model ?? "Choose a model"} disabled={locked()} onClick={onModelChipClick}>
             <span class="composer-agent">{props.model ?? props.kind}</span><IconChevronDown size={12} />
           </button>
@@ -302,7 +301,7 @@ export default function AttachmentComposer(props: {
       </div>
     </div>
     <Show when={modelOpen() && modelButtonRef && props.displayed()}>
-      <ModelPanel models={props.catalog.models} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
+      <ModelPanel models={props.catalog.models} modelCommand={props.catalog.model_command} kind={props.kind} anchor={modelButtonRef} onSelect={(id) => { setModelOpen(false); props.onSelectModel(id); }} onClose={() => setModelOpen(false)} />
     </Show>
     <p class="composer-hint" classList={{ "is-staging": staging() }} aria-live="polite">{staging() ? "Saving attachment…" : "/ for commands · Shift + Enter for a new line"}</p>
     <Show when={error()}><p class="text-xs text-fault" role="alert">{error()}</p></Show>

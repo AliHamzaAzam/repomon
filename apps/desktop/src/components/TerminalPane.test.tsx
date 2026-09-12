@@ -619,9 +619,7 @@ it("reuses the mounted terminal for command controls and returns to the same cha
   daemonCallMock.mockImplementation(async (method: string) => {
     if (method === "agent.prompt") return {dialog:null};
     if (method === "agent.transcript_watch") return {items:[],next_before:null};
-    // No models in the catalog: the model chip cannot offer a native panel, so it honestly
-    // falls back to the existing terminal route instead of guessing at a model list.
-    if (method === "agent.command_catalog") return {commands:[],models:[],model_command:"/model"};
+    if (method === "agent.command_catalog") return {commands:[],models:[],model_command:null};
     return null;
   });
   const {container} = render(() => <TerminalPane laneId={7} window="lane-7-1" label="Claude" visible fleet={{lanes:()=>[{id:7,repo:{id:1,name:"fixture"},worktree:{branch:"main",name:"main",path:"/fixture"},state:{dirty:{staged:0,unstaged:0,untracked:0},ahead:0,behind:0},agent_sessions:[{tmux_window:"lane-7-1",agent:"claude-code",status:"idle"}]}]} as unknown as FleetStore} />);
@@ -631,11 +629,10 @@ it("reuses the mounted terminal for command controls and returns to the same cha
   const draft = screen.getByRole("textbox", {name:"Reply to claude-code"});
   fireEvent.input(draft,{target:{value:"Keep this draft"}});
   const host = container.querySelector(".terminal-host");
-  fireEvent.click(screen.getByRole("button", {name:"Change claude-code model"}));
+  fireEvent.click(screen.getByRole("button", {name:"Agent controls"}));
   await flushMicrotasks();
   expect(screen.getByRole("region", {name:"Agent command controls"})).toBeInTheDocument();
   expect(host).toHaveAttribute("aria-hidden","false");
-  expect(daemonCallMock).toHaveBeenCalledWith("agent.send_input", {lane_id:7,window:"lane-7-1",text:"/model",enter:true});
   expect(terminalInstances).toHaveLength(1);
   expect(watchTerminalMock).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole("button", {name:"Back to chat"}));
