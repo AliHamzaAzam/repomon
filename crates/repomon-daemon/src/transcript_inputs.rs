@@ -21,6 +21,121 @@ pub struct Ticket {
     prior_prompts: Option<Vec<String>>,
     consumed: bool,
     submitted: String,
+    /// STALL INSTRUMENTATION. One diagnosis per stuck ticket, so a brief that never leaves the
+    /// pinned queue names the conjunct that refused it instead of being argued about.
+    diagnosed: bool,
+}
+
+/// The three independent conditions consumption requires, evaluated once so the matcher and its
+/// diagnosis can never disagree about why a ticket did or did not pair.
+struct Conjuncts {
+    same_source: bool,
+    same_mail: bool,
+    after_send: bool,
+    text_equal: bool,
+}
+
+impl Conjuncts {
+    fn consumed(&self) -> bool {
+        self.same_source && (self.same_mail || (self.after_send && self.text_equal))
+    }
+}
+
+/// How long a ticket may sit pending before it is worth a line. A consumed input normally pairs
+/// within a tick or two; ten seconds means something refused it.
+const STUCK_MS: i64 = 10_000;
+
+/// Evaluate consumption for one pending ticket against one durable row. Lifted out of the matcher
+/// so the stuck-ticket diagnosis reports exactly what the matcher decided, not a paraphrase.
+fn conjuncts(pending: &Ticket, row: &TranscriptItem, id: &str, source: &Source) -> Conjuncts {
+    let same_source = pending
+        .source
+        .as_ref()
+        .is_none_or(|old| old.path.is_none() || old == source);
+    let offset = if matches!(source.kind.as_str(), "opencode" | "hermes") {
+        row.at.map(|t| t.timestamp_millis().max(0) as u64)
+    } else {
+        source
+            .path
+            .as_ref()
+            .and_then(|p| id.strip_prefix(&format!("{}:", p.display())))
+            .and_then(|id| id.split(':').next())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let after_send = if pending.source.as_ref().is_some_and(|s| s.path.is_some()) {
+        offset.is_some_and(|offset| offset >= pending.floor)
+    } else {
+        row.at.zip(pending.item.at).is_some_and(|(row, sent)| {
+            if source.kind == "antigravity" {
+                row.timestamp() >= sent.timestamp()
+            } else {
+                row >= sent
+            }
+        })
+    };
+    // A globally unique mail ID is authoritative consumption evidence even if the provider
+    // records receipt time before injection completes or collapses whitespace.
+    let same_mail = row
+        .mail
+        .as_ref()
+        .zip(pending.item.mail.as_ref())
+        .is_some_and(|(row, sent)| row.id == sent.id);
+    Conjuncts {
+        same_source,
+        same_mail,
+        after_send,
+        text_equal: row.text.trim() == pending.item.text.trim(),
+    }
+}
+
+/// Report, once, why a ticket that should have been consumed is still pinned. Runs only for
+/// tickets older than [`STUCK_MS`], so a healthy window never writes a line. Names the conjunct
+/// that refused the best available candidate rather than guessing at a cause.
+fn diagnose_stuck(pending: &mut [Ticket], rows: &[TranscriptItem], source: &Source) {
+    let now = chrono::Utc::now();
+    for ticket in pending.iter_mut() {
+        if ticket.diagnosed {
+            continue;
+        }
+        let age = ticket
+            .item
+            .at
+            .map_or(0, |sent| (now - sent).num_milliseconds());
+        if age < STUCK_MS {
+            continue;
+        }
+        ticket.diagnosed = true;
+        let users = rows.iter().filter(|r| r.role == "user").count();
+        // The row that should have paired is the one whose text matches; report its other two
+        // conjuncts. With no text match at all, the texts themselves are the story.
+        let best = rows
+            .iter()
+            .filter(|r| r.role == "user")
+            .filter_map(|r| {
+                let id = r.id.clone()?;
+                let c = conjuncts(ticket, r, &id, source);
+                c.text_equal.then_some(c)
+            })
+            .next();
+        match best {
+            Some(c) => crate::chat_open_trace::input_stuck(
+                age,
+                users,
+                c.same_source,
+                c.after_send,
+                true,
+                ticket.submitted.chars().count(),
+            ),
+            None => crate::chat_open_trace::input_stuck(
+                age,
+                users,
+                ticket.source.is_none(),
+                false,
+                false,
+                ticket.submitted.chars().count(),
+            ),
+        }
+    }
 }
 
 pub async fn prepare_input(ctx: &Ctx, lane: LaneId, window: &str, text: &str) -> Option<Ticket> {
@@ -89,6 +204,7 @@ pub async fn prepare_input_from_pane(
         prior_prompts,
         consumed: false,
         submitted: cleaned.trim().into(),
+        diagnosed: false,
     })
 }
 impl Inputs {
@@ -132,7 +248,7 @@ impl Inputs {
                 })
             });
         }
-        for row in rows {
+        for row in rows.iter_mut() {
             let Some(id) = row.id.clone() else {
                 continue;
             };
@@ -144,42 +260,10 @@ impl Inputs {
             if row.role != "user" {
                 continue;
             }
-            let index = state.pending.iter().position(|pending| {
-                let same_source = pending
-                    .source
-                    .as_ref()
-                    .is_none_or(|old| old.path.is_none() || old == source);
-                let offset = if matches!(source.kind.as_str(), "opencode" | "hermes") {
-                    row.at.map(|t| t.timestamp_millis().max(0) as u64)
-                } else {
-                    source
-                        .path
-                        .as_ref()
-                        .and_then(|p| id.strip_prefix(&format!("{}:", p.display())))
-                        .and_then(|id| id.split(':').next())
-                        .and_then(|v| v.parse::<u64>().ok())
-                };
-                let after_send = if pending.source.as_ref().is_some_and(|s| s.path.is_some()) {
-                    offset.is_some_and(|offset| offset >= pending.floor)
-                } else {
-                    row.at.zip(pending.item.at).is_some_and(|(row, sent)| {
-                        if source.kind == "antigravity" {
-                            row.timestamp() >= sent.timestamp()
-                        } else {
-                            row >= sent
-                        }
-                    })
-                };
-                let same_mail = row
-                    .mail
-                    .as_ref()
-                    .zip(pending.item.mail.as_ref())
-                    .is_some_and(|(row, sent)| row.id == sent.id);
-                // A globally unique mail ID is authoritative consumption evidence even if the
-                // provider records receipt time before injection completes or collapses whitespace.
-                same_source
-                    && (same_mail || (after_send && row.text.trim() == pending.item.text.trim()))
-            });
+            let index = state
+                .pending
+                .iter()
+                .position(|pending| conjuncts(pending, row, &id, source).consumed());
             if let Some(index) = index {
                 let pending = state.pending.remove(index);
                 let alias = pending.item.id.unwrap();
@@ -188,6 +272,7 @@ impl Inputs {
                 row.id = Some(alias);
             }
         }
+        diagnose_stuck(&mut state.pending, rows, source);
         replaced
     }
     pub(super) fn append(
@@ -256,6 +341,68 @@ impl Inputs {
 
 #[cfg(test)]
 mod tests {
+
+    /// The consumption predicate, pinned. A brief of the operator's that the agent demonstrably
+    /// acted on stayed pinned, and the recorded row's text was verbatim, so the text conjunct was
+    /// not the refusal. This documents the other two and, in particular, that `same_source`
+    /// demands full equality of `Source` between the ticket and the row being reconciled.
+    #[test]
+    fn consumption_conjuncts_are_independent_and_same_source_demands_full_equality() {
+        let sent = chrono::Utc::now();
+        let path = std::path::PathBuf::from("/db/session.jsonl");
+        let bound = |session: &str| Source {
+            window: "lane-1".into(),
+            kind: "claude-code".into(),
+            path: Some(path.clone()),
+            session: Some(session.into()),
+        };
+        let ticket = |source: Option<Source>, floor: u64| Ticket {
+            source,
+            floor,
+            item: TranscriptItem::new("user", "the brief text", Some(sent)),
+            prior_prompts: None,
+            consumed: false,
+            submitted: "the brief text".into(),
+            diagnosed: false,
+        };
+        let mut row = TranscriptItem::new("user", "the brief text", Some(sent));
+        row.id = Some("/db/session.jsonl:4096:0".into());
+        let id = row.id.clone().unwrap();
+
+        // The ordinary case: same source, the row sits past the floor, texts equal.
+        let c = conjuncts(&ticket(Some(bound("s1")), 1024), &row, &id, &bound("s1"));
+        assert!(c.consumed(), "a plain consumption must pair");
+
+        // The suspect: the window's source changed between send and reconcile. Text still equal,
+        // offset still past the floor, and the ticket can never pair again.
+        let c = conjuncts(&ticket(Some(bound("s1")), 1024), &row, &id, &bound("s2"));
+        assert!(!c.same_source, "a changed session must break same_source");
+        assert!(c.text_equal && c.after_send, "the other two still hold");
+        assert!(!c.consumed(), "so the ticket stays pinned");
+
+        // A ticket created before the window had a resolved source is exempt from same_source,
+        // which is why `discover = false` at prepare time changes which rule applies.
+        let c = conjuncts(&ticket(None, 0), &row, &id, &bound("s2"));
+        assert!(
+            c.same_source,
+            "an unresolved ticket is not held to source equality"
+        );
+        assert!(c.consumed());
+
+        // A row written before the input was sent is not evidence of consuming it.
+        let c = conjuncts(&ticket(Some(bound("s1")), 8192), &row, &id, &bound("s1"));
+        assert!(
+            !c.after_send,
+            "offset below the floor is older than the send"
+        );
+        assert!(!c.consumed());
+
+        // Different text never pairs, whatever else holds.
+        let mut other = row.clone();
+        other.text = "a different brief".into();
+        let c = conjuncts(&ticket(Some(bound("s1")), 1024), &other, &id, &bound("s1"));
+        assert!(!c.text_equal && !c.consumed());
+    }
     use super::*;
     #[tokio::test]
     async fn antigravity_second_precision_consumes_only_the_new_prompt() {
@@ -271,6 +418,7 @@ mod tests {
             prior_prompts: None,
             consumed: false,
             submitted: "Write a poem".into(),
+            diagnosed: false,
         };
         ctx.transcript_inputs.sent(&ctx, "lane-1", ticket);
         let src = Source {

@@ -1,0 +1,58 @@
+
+  ┃                                                                                                                                                                    New session - 2026-09-10T21:21:58.
+  ┃  hi                                                                                                                                                                088Z
+  ┃
+                                                                                                                                                                       Context
+     + Thought: 171ms                                                                                                                                                  12,553 tokens
+                                                                                                                                                                       1% used
+     Hi! How can I help you today?                                                                                                                                     $0.00 spent
+
+     ▣  Build · Nemotron 3 Ultra Free · 30.8s                                                                                                                          MCP
+                                                                                                                                                                       • repomon Connected
+  ┃
+  ┃  write a poem                                                                                                                                                      LSP
+  ┃                                                                                                                                                                    LSPs are disabled
+
+     + Thought: 359ms                                                                                                                                                  ┌───────────────────────────────────┐
+                                                                                                                                                                       │                                   │
+     Code compiles, tests pass green,                                                                                                                                  │ Models                            │
+     Deploy succeeds, the pipeline clean.                                                                                                                              │ artistry kimi-k2.6                │
+     A feature shipped, a bug laid low—                                                                                                                                │ atlas kimi-k2.6                   │
+     Another sprint, another glow.                                                                                                                                     │ deep deepseek-v4-pro              │
+                                                                                                                                                                       │ explore deepseek-v4-flash         │
+     ▣  Build · Nemotron 3 Ultra Free · 45.7s                                                                                                                          │ hephaestus deepseek-v4-pro        │
+                                                                                                                                                                       │ librarian deepseek-v4-flash       │
+                                                                                                                                                                       │ metis deepseek-v4-pro             │
+                                                                                                                                                                       │ momus qwen3.6-plus                │
+                                                                                                                                                                       │ multimodal-looker kimi-k2.6       │
+                                                                                                                                                                       │ oracle glm-5.1                    │
+                                                                                                                                                                       │ prometheus glm-5.1                │
+                                                                                                                                                                       │ quick deepseek-v4-flash           │
+                                                                                                                                                                       │                                   │
+                                                                                                                                                                       └───────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Nemotron 3 Ultra Free OpenCode Zen                                                                                                                        ~/Developer/Github/AliHamzaAzam:main
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /Users/azaleas/Developer/Github/AliHamzaAzam                                                                                         12.6K (1%)  ctrl+p commands    • OpenCode 1.18.30

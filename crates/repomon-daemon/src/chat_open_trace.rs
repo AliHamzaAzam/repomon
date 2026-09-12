@@ -1,15 +1,18 @@
-//! First-chat-open instrumentation, shipped so the next slow open is captured on the machine
-//! where it actually happens.
+//! Shipped instrumentation for two operator-reported faults that only happen on his machine: a
+//! slow first chat open after a daemon start, and every pane stalling at once while the rest of
+//! the app stays responsive.
 //!
-//! Scope: this is a first-open probe, not an RPC trace. It writes a handful of lines per chat
-//! open, only for the first opens after a daemon start, to a bounded file under the data
-//! directory. It never writes to stdout, because the desktop spawns the daemon and that output
-//! goes nowhere readable.
+//! Scope: this is a probe, not an RPC trace. Chat opens produce a handful of lines and only for
+//! the first opens after a daemon start. Stalls produce a line only past
+//! [`SLOW_MS`], so a healthy daemon writes none at all. Everything lands in one bounded file
+//! under the data directory. It never writes to stdout, because the desktop spawns the daemon and
+//! that output goes nowhere readable.
 //!
-//! Removing it is one commit: delete this file, its `mod` line in `lib.rs`, `Store::queue_depth`
-//! and its `depth` counter in `repomon-core`, the `trace` parameter on
-//! `transcript::resolve_source`, and every line matching `chat_open_trace::`. Each call site is a
-//! single statement so the deletion is mechanical.
+//! Removing it is one commit: delete this file, its `mod` line in `lib.rs`, the `install()` call
+//! in `main.rs`, the `depth`/`running` fields, `queue_depth` and the `SlowCallHook` in
+//! `repomon-core`'s store, the `trace` parameter on `transcript::resolve_source`, the oneshot
+//! payload in `socket.rs` (back to `channel()` and `drop(done)`), and every line matching
+//! `chat_open_trace::`. Each call site is a single statement so the deletion is mechanical.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -68,6 +71,11 @@ fn write(fields: std::fmt::Arguments<'_>) {
     if EVENTS.fetch_add(1, Ordering::Relaxed) >= MAX_EVENTS_PER_START {
         return;
     }
+    write_line(fields);
+}
+
+/// The append itself, shared by the chat-open and stall budgets.
+fn write_line(fields: std::fmt::Arguments<'_>) {
     let path = path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -124,6 +132,72 @@ pub fn discovery(window: &str, kind: &str, since: Instant, resolved: bool) {
         "chat_discovery window={window} kind={kind} ms={:.1} source={}",
         millis(since),
         if resolved { "durable" } else { "pane" },
+    ));
+}
+
+/// A stall line is only written past this wait, so normal use produces none at all.
+const SLOW_MS: f64 = 250.0;
+/// Stall lines get their own budget so a burst of them cannot hide the chat-open lines.
+const MAX_STALLS_PER_START: usize = 256;
+static STALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn stall(fields: std::fmt::Arguments<'_>) {
+    if STALLS.fetch_add(1, Ordering::Relaxed) >= MAX_STALLS_PER_START {
+        return;
+    }
+    write_line(fields);
+}
+
+/// An ordered request that waited behind its predecessor on the same connection. The desktop
+/// drives every pane over one connection, so this is what a whole-fleet pane stall looks like
+/// from the socket's side: `after` names the method that held the chain and `after_ms` is how
+/// long it held it.
+pub fn ordered_wait(method: &str, waited_ms: f64, after: &str, after_ms: f64) {
+    if waited_ms <= SLOW_MS {
+        return;
+    }
+    stall(format_args!(
+        "ordered_wait method={method} waited_ms={waited_ms:.1} after={after} after_ms={after_ms:.1}"
+    ));
+}
+
+/// A store call that waited for the single worker thread. `running` names the job that was in
+/// front of it and `depth` how many were queued, which separates one slow job from a deep queue.
+pub fn store_wait(job: &'static str, waited_ms: f64, depth: usize, running: &'static str) {
+    stall(format_args!(
+        "store_wait job={} waited_ms={waited_ms:.1} depth={depth} running={}",
+        short(job),
+        short(running)
+    ));
+}
+
+/// `type_name` gives a fully qualified closure path; the method name is the useful part.
+fn short(name: &'static str) -> &'static str {
+    name.strip_suffix("::{{closure}}")
+        .unwrap_or(name)
+        .rsplit_once("::")
+        .map_or(name, |(_, tail)| tail)
+}
+
+/// Install the store reporter. Called once at daemon start.
+pub fn install() {
+    repomon_core::store::set_slow_call_hook(store_wait);
+}
+
+/// A submitted input still pinned long after it was sent. Consumption needs `same_source` and
+/// either a matching mail id or (`after_send` and equal text); this names which of those refused
+/// the best candidate row, so a stuck brief identifies its own cause. One line per ticket.
+pub fn input_stuck(
+    age_ms: i64,
+    user_rows: usize,
+    same_source: bool,
+    after_send: bool,
+    text_equal: bool,
+    chars: usize,
+) {
+    stall(format_args!(
+        "input_stuck age_ms={age_ms} user_rows={user_rows} same_source={same_source} \
+         after_send={after_send} text_equal={text_equal} chars={chars}"
     ));
 }
 

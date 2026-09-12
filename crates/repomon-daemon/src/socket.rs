@@ -203,7 +203,9 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
     // Independent reads may overtake other requests. Everything else, including input,
     // viewport changes and watch/unwatch, executes in wire order. Clients match replies by ID.
     let mut requests = tokio::task::JoinSet::new();
-    let mut ordered_tail: Option<tokio::sync::oneshot::Receiver<()>> = None;
+    // Carries the predecessor's method and duration, so a stalled successor can name what held
+    // the chain ahead of it.
+    let mut ordered_tail: Option<tokio::sync::oneshot::Receiver<(String, f64)>> = None;
     while let Some(frame) = in_rx.recv().await {
         while requests.try_join_next().is_some() {}
         if requests.len() >= 128 {
@@ -233,28 +235,44 @@ async fn handle_conn(ctx: Arc<Ctx>, stream: IpcStream) {
         if req.method == "subscribe" {
             forwarding.store(true, Ordering::Relaxed);
         }
+        // The oneshot carries the predecessor's identity so a stalled successor can name what
+        // held the chain; see `chat_open_trace::ordered_wait`.
         let (previous, done) = if independent_read(&req.method) {
             (None, None)
         } else {
-            let (done, next) = tokio::sync::oneshot::channel();
+            let (done, next) = tokio::sync::oneshot::channel::<(String, f64)>();
             (ordered_tail.replace(next), Some(done))
         };
         let ctx = ctx.clone();
         let sess = sess.clone();
         let out_tx = out_tx.clone();
         requests.spawn(async move {
+            let queued = std::time::Instant::now();
             if let Some(previous) = previous {
-                let _ = previous.await;
+                if let Ok((ahead, ahead_ms)) = previous.await {
+                    crate::chat_open_trace::ordered_wait(
+                        &req.method,
+                        queued.elapsed().as_secs_f64() * 1000.0,
+                        &ahead,
+                        ahead_ms,
+                    );
+                }
             }
+            let method = req.method.clone();
+            let own = std::time::Instant::now();
             let resp = match rpc::dispatch(&ctx, &sess, &req.method, req.params).await {
                 Ok(value) => Response::ok(req.id, value),
                 Err(err) => Response::err(req.id, err),
             };
+            let ran = own.elapsed().as_secs_f64() * 1000.0;
             let _ = out_tx
                 .send(serde_json::to_vec(&resp).unwrap_or_default())
                 .await;
-            // Dropping the sender also releases the successor on a panic.
-            drop(done);
+            // Releasing the successor also hands it this request's identity. Dropping the sender
+            // without sending still releases it, which is what happens on a panic.
+            if let Some(done) = done {
+                let _ = done.send((method, ran));
+            }
         });
     }
     requests.abort_all();
