@@ -15,6 +15,7 @@ function props(overrides: Partial<Parameters<typeof AttachmentComposer>[0]> = {}
     kind: "codex", disabled: false, busy: false, onSend: vi.fn(),
     catalog: emptyCatalog, catalogError: false, hasTerminalFallback: false,
     onSelectModel: vi.fn(), onModelFallback: vi.fn(), displayed: () => true,
+    history: [] as string[], historyUnavailable: false, historyError: null as string | null,
     ...overrides,
   };
 }
@@ -107,17 +108,10 @@ describe("inline image markers, positioned like Claude TUI", () => {
   });
 });
 
-describe("composer history, cycling previous sent messages like the TUI (round 8 item 4)", () => {
-  it("recalls the most recent sent message on ArrowUp from an empty composer, and ArrowDown returns to empty", async () => {
-    const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+describe("composer history, cycling the agent's own recall like the TUI (round 8 item 4, round 13 wired to agent.input_history)", () => {
+  it("recalls the agent's own history on ArrowUp from an empty composer, oldest last, and ArrowDown returns to empty", () => {
+    render(() => <AttachmentComposer {...props({ history: ["first message", "second message"] })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.input(field, { target: { value: "first message" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
-    fireEvent.input(field, { target: { value: "second message" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
     fireEvent.keyDown(field, { key: "ArrowUp" });
     expect(field).toHaveValue("second message");
     fireEvent.keyDown(field, { key: "ArrowUp" });
@@ -129,24 +123,16 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
     fireEvent.keyDown(field, { key: "ArrowDown" });
     expect(field).toHaveValue("");
   });
-  it("does not recall history when the composer already holds an unsent single-line draft", async () => {
-    const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+  it("does not recall history when the composer already holds an unsent single-line draft", () => {
+    render(() => <AttachmentComposer {...props({ history: ["sent earlier"] })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.input(field, { target: { value: "sent earlier" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
     fireEvent.input(field, { target: { value: "in-progress draft" } });
     fireEvent.keyDown(field, { key: "ArrowUp" });
     expect(field).toHaveValue("in-progress draft");
   });
-  it("never steals the arrows while editing multiline text, typed or recalled", async () => {
-    const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+  it("never steals the arrows while editing multiline text, typed or recalled", () => {
+    render(() => <AttachmentComposer {...props({ history: ["line one\nline two"] })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.input(field, { target: { value: "line one\nline two" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
     fireEvent.keyDown(field, { key: "ArrowUp" });
     expect(field).toHaveValue("line one\nline two");
     // The recalled entry is itself multiline: a further Up must not cycle again, it is ordinary
@@ -154,18 +140,33 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
     fireEvent.keyDown(field, { key: "ArrowUp" });
     expect(field).toHaveValue("line one\nline two");
   });
-  it("exits history mode the moment the operator edits a recalled entry, preserving that edit as an ordinary draft", async () => {
-    const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+  it("exits history mode the moment the operator edits a recalled entry, preserving that edit as an ordinary draft", () => {
+    render(() => <AttachmentComposer {...props({ history: ["sent message"] })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.input(field, { target: { value: "sent message" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
     fireEvent.keyDown(field, { key: "ArrowUp" });
     expect(field).toHaveValue("sent message");
     fireEvent.input(field, { target: { value: "sent message, edited" } });
     fireEvent.keyDown(field, { key: "ArrowDown" });
     expect(field).toHaveValue("sent message, edited");
+  });
+  it("says so, rather than silently doing nothing, when this kind has no readable history store", () => {
+    render(() => <AttachmentComposer {...props({ history: [], historyUnavailable: true, kind: "hermes" })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("");
+    expect(screen.getByRole("alert")).toHaveTextContent("No input history available for hermes.");
+  });
+  it("surfaces a failed history fetch distinctly, not as a silent empty history", () => {
+    render(() => <AttachmentComposer {...props({ history: [], historyError: "daemon unreachable" })} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "ArrowUp" });
+    expect(screen.getByRole("alert")).toHaveTextContent("daemon unreachable");
+  });
+  it("does nothing and shows nothing on ArrowUp while history is still loading (empty, unavailable false, no error)", () => {
+    render(() => <AttachmentComposer {...props({ history: [] })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveValue("");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 
@@ -248,13 +249,9 @@ describe("native slash-command palette (round 10)", () => {
     expect(field).toHaveValue("/mo");
   });
 
-  it("does not let ArrowUp fall through to history recall while the palette is open", async () => {
-    const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer {...props({ catalog, onSend: send })} />);
+  it("does not let ArrowUp fall through to history recall while the palette is open", () => {
+    render(() => <AttachmentComposer {...props({ catalog, history: ["sent earlier"] })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.input(field, { target: { value: "sent earlier" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(field).toHaveValue(""));
     fireEvent.input(field, { target: { value: "/" } });
     fireEvent.keyDown(field, { key: "ArrowUp" });
     // Moved the palette highlight (wrapped to the last row), not recalled "sent earlier".

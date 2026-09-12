@@ -15,6 +15,7 @@ import { statusRowsFor } from "../stores/agentViews";
 import { formatTokens } from "./usageMetrics";
 import { isAgentCommand, resolveCommand } from "./agentCommands";
 import { createCommandCatalog } from "../stores/commandCatalog";
+import { createInputHistory } from "../stores/inputHistory";
 import { markChatLatency } from "../ipc/chatLatency";
 import "./conversation.css";
 
@@ -222,6 +223,10 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   // Fetched once the pane is genuinely shown, same gate as the transcript watch - the palette
   // opens on a keystroke and needs this to already be sitting there, not to fetch it fresh.
   const { catalog, error: catalogError } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
+  // Same gate as the catalog above: fetched once the pane is genuinely shown, so Up/Down feel
+  // instant once the operator actually reaches for them. The agent's own history file, not a
+  // desktop-local list - see stores/inputHistory.ts.
+  const { history: inputHistory, error: inputHistoryError } = createInputHistory(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
   const detail = () => props.detail ?? "normal";
   const [dialog, setDialog] = createSignal<PendingDialog | null>(null);
   const [revealed, setRevealed] = createSignal(0);
@@ -558,7 +563,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
       <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
         catalog={catalog()} catalogError={!!catalogError()} hasTerminalFallback={!!props.onCommand} onSelectModel={(id) => void selectModel(id)}
-        onModelFallback={() => void controls(catalog().model_command ?? undefined)} displayed={displayed} />
+        onModelFallback={() => void controls(catalog().model_command ?? undefined)} displayed={displayed}
+        history={inputHistory().entries.map((entry) => entry.text)} historyUnavailable={inputHistory().source === "none"} historyError={inputHistoryError()} />
     </footer>
     </div>
     <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} onFocusAgent={props.onFocusAgent} />}</Show>
