@@ -304,13 +304,10 @@ const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode
 // tools, partial assistant output, working status and live:dialog; transcript.rs emits pane:<window>
 // terminal_block when there is no source. All fixture rows satisfy the merged generated binding.
 const fixtureDialog: PendingDialog = { title: "Bash command", question: "Do you want to proceed?", body: ["bun run build"], options: [{ number:1, text:"Yes" }, { number:2, text:"No" }], selected:0 };
-// Anticipates the daemon's split-field option shape (see the desktop's optionLabel/optionDescription)
-// ahead of the real bindings; drop the cast once agent.prompt's wire type carries label/description.
-const longOption = (number: number, label: string, description: string) => ({ number, text:label, label, description }) as unknown as PendingDialog["options"][number];
 const fixtureDialogLong: PendingDialog = { title: "Migration cleanup", question: "The migration touched three tables that still have unindexed foreign keys. How should this proceed?", body: Array.from({ length: 12 }, (_, i) => `Table ${i + 1}: fk_table_${i + 1}_parent references table_${i + 1}(id), no index found.`), options: [
-  longOption(1, "Add the missing indexes", "Runs CREATE INDEX CONCURRENTLY for each of the three foreign keys before continuing the migration. Adds a few minutes but avoids locking writes on the affected tables."),
-  longOption(2, "Leave it", "No deletion. Everything currently works, but future joins on these foreign keys will do a full table scan until they are indexed later."),
-  longOption(3, "Cancel the migration", "Rolls back the schema changes made so far and leaves the tables exactly as they were before this run started."),
+  { number:1, text:"Add the missing indexes", description:"Runs CREATE INDEX CONCURRENTLY for each of the three foreign keys before continuing the migration. Adds a few minutes but avoids locking writes on the affected tables." },
+  { number:2, text:"Leave it", description:"No deletion. Everything currently works, but future joins on these foreign keys will do a full table scan until they are indexed later." },
+  { number:3, text:"Cancel the migration", description:"Rolls back the schema changes made so far and leaves the tables exactly as they were before this run started." },
 ], selected:0 };
 const item = (id: string, kind: string, text: string, extra: Partial<TranscriptItem> = {}): TranscriptItem => ({ id, kind, role: kind === "user" ? "user" : kind === "assistant" ? "assistant" : "tools", text, at:"2026-09-10T09:41:00Z", ...extra });
 const richItems: TranscriptItem[] = [

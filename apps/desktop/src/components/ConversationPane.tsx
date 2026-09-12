@@ -56,14 +56,8 @@ function validDialog(value: unknown): value is PendingDialog {
   return typeof dialog.question === "string" && Array.isArray(dialog.options) && dialog.options.every((option) => typeof option.text === "string");
 }
 
-// `label`/`description` anticipate the daemon's option-parser split; until the wire carries them,
-// `text` alone stands in as the label and there is no description to show.
-type DialogOptionShape = PendingDialog["options"][number] & { label?: string; description?: string };
-function optionLabel(option: DialogOptionShape): string {
-  return (option.label ?? option.text).replace(/\.\s*$/, "");
-}
-function optionDescription(option: DialogOptionShape): string | undefined {
-  return option.description || undefined;
+function optionLabel(option: PendingDialog["options"][number]): string {
+  return option.text.replace(/\.\s*$/, "");
 }
 function PendingDecision(props: { dialog: PendingDialog; busy: boolean; onAnswer: (index: number) => void }) {
   const optionRefs: (HTMLButtonElement | undefined)[] = [];
@@ -107,7 +101,7 @@ function PendingDecision(props: { dialog: PendingDialog; busy: boolean; onAnswer
         <span class="conversation-dialog-option-key" aria-hidden="true">{index() + 1}</span>
         <span class="conversation-dialog-option-text">
           <span class="conversation-dialog-option-label">{optionLabel(option)}</span>
-          <Show when={optionDescription(option)}>{(description) => <span class="conversation-dialog-option-description">{description()}</span>}</Show>
+          <Show when={option.description}>{(description) => <span class="conversation-dialog-option-description">{description()}</span>}</Show>
         </span>
       </button>}</For>
     </div>

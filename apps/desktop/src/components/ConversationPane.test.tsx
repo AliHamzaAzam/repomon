@@ -92,6 +92,15 @@ describe("ConversationPane", () => {
     fireEvent.keyDown(screen.getByRole("button", { name:"Leave it" }), { key:"Enter" });
     await waitFor(() => expect(daemonCall).toHaveBeenCalledWith("agent.answer", { lane_id:7, window:"lane-7/1", choice:1, expect_summary:"Do you want to proceed?" }));
   });
+  it("shows the description beneath its label when the daemon sends one, and nothing when it omits it", async () => {
+    const dialog = { title:null, question:"Pick one", body:[], options:[{number:1,text:"Add the index",description:"Runs CREATE INDEX CONCURRENTLY."},{number:2,text:"Leave it"}], selected:0 };
+    const original = vi.mocked(daemonCall).getMockImplementation()!;
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => method === "agent.prompt" ? {dialog} : original(method, ...args));
+    mount();
+    await screen.findByText("Add the index");
+    expect(screen.getByText("Runs CREATE INDEX CONCURRENTLY.")).toBeInTheDocument();
+    expect(screen.queryByText(/Leave it.+/)).not.toBeInTheDocument();
+  });
   it("answers immediately on a digit key, without needing Enter", async () => {
     const dialog = { title:null, question:"Pick one", body:[], options:[{number:1,text:"Yes"},{number:2,text:"No"}], selected:0 };
     const original = vi.mocked(daemonCall).getMockImplementation()!;
