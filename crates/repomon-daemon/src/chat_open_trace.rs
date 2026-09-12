@@ -213,6 +213,14 @@ pub fn chain_head(method: &str, elapsed_ms: u64, connection: u64) {
     ));
 }
 
+/// An allowlisted read still running. It joins no ordering chain, so unlike [`chain_head`] nothing
+/// is queued behind it: this says a read is slow without claiming it is holding anything.
+pub fn slow_read(method: &str, elapsed_ms: u64, connection: u64) {
+    stall(format_args!(
+        "slow_read method={method} elapsed_ms={elapsed_ms} conn={connection} blocking=none"
+    ));
+}
+
 /// A catch-up read found evidence the display page could not reach. Pairs with `input_stuck`:
 /// that line names a ticket nothing could retire, this one names the read that retired it.
 pub fn input_caught_up(retired: usize, floor: u64, rows: usize) {
