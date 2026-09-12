@@ -1,4 +1,4 @@
-import { ErrorBoundary, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { ErrorBoundary, For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { Lane, PendingDialog } from "../bindings";
 import { daemonCall, type ActivitySnapshot, type TranscriptTarget } from "../ipc/rpc";
 import { createTranscript, type ConversationRow } from "../stores/transcript";
@@ -13,7 +13,8 @@ import AttachmentPreview from "./controls/AttachmentPreview";
 import { attachmentTextParts } from "./attachmentText";
 import { statusRowsFor } from "../stores/agentViews";
 import { formatTokens } from "./usageMetrics";
-import { isAgentCommand, modelCommand, nativeAgentCommand } from "./agentCommands";
+import { isAgentCommand, resolveCommand } from "./agentCommands";
+import { createCommandCatalog } from "../stores/commandCatalog";
 import { markChatLatency } from "../ipc/chatLatency";
 import "./conversation.css";
 
@@ -75,21 +76,43 @@ function useThrottledText(source: () => string): () => string {
   onCleanup(() => { if (frame !== undefined) cancelAnimationFrame(frame); });
   return display;
 }
-function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: () => void }) {
+function MessageBody(props: { row: ConversationRow; laneId: number; onResize?: () => void; clampWhenTall?: boolean }) {
   const [expanded, setExpanded] = createSignal(false);
   const throttledText = useThrottledText(() => props.row.item.text);
   const parts = createMemo(() => attachmentTextParts(throttledText()));
   const pane = () => props.row.paneExcerpt;
   const images = createMemo(() => parts().flatMap((part) => "attachment" in part && isImageAttachment(part.attachment) ? [part.attachment] : []));
+  // Pending-row content sizes to itself up to --pending-message-max-height rather than a fixed
+  // clamp; when it genuinely overflows that, this shows an explicit toggle instead of handing the
+  // row its own scrollbar nested inside the pending queue's. Measured, not assumed: a short
+  // message never gets a pointless "Show more" it doesn't need.
+  const [overflowing, setOverflowing] = createSignal(false);
+  let messageRef: HTMLDivElement | undefined;
+  const checkOverflow = () => {
+    if (!props.clampWhenTall || !messageRef) return;
+    setOverflowing(messageRef.scrollHeight - messageRef.clientHeight > 1);
+  };
+  onMount(checkOverflow);
+  createEffect(() => { parts(); checkOverflow(); });
+  if (props.clampWhenTall) {
+    window.addEventListener("resize", checkOverflow);
+    onCleanup(() => window.removeEventListener("resize", checkOverflow));
+  }
   return <Show when={props.row.fallback} fallback={
     <>
       <Show when={props.row.item.mail}>{(mail) => <p class="conversation-mail-header">Mail from {mail().sender}<Show when={props.row.item.at}> · <time dateTime={props.row.item.at!}>{new Date(props.row.item.at!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</time></Show></p>}</Show>
       <Show when={images().length}><div class="conversation-images"><For each={images()}>{(file, index) => <AttachmentPreview file={file} number={index() + 1} onResize={props.onResize} />}</For></div></Show>
-      <div class="conversation-message rounded"><For each={parts()}>{(part) => "attachment" in part
+      <div ref={messageRef} class="conversation-message rounded" classList={{ "conversation-message-clamped": !!props.clampWhenTall && !expanded() }}><For each={parts()}>{(part) => "attachment" in part
         ? isImageAttachment(part.attachment)
           ? <span class="attachment-reference" title={part.attachment.path}>[Image #{images().indexOf(part.attachment) + 1}]</span>
           : <AttachmentChip file={part.attachment} />
         : <Show when={part.text.trim()}><TextBody text={part.text} laneId={props.laneId} /></Show>}</For></div>
+      <Show when={props.clampWhenTall && (overflowing() || expanded())}>
+        <button type="button" class="conversation-excerpt-toggle focus-ring" aria-expanded={expanded()} onClick={() => setExpanded((value) => !value)}>
+          {expanded() ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+          <span>{expanded() ? "Show less" : "Show more"}</span>
+        </button>
+      </Show>
     </>
   }>
     <button type="button" class="conversation-excerpt-toggle focus-ring" aria-expanded={expanded()} onClick={() => setExpanded(!expanded())}>
@@ -196,6 +219,9 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
   createEffect(() => { if (displayed()) setEverShown(true); });
   const subscribed = () => props.visible && everShown();
   const transcript = createTranscript(() => subscribed() ? props.target : null);
+  // Fetched once the pane is genuinely shown, same gate as the transcript watch - the palette
+  // opens on a keystroke and needs this to already be sitting there, not to fetch it fresh.
+  const { catalog } = createCommandCatalog(() => subscribed() ? { lane_id: props.target.lane_id, window: props.target.window } : null);
   const detail = () => props.detail ?? "normal";
   const [dialog, setDialog] = createSignal<PendingDialog | null>(null);
   const [revealed, setRevealed] = createSignal(0);
@@ -433,11 +459,37 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
     if (!text.trim() || busy() || dialog()) return false;
     setBusy(true); setError(null);
     try {
-      if (isAgentCommand(text) && props.onCommand) await props.onCommand(nativeAgentCommand(props.kind, text));
-      else await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true });
+      // Never drive the agent's interactive picker blind: a command the catalog marks one_shot
+      // sends as a single fully specified line, same RPC and same transcript as any other
+      // message - no terminal overlay involved. Anything the catalog doesn't vouch for takes the
+      // existing terminal route instead, same as before this catalog existed.
+      if (isAgentCommand(text)) {
+        const resolution = resolveCommand(text, catalog());
+        if (resolution.oneShotLine) {
+          await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text: resolution.oneShotLine, enter: true });
+        } else if (props.onCommand) {
+          await props.onCommand(resolution.terminalText);
+        } else {
+          await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true });
+        }
+      } else {
+        await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text, enter: true });
+      }
       setFollowing(true); return true;
     }
     catch (cause) { setError(String(cause)); return false; }
+    finally { setBusy(false); }
+  }
+  // Model selection is always a one-shot line too: `model_command` only ever appears in the
+  // catalog when the daemon considers it safe to send with an argument and no interactive state.
+  async function selectModel(id: string) {
+    const command = catalog().model_command;
+    if (!command) return;
+    setBusy(true); setError(null);
+    try {
+      await daemonCall("agent.send_input", { lane_id: props.target.lane_id, window: props.target.window, text: `${command} ${id}`, enter: true });
+      setFollowing(true);
+    } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   }
   async function controls(text?: string) {
@@ -483,7 +535,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
         <div class="conversation-pending-inner">
         <For each={pendingRows()}>{(row) => <div class="conversation-row conversation-user conversation-pending-row" data-transcript-id={row.key}>
           <div class="conversation-gutter"><span>you</span><span class="conversation-pending" role="status">{transcript.inputStates()[row.key] === "queued" ? "Queued" : "Sent"}</span></div>
-          <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} /></div>
+          <div class="conversation-body rounded"><MessageBody row={row} laneId={props.target.lane_id} clampWhenTall /></div>
         </div>}</For>
         </div>
       </div>
@@ -498,7 +550,8 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       </div>}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
       <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
-        onModel={props.onCommand && modelCommand(props.kind) ? () => void controls(modelCommand(props.kind)) : undefined} />
+        catalog={catalog()} hasTerminalFallback={!!props.onCommand} onSelectModel={(id) => void selectModel(id)}
+        onModelFallback={() => void controls(catalog().model_command ?? undefined)} />
     </footer>
     </div>
     <Show when={props.lane}>{(lane) => <ConversationContext lane={lane()} visible={displayed()} onChanges={props.onFiles} onFocusAgent={props.onFocusAgent} />}</Show>

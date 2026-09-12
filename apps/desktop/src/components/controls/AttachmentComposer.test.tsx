@@ -3,14 +3,26 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import AttachmentComposer from "./AttachmentComposer";
+import type { CommandCatalog } from "../../bindings";
 vi.mock("@tauri-apps/api/core", () => ({ invoke:vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open:vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+const emptyCatalog: CommandCatalog = { commands: [], models: [], model_command: null };
+function props(overrides: Partial<Parameters<typeof AttachmentComposer>[0]> = {}) {
+  return {
+    kind: "codex", disabled: false, busy: false, onSend: vi.fn(),
+    catalog: emptyCatalog, hasTerminalFallback: false,
+    onSelectModel: vi.fn(), onModelFallback: vi.fn(),
+    ...overrides,
+  };
+}
+
 describe("chat attachments", () => {
   it("shows picked paths as removable chips and preserves the draft on send failure", async () => {
     vi.mocked(open).mockResolvedValue(["/Users/me/layout reference.png", "/Users/me/notes.md"]);
     const send = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
     fireEvent.input(screen.getByRole("textbox"), { target:{value:"Review this"} });
     fireEvent.click(screen.getByRole("button", {name:"Attach images or files"}));
     await screen.findByText("layout reference.png");
@@ -27,7 +39,7 @@ describe("chat attachments", () => {
     let saved!: (path:string) => void;
     vi.mocked(invoke).mockImplementation(() => new Promise((resolve) => { saved = resolve as typeof saved; }));
     const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer kind="claude-code" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ kind: "claude-code", onSend: send })} />);
     const file = {name:"image.png",size:3,arrayBuffer:async () => new Uint8Array([1,2,3]).buffer};
     fireEvent.paste(screen.getByRole("textbox"), {clipboardData:{files:[file]}});
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_chat_attachment", {name:"image.png",bytes:[1,2,3]}));
@@ -40,7 +52,7 @@ describe("chat attachments", () => {
   it("routes a dropped image through the same save/marker pipeline as paste, with a visible drop target", async () => {
     vi.mocked(invoke).mockResolvedValue("/stable/dropped-image.png");
     const send = vi.fn().mockResolvedValue(true);
-    const result = render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    const result = render(() => <AttachmentComposer {...props({ onSend: send })} />);
     const dropZone = result.container.querySelector(".conversation-reply")!;
     const file = { name:"dropped.png", size:3, arrayBuffer:async () => new Uint8Array([9,9,9]).buffer };
     fireEvent.dragEnter(dropZone, { dataTransfer:{ types:["Files"] } });
@@ -55,14 +67,14 @@ describe("chat attachments", () => {
     await waitFor(() => expect(send).toHaveBeenCalledWith('Attached file: "/stable/dropped-image.png"'));
   });
   it("ignores a drag that carries no files, such as reordering an attachment chip", () => {
-    const result = render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    const result = render(() => <AttachmentComposer {...props()} />);
     const dropZone = result.container.querySelector(".conversation-reply")!;
     fireEvent.dragEnter(dropZone, { dataTransfer:{ types:["text/plain"] } });
     expect(dropZone).not.toHaveClass("is-drag-target");
   });
   it("keeps typed content and offers recovery when paste staging fails", async () => {
     vi.mocked(invoke).mockRejectedValue(new Error("Disk full"));
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    render(() => <AttachmentComposer {...props()} />);
     fireEvent.input(screen.getByRole("textbox"), {target:{value:"Keep this draft"}});
     fireEvent.paste(screen.getByRole("textbox"), {clipboardData:{files:[{name:"image.png",size:1,arrayBuffer:async () => new Uint8Array([1]).buffer}]}});
     expect(await screen.findByRole("alert")).toHaveTextContent("Disk full");
@@ -74,7 +86,7 @@ describe("chat attachments", () => {
 describe("inline image markers, positioned like Claude TUI", () => {
   it("drops the marker where the caret was, not appended at the end", async () => {
     vi.mocked(open).mockResolvedValue(["/Users/me/shot.png"]);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    render(() => <AttachmentComposer {...props()} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.input(field, { target:{value:"Check the layout please"} });
     field.setSelectionRange(10, 10); // right after "Check the "
@@ -84,7 +96,7 @@ describe("inline image markers, positioned like Claude TUI", () => {
   });
   it("renumbers remaining markers in the draft after an earlier image is removed", async () => {
     vi.mocked(open).mockResolvedValue(["/Users/me/one.png", "/Users/me/two.png"]);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn()} />);
+    render(() => <AttachmentComposer {...props()} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.click(screen.getByRole("button", {name:"Attach images or files"}));
     await screen.findByText("two.png");
@@ -97,7 +109,7 @@ describe("inline image markers, positioned like Claude TUI", () => {
 describe("composer history, cycling previous sent messages like the TUI (round 8 item 4)", () => {
   it("recalls the most recent sent message on ArrowUp from an empty composer, and ArrowDown returns to empty", async () => {
     const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.input(field, { target: { value: "first message" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
@@ -118,7 +130,7 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
   });
   it("does not recall history when the composer already holds an unsent single-line draft", async () => {
     const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.input(field, { target: { value: "sent earlier" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
@@ -129,7 +141,7 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
   });
   it("never steals the arrows while editing multiline text, typed or recalled", async () => {
     const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.input(field, { target: { value: "line one\nline two" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
@@ -143,7 +155,7 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
   });
   it("exits history mode the moment the operator edits a recalled entry, preserving that edit as an ordinary draft", async () => {
     const send = vi.fn().mockResolvedValue(true);
-    render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={send} />);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
     const field = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.input(field, { target: { value: "sent message" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
@@ -157,7 +169,7 @@ describe("composer history, cycling previous sent messages like the TUI (round 8
 });
 
 it("shrinks after deleting text and after a successful send", async () => {
-  render(() => <AttachmentComposer kind="codex" disabled={false} busy={false} onSend={vi.fn().mockResolvedValue(true)} />);
+  render(() => <AttachmentComposer {...props({ onSend: vi.fn().mockResolvedValue(true) })} />);
   const field = screen.getByRole("textbox") as HTMLTextAreaElement;
   Object.defineProperty(field, "scrollHeight", {get:() => field.value.length > 50 ? 200 : 40});
   fireEvent.input(field, {target:{value:"long draft ".repeat(20)}});
@@ -168,4 +180,128 @@ it("shrinks after deleting text and after a successful send", async () => {
   fireEvent.click(screen.getByRole("button", {name:"Send reply"}));
   await waitFor(() => expect(field).toHaveValue(""));
   expect(field.style.height).toBe("40px");
+});
+
+describe("native slash-command palette (round 10)", () => {
+  const catalog: CommandCatalog = {
+    commands: [
+      { name: "model", description: "Change the active model", source: "builtin", one_shot: true },
+      { name: "compact", description: "Summarize the conversation", source: "builtin", one_shot: true },
+      { name: "myplugin:review", description: "Review the diff", source: "plugin", one_shot: true },
+    ],
+    models: [],
+    model_command: null,
+  };
+
+  it("opens on a bare slash, filters as the operator types, and shows the highlighted row's description", () => {
+    render(() => <AttachmentComposer {...props({ catalog })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "/" } });
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    fireEvent.input(field, { target: { value: "/co" } });
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveTextContent("compact");
+    expect(screen.getByText("Summarize the conversation")).toBeInTheDocument();
+  });
+
+  it("shows a plugin command namespaced with its bare alias in parentheses", () => {
+    render(() => <AttachmentComposer {...props({ catalog })} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/rev" } });
+    expect(screen.getByRole("option")).toHaveTextContent("myplugin:review (review)");
+  });
+
+  it("closes the palette the moment a space starts an argument", () => {
+    render(() => <AttachmentComposer {...props({ catalog })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "/model" } });
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    fireEvent.input(field, { target: { value: "/model " } });
+    expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+  });
+
+  it("renders 'no commands known for this agent' rather than a guess, for an empty catalog", () => {
+    render(() => <AttachmentComposer {...props()} />);
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "/" } });
+    expect(screen.getByText("No commands known for this agent.")).toBeInTheDocument();
+  });
+
+  it("arrows move the highlighted row and Enter sends the highlighted command as a one-shot line, not history recall", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer {...props({ catalog, onSend: send })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "/" } });
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(send).toHaveBeenCalledWith("/compact"));
+  });
+
+  it("Escape dismisses the palette without clearing the typed text, and does not touch history", () => {
+    render(() => <AttachmentComposer {...props({ catalog })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "/mo" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+    expect(field).toHaveValue("/mo");
+  });
+
+  it("does not let ArrowUp fall through to history recall while the palette is open", async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer {...props({ catalog, onSend: send })} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.input(field, { target: { value: "sent earlier" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(field).toHaveValue(""));
+    fireEvent.input(field, { target: { value: "/" } });
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    // Moved the palette highlight (wrapped to the last row), not recalled "sent earlier".
+    expect(field).toHaveValue("/");
+    expect(screen.getAllByRole("option")[2]).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+describe("native model picker (round 10)", () => {
+  const catalog: CommandCatalog = {
+    commands: [],
+    models: [
+      { id: "opus", label: "Claude Opus", current: false },
+      { id: "sonnet", label: "Claude Sonnet", current: true },
+      { id: "haiku", label: "Claude Haiku", current: false },
+    ],
+    model_command: "/model",
+  };
+
+  it("opens a panel from the model chip listing every model, a check on the current one", () => {
+    render(() => <AttachmentComposer {...props({ catalog, model: "Claude Sonnet" })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
+    const panel = screen.getByRole("menu", { name: "Choose model" });
+    expect(panel).toBeInTheDocument();
+    expect(screen.getAllByRole("menuitemradio")).toHaveLength(3);
+    expect(screen.getByRole("menuitemradio", { name: /Claude Sonnet/ })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("selecting a model calls onSelectModel with its id and closes the panel", () => {
+    const onSelectModel = vi.fn();
+    render(() => <AttachmentComposer {...props({ catalog, onSelectModel })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Claude Opus/ }));
+    expect(onSelectModel).toHaveBeenCalledWith("opus");
+    expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
+  });
+
+  it("falls back to opening the terminal route when the model list is empty but a model_command exists", () => {
+    const onModelFallback = vi.fn();
+    render(() => <AttachmentComposer {...props({ catalog: { commands: [], models: [], model_command: "/model" }, hasTerminalFallback: true, onModelFallback })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change codex model" }));
+    expect(onModelFallback).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
+  });
+
+  it("shows the plain non-interactive label when the catalog has no model_command at all", () => {
+    const result = render(() => <AttachmentComposer {...props({ model: "gpt-5-codex" })} />);
+    expect(screen.queryByRole("button", { name: "Change codex model" })).not.toBeInTheDocument();
+    expect(result.container.querySelector(".composer-agent")?.textContent).toBe("codex · gpt-5-codex");
+  });
 });

@@ -9,7 +9,7 @@
 /// their own commands. Shimming `invoke` itself, one level lower, covers every one of those
 /// without touching each file, and lets the real `daemonCall`/`getConnectionStatus`/etc. run
 /// unmodified against fixture data.
-import type { AgentSession, Lane, Repo, TranscriptItem, PendingDialog } from "../bindings";
+import type { AgentSession, CommandCatalog, Lane, Repo, TranscriptItem, PendingDialog } from "../bindings";
 // The native Channel constructor needs window.__TAURI_INTERNALS__. Screenshot callbacks
 // remain local and use the same onmessage interface; no native bridge is installed.
 export class Channel<T> { onmessage: (message: T) => void = () => undefined; }
@@ -368,6 +368,9 @@ function transcriptItems(): TranscriptItem[] {
     item("u2", "user", "Also check the mobile breakpoint.", { partial:true }),
     item("u3", "user", "And the tablet one too.", { partial:true }),
   ];
+  // A single long queued turn: the pending row must size to its own content up to a bounded
+  // share of the pane and offer an explicit "Show more" rather than a nested scrollbar.
+  if (scenario === "pending-long") return [item("u1", "user", "Please review the onboarding flow end to end and note every place the copy disagrees with the design doc, especially the empty states, the error toasts, and the confirmation step right before publishing - I want a full pass, not a skim.\n\nAlso check the mobile breakpoint at 375px and 414px, since the last screenshot round only covered desktop widths, and the tablet layout at 768px while you're at it.\n\nOne more thing: the settings drawer still shows the old plan name in two places even though billing already renamed it, so sweep the whole settings surface for stale copy too.", { partial:true })];
   // The DULL case is deliberately the thinnest fixture on offer: one idle agent, nothing said -
   // the quiet lane the busy "rich" fixture never shows on its own.
   if (scenario === "dull") return [];
@@ -387,8 +390,8 @@ const initialPage = () => ({
   items:transcriptItems(),
   next_before: scenario === "rich" ? 120 : scenario === "long-history" ? 40 : null,
   older_message_count: scenario === "long-history" ? 57 : undefined,
-  order: scenario === "queued" ? ["u1", "a1", "u2", "u3"] : undefined,
-  input_states: scenario === "queued" ? { u2:"consumed", u3:"queued" } : undefined,
+  order: scenario === "queued" ? ["u1", "a1", "u2", "u3"] : scenario === "pending-long" ? ["u1"] : undefined,
+  input_states: scenario === "queued" ? { u2:"consumed", u3:"queued" } : scenario === "pending-long" ? { u1:"queued" } : undefined,
 });
 let fixtureConfig = { sort_repos_by_activity:false, sort_mode:"default", tab_sort_mode:"manual", agent_views:{codex:"conversation", "claude-code":"terminal"}, agent_status_rows:query.has("notices") ? {codex:["rate_limit", "usage_limit"]} : {} };
 if (query.get("focus") === "reply") {
@@ -420,6 +423,24 @@ if (scenario === "attachments" || scenario.startsWith("defect-composer")) {
       }
     }
     field.focus(); clearInterval(timer);
+  }, 100);
+}
+if (scenario === "native-model") {
+  const timer = setInterval(() => {
+    const chip = document.querySelector<HTMLButtonElement>(".composer-model");
+    if (!chip) return;
+    clearInterval(timer);
+    chip.click();
+  }, 100);
+}
+if (scenario === "native-palette" || scenario === "native-empty") {
+  const timer = setInterval(() => {
+    const field = document.querySelector<HTMLTextAreaElement>('textarea[aria-label^="Reply to"]');
+    if (!field) return;
+    clearInterval(timer);
+    field.focus();
+    field.value = scenario === "native-palette" ? "/re" : "/";
+    field.dispatchEvent(new Event("input", { bubbles:true }));
   }, 100);
 }
 if (query.has("drag")) {
@@ -508,7 +529,46 @@ if (agentsDemo) {
   }, 100);
 }
 
+// The daemon's agent.command_catalog RPC has not shipped yet (see stores/commandCatalog.ts);
+// this stands in for it, shaped exactly like the contract, for the native model picker and
+// slash palette screenshots. An empty catalog is deliberately its own scenario, not a missing
+// case - the whole point of the real RPC is that a fabricated command is never an option.
+const NATIVE_CATALOGS: Record<string, CommandCatalog> = {
+  "native-model": {
+    commands: [{ name:"model", description:"Change the active model", source:"builtin", one_shot:true }],
+    models: [
+      { id:"claude-opus-5", label:"Opus 5", current:false },
+      { id:"claude-sonnet-5", label:"Sonnet 5", current:false },
+      { id:"claude-haiku-4-5", label:"Haiku 4.5", current:false },
+      { id:"gpt-5-codex", label:"GPT-5 Codex", current:true },
+      { id:"gemini-3-pro", label:"Gemini 3 Pro", current:false },
+      { id:"gemini-3-flash", label:"Gemini 3 Flash", current:false },
+      { id:"grok-4", label:"Grok 4", current:false },
+    ],
+    model_command: "/model",
+  },
+  "native-palette": {
+    commands: [
+      { name:"model", description:"Change the active model", source:"builtin", one_shot:true },
+      { name:"review", description:"Review the current diff for bugs and style issues", source:"builtin", one_shot:true },
+      { name:"clear", description:"Clear the conversation and start a fresh context", source:"builtin", one_shot:true },
+      { name:"resume", description:"Resume a previous session", source:"builtin", one_shot:false },
+      { name:"repomind:review-plan", description:"Check the active plan against repo conventions", source:"plugin", one_shot:true },
+      { name:"repomind:release-notes", description:"Draft release notes from recent commits", source:"plugin", one_shot:true },
+      { name:"vim", description:"Toggle vim keybindings", source:"user", one_shot:false },
+    ],
+    models: [
+      { id:"claude-opus-5", label:"Opus 5", current:false },
+      { id:"claude-sonnet-5", label:"Sonnet 5", current:true },
+    ],
+    model_command: "/model",
+  },
+  "native-empty": { commands: [], models: [], model_command: null },
+};
+const nativeCatalog = NATIVE_CATALOGS[scenario];
+
 const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
+  "agent.command_catalog": () => nativeCatalog ?? { commands: [], models: [], model_command: null },
   "repo.list": () => fixtureRepos,
   "lane.list": () => fixtureLanes,
   "usage.get": () => [],

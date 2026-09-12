@@ -37,6 +37,7 @@ notify-debouncer-full = { workspace = true }
 globset = { workspace = true }
 regex = { workspace = true }
 ureq = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 repomon-core = { workspace = true, features = ["test-support"] }

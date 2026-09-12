@@ -1,6 +1,6 @@
 .conversation { height:100%; min-height:0; background:var(--background); position:relative; container-type:inline-size; }
 .conversation-layout { height:100%; }
-.conversation-main { --conversation-track:760px; --conversation-gutter:68px; --conversation-gap:16px; --conversation-edge:24px; --conversation-width:calc(var(--conversation-track) + 2 * (var(--conversation-gutter) + var(--conversation-gap) + var(--conversation-edge))); height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; }
+.conversation-main { --conversation-track:760px; --conversation-gutter:68px; --conversation-gap:16px; --conversation-edge:24px; --conversation-width:calc(var(--conversation-track) + 2 * (var(--conversation-gutter) + var(--conversation-gap) + var(--conversation-edge))); --pending-message-max-height:128px; height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; position:relative; }
 /* Bounds the scroll viewport's own box, distinct from conversation-main's box (which also
    includes the pending queue and footer below it) - the Latest output pill anchors to this
    element's bottom edge so it tracks the scroll area regardless of how tall the footer or an
@@ -98,7 +98,12 @@
 .conversation-pending-inner { width:100%; max-width:var(--conversation-width); margin-inline:auto; padding:8px var(--conversation-edge); }
 .conversation-pending-row { margin-bottom:8px; }
 .conversation-pending-row:last-child { margin-bottom:0; }
-.conversation-pending-row .conversation-message { max-height:88px; overflow:auto; }
+/* Sizes to its content up to a sensible share of the pane, not a fixed clamp - and when content
+   genuinely exceeds that, .conversation-excerpt-toggle (below) truncates it explicitly instead of
+   handing the row its own scrollbar nested inside the queue's. The queue's own max-height/overflow
+   above is the one deliberate scroll boundary here; a row never gets a second one. */
+.conversation-pending-row .conversation-message-clamped { max-height:var(--pending-message-max-height); overflow:hidden; }
+.conversation-pending-row .conversation-excerpt-toggle { padding-top:4px; }
 .conversation-context { display:none; overflow:auto; }
 @container (min-width:1200px) {
   .conversation-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; }
@@ -106,14 +111,14 @@
   .conversation-compact-context { display:none; }
 }
 @container (max-width:800px) {
-  .conversation-main { --conversation-gutter:44px; --conversation-gap:12px; --conversation-edge:16px; }
+  .conversation-main { --conversation-gutter:44px; --conversation-gap:12px; --conversation-edge:16px; --pending-message-max-height:104px; }
   .conversation-ledger { padding-block:20px 28px; }
   .conversation-footer { padding-bottom:12px; }
   .composer-trailing { max-width:55%; }
   .conversation-compact-context { display:none; }
 }
 @container (max-width:480px) {
-  .conversation-main { --conversation-gutter:32px; --conversation-gap:8px; --conversation-edge:8px; }
+  .conversation-main { --conversation-gutter:32px; --conversation-gap:8px; --conversation-edge:8px; --pending-message-max-height:80px; }
   .conversation-body { font-size:12px; }
   .conversation-user .conversation-body { max-width:100%; }
   .conversation-terminal-line { gap:8px; flex-wrap:wrap; }

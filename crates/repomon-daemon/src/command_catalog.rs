@@ -1,0 +1,981 @@
+//! Discovery for `agent.command_catalog`: real per-kind commands and models, never a fabricated
+//! entry. Each kind's section below states, in its own doc comment, exactly what is discovered
+//! from disk versus curated by hand - see `fleet/repomon/tasks/2026-09-12-native-commands.md`
+//! for the contract and the operator's rule against driving an agent's interactive picker blind.
+//!
+//! Self-contained: the only things this module reads from the rest of the daemon are `Ctx`
+//! (for the lane/session lookup and a live pane capture) and a handful of `pub(crate)` helpers
+//! already in `ext.rs` (plugin/settings scanning claude-code and codex's plugin systems share).
+//! Its own cache is a private, in-process static, not threaded through `Ctx`.
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use repomon_core::agent::backend::CaptureOpts;
+use repomon_core::agent::conversation_activity::pane_activity;
+use repomon_core::command_catalog::{CatalogCommand, CatalogModel, CatalogSource, CommandCatalog};
+use repomon_core::model::{AgentKind, LaneId};
+use serde_json::Value;
+
+use crate::Ctx;
+
+/// How long a kind's discovered command/model lists (everything but which model is "current")
+/// stay cached before the filesystem is read again. Short enough that a newly added user command
+/// shows up well within a session; long enough that opening the palette on every keystroke never
+/// re-walks a plugin cache. "Current" is always recomputed fresh (see `build`), so this TTL only
+/// ever makes a *addition* look briefly stale, never a wrong "current" model.
+const STATIC_TTL: Duration = Duration::from_secs(60);
+
+/// opencode's model list means invoking its own CLI (`opencode models`), measured on this
+/// machine at several seconds for ~100 entries - too slow to pay on every cache miss at the
+/// default TTL above, so it gets a much longer one and a hard timeout (see `opencode::models`).
+const OPENCODE_MODELS_TTL: Duration = Duration::from_secs(1800);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StaticKey {
+    kind: &'static str,
+    repo_root: PathBuf,
+}
+
+#[derive(Clone)]
+struct StaticValue {
+    commands: Vec<CatalogCommand>,
+    /// Never carries `current: true`; `build` marks that fresh on every call.
+    models: Vec<CatalogModel>,
+    model_command: Option<String>,
+}
+
+fn static_cache() -> &'static Mutex<HashMap<StaticKey, (Instant, StaticValue)>> {
+    static CACHE: OnceLock<Mutex<HashMap<StaticKey, (Instant, StaticValue)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Runs `discover` at most once per `STATIC_TTL` for a given (kind, repo root).
+fn cached_static(
+    kind: &'static str,
+    repo_root: &Path,
+    discover: impl FnOnce() -> StaticValue,
+) -> StaticValue {
+    let key = StaticKey {
+        kind,
+        repo_root: repo_root.to_path_buf(),
+    };
+    let mut cache = static_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, value)) = cache.get(&key) {
+        if at.elapsed() < STATIC_TTL {
+            return value.clone();
+        }
+    }
+    let value = discover();
+    cache.insert(key, (Instant::now(), value.clone()));
+    value
+}
+
+/// Resolves `{lane_id, window}` to a kind and worktree, then discovers and caches its catalog.
+/// An unrecognized lane, window, or kind is an empty catalog, never an error - "no commands
+/// known for this agent" is exactly what the palette should show in that case.
+pub async fn build(ctx: &Ctx, lane_id: LaneId, window: Option<String>) -> CommandCatalog {
+    let window = window.unwrap_or_else(|| repomon_core::TmuxRuntime::window_name(lane_id));
+    let Ok(lane) = ctx.lanes.get(lane_id).await else {
+        return CommandCatalog::empty();
+    };
+    let Some(session) = lane
+        .agent_sessions
+        .iter()
+        .find(|s| s.tmux_window.as_deref() == Some(window.as_str()))
+    else {
+        return CommandCatalog::empty();
+    };
+    let kind = session.agent.clone();
+    let repo_root = lane.worktree.path.clone();
+    let session_id = session.session_id.clone();
+
+    let StaticValue {
+        commands,
+        mut models,
+        model_command,
+    } = match &kind {
+        AgentKind::ClaudeCode => {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || {
+                cached_static("claude-code", &root, || claude_code::discover(&root))
+            })
+            .await
+            .unwrap_or_else(|_| StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            })
+        }
+        AgentKind::Codex => {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || {
+                cached_static("codex", &root, || codex::discover(&root))
+            })
+            .await
+            .unwrap_or_else(|_| StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            })
+        }
+        AgentKind::OpenCode => opencode::discover(ctx, &repo_root).await,
+        AgentKind::Antigravity => {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || {
+                cached_static("antigravity", &root, || antigravity::discover(&root))
+            })
+            .await
+            .unwrap_or_else(|_| StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            })
+        }
+        AgentKind::Hermes => {
+            tokio::task::spawn_blocking(|| cached_static("hermes", Path::new(""), hermes::discover))
+                .await
+                .unwrap_or_else(|_| StaticValue {
+                    commands: Vec::new(),
+                    models: Vec::new(),
+                    model_command: None,
+                })
+        }
+        AgentKind::Aider => {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || {
+                cached_static("aider", &root, || aider::discover(&root))
+            })
+            .await
+            .unwrap_or_else(|_| StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            })
+        }
+        AgentKind::Cursor | AgentKind::Other(_) => StaticValue {
+            commands: Vec::new(),
+            models: Vec::new(),
+            model_command: None,
+        },
+    };
+
+    let current = match &kind {
+        AgentKind::ClaudeCode => {
+            let root = repo_root.clone();
+            let sid = session_id.clone();
+            tokio::task::spawn_blocking(move || claude_code::current_model(&root, sid.as_deref()))
+                .await
+                .unwrap_or(None)
+        }
+        AgentKind::Codex => codex::current_model(ctx, &window, &repo_root).await,
+        AgentKind::Hermes => tokio::task::spawn_blocking(hermes::current_model)
+            .await
+            .unwrap_or(None),
+        AgentKind::Aider => {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || aider::current_model(&root))
+                .await
+                .unwrap_or(None)
+        }
+        _ => None,
+    };
+    if let Some(current_id) = current {
+        match models.iter_mut().find(|m| m.id == current_id) {
+            Some(m) => m.current = true,
+            None => models.push(CatalogModel {
+                id: current_id.clone(),
+                label: current_id,
+                current: true,
+            }),
+        }
+    }
+    CommandCatalog {
+        commands,
+        models,
+        model_command,
+    }
+}
+
+/// Reads `commands/*.md` in one directory as one plugin's or one user's commands. `namer` turns
+/// a file stem into the catalog's `name` (bare for user commands, `plugin:stem` for a plugin's).
+/// `description` comes only from real content in the file - a heading-only file with no prose
+/// gets an empty description rather than an invented one.
+fn commands_in_dir(
+    dir: &Path,
+    source: CatalogSource,
+    namer: impl Fn(&str) -> String,
+) -> Vec<CatalogCommand> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let description = command_description(&path);
+        out.push(CatalogCommand {
+            name: namer(stem),
+            description,
+            source,
+            one_shot: true,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// A command markdown file's description: the `description:` frontmatter field used by Claude's
+/// and opencode's command files (same shape as a SKILL.md's, see `ext::skill_frontmatter`), or,
+/// for a heading-only file like codex's plugin commands (`# /name` with no frontmatter at all),
+/// the first non-empty prose line after the heading. Never a guess when neither is present.
+fn command_description(path: &Path) -> String {
+    let (_, frontmatter_description) = crate::ext::skill_frontmatter(path);
+    if let Some(description) = frontmatter_description.filter(|d| !d.is_empty()) {
+        return description;
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_description_prefers_frontmatter_over_the_heading_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review-plan.md");
+        fs::write(&path, "---\ndescription: Check the active plan against repo conventions\n---\n\n# /review-plan\n\nBody text.\n").unwrap();
+        assert_eq!(
+            command_description(&path),
+            "Check the active plan against repo conventions"
+        );
+    }
+
+    #[test]
+    fn command_description_falls_back_to_the_first_prose_line_when_there_is_no_frontmatter() {
+        // Matches codex's real plugin command shape: a `# /name` heading, no frontmatter, the
+        // first paragraph read as the description.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connect-figma-components.md");
+        fs::write(&path, "# /connect-figma-components\n\nCreate or update parserless Figma Code Connect template files.\n\n## Arguments\n").unwrap();
+        assert_eq!(
+            command_description(&path),
+            "Create or update parserless Figma Code Connect template files."
+        );
+    }
+
+    #[test]
+    fn command_description_is_empty_for_a_heading_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clear.md");
+        fs::write(&path, "# /clear\n").unwrap();
+        assert_eq!(command_description(&path), "");
+    }
+
+    #[test]
+    fn commands_in_dir_skips_non_markdown_files_and_sorts_by_the_named_result() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("review.md"),
+            "# /review\n\nReview the diff.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("clear.md"),
+            "# /clear\n\nClear the conversation.\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("README"), "not a command").unwrap();
+        let commands = commands_in_dir(dir.path(), CatalogSource::Plugin, |stem| {
+            format!("repomind:{stem}")
+        });
+        assert_eq!(
+            commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["repomind:clear", "repomind:review"]
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|c| c.source == CatalogSource::Plugin && c.one_shot)
+        );
+    }
+
+    #[test]
+    fn commands_in_dir_is_empty_for_a_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            commands_in_dir(&dir.path().join("nope"), CatalogSource::User, |s| s
+                .to_string())
+            .is_empty()
+        );
+    }
+}
+
+mod claude_code {
+    //! User commands (`~/.claude/commands/*.md`) and enabled plugins' commands
+    //! (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/commands/*.md`, matching the
+    //! operator's own screenshot) are discovered from disk. Built-ins and the model list are
+    //! curated: verified against this machine's `claude --help` (`/resume`, `/doctor`, and the
+    //! `--model` flag's alias examples 'fable'/'opus'/'sonnet'), not read from anywhere on disk -
+    //! Claude Code ships no on-disk manifest of either. `haiku` is the family's fourth alias,
+    //! documented alongside the other three (Claude 5 family: Fable 5.1, Opus 5, Sonnet 5,
+    //! Haiku 4.5) though not itself quoted in the `--help` excerpt this was checked against.
+    use super::*;
+
+    const MODELS: &[(&str, &str)] = &[
+        ("fable", "Fable 5.1"),
+        ("opus", "Opus 5"),
+        ("sonnet", "Sonnet 5"),
+        ("haiku", "Haiku 4.5"),
+    ];
+
+    pub fn discover(repo_root: &Path) -> StaticValue {
+        let Some(claude_home) = crate::ext::claude_home() else {
+            return StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            };
+        };
+        let mut commands = vec![
+            CatalogCommand {
+                name: "model".into(),
+                description: "Change the active model".into(),
+                source: CatalogSource::Builtin,
+                one_shot: true,
+            },
+            CatalogCommand {
+                name: "resume".into(),
+                description: "Resume a previous session".into(),
+                source: CatalogSource::Builtin,
+                one_shot: false,
+            },
+            CatalogCommand {
+                name: "doctor".into(),
+                description: "Check the health of your Claude Code installation".into(),
+                source: CatalogSource::Builtin,
+                one_shot: true,
+            },
+        ];
+        commands.extend(commands_in_dir(
+            &claude_home.join("commands"),
+            CatalogSource::User,
+            |stem| stem.to_string(),
+        ));
+        commands.extend(plugin_commands(&claude_home, repo_root));
+        commands.sort_by(|a, b| (a.source as u8, &a.name).cmp(&(b.source as u8, &b.name)));
+
+        let models = MODELS
+            .iter()
+            .map(|(id, label)| CatalogModel {
+                id: (*id).into(),
+                label: (*label).into(),
+                current: false,
+            })
+            .collect();
+        StaticValue {
+            commands,
+            models,
+            model_command: Some("/model".into()),
+        }
+    }
+
+    fn plugin_commands(claude_home: &Path, repo_root: &Path) -> Vec<CatalogCommand> {
+        let global_enabled = crate::ext::enabled_map(&claude_home.join("settings.json"));
+        let repo_enabled = crate::ext::enabled_map(&repo_root.join(".claude/settings.local.json"));
+        let installed = crate::ext::installed_plugins(claude_home);
+        let mut out = Vec::new();
+        for (id, (_, install_path)) in &installed {
+            let enabled = match (repo_enabled.get(id), global_enabled.get(id)) {
+                (Some(&b), _) => b,
+                (None, Some(&b)) => b,
+                (None, None) => false,
+            };
+            if !enabled {
+                continue;
+            }
+            let Some(install_path) = install_path.as_deref() else {
+                continue;
+            };
+            let plugin_name = id
+                .split_once('@')
+                .map(|(name, _)| name)
+                .unwrap_or(id.as_str());
+            out.extend(commands_in_dir(
+                &install_path.join("commands"),
+                CatalogSource::Plugin,
+                |stem| format!("{plugin_name}:{stem}"),
+            ));
+        }
+        out
+    }
+
+    /// The last `message.model` in the session's own transcript (`~/.claude/projects/<cwd
+    /// with '/' replaced by '-'>/<session id>.jsonl`), read directly rather than through the
+    /// daemon's shared transcript cache to keep this module self-contained. `None` when there is
+    /// no session id yet, or the file cannot be read - never a guess.
+    pub fn current_model(repo_root: &Path, session_id: Option<&str>) -> Option<String> {
+        let claude_home = crate::ext::claude_home()?;
+        let session_id = session_id?;
+        let slug: String = repo_root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' { '-' } else { c })
+            .collect();
+        let path = claude_home
+            .join("projects")
+            .join(slug)
+            .join(format!("{session_id}.jsonl"));
+        let text = fs::read_to_string(path).ok()?;
+        text.lines().rev().find_map(|line| {
+            let v: Value = serde_json::from_str(line).ok()?;
+            if v.get("type").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
+            v.get("message")?.get("model")?.as_str().map(String::from)
+        })
+    }
+}
+
+mod codex {
+    //! Enabled plugins' commands (`~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/
+    //! commands/*.md`, enabled state from `~/.codex/config.toml`'s `[plugins."<id>"]` tables) are
+    //! discovered from disk - codex's plugin system otherwise exposes skills and MCP servers, not
+    //! commands, so this is the only command source found for it. No user command directory
+    //! exists (`codex --help` documents none). The model list is real, from
+    //! `~/.codex/models_cache.json`'s `models[]` (filtered to `visibility == "list"`), not
+    //! curated. `model_command` is `null`: nothing on this machine confirms codex's in-session
+    //! model switch accepts a one-shot argument rather than only opening its own interactive
+    //! picker, and the operator's rule treats unverified exactly like "cannot".
+    use super::*;
+
+    pub fn discover(repo_root: &Path) -> StaticValue {
+        let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().join(".codex")) else {
+            return StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            };
+        };
+        let _ = repo_root; // codex has no repo-scoped plugin enablement on this machine's config shape
+        let commands = plugin_commands(&home);
+        let models = models_cache(&home);
+        StaticValue {
+            commands,
+            models,
+            model_command: None,
+        }
+    }
+
+    fn plugin_commands(codex_home: &Path) -> Vec<CatalogCommand> {
+        let Some(config) = config_value(codex_home) else {
+            return Vec::new();
+        };
+        let Some(enabled_table) = config.get("plugins").and_then(toml::Value::as_table) else {
+            return Vec::new();
+        };
+        let cache = codex_home.join("plugins/cache");
+        let mut out = Vec::new();
+        for (id, entry) in enabled_table {
+            let enabled = entry
+                .get("enabled")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            if !enabled {
+                continue;
+            }
+            let Some((plugin_name, marketplace)) = id.split_once('@') else {
+                continue;
+            };
+            let plugin_dir = cache.join(marketplace).join(plugin_name);
+            let Ok(mut versions) = fs::read_dir(&plugin_dir).map(|d| {
+                d.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            // No `.in_use`/`.orphaned_at` marker exists here (unlike Claude's cache); every
+            // plugin sampled on this machine has exactly one version directory, so the
+            // lexicographically last one is a reasonable, stated tiebreaker rather than a guess.
+            versions.sort();
+            let Some(version_dir) = versions.pop() else {
+                continue;
+            };
+            out.extend(commands_in_dir(
+                &version_dir.join("commands"),
+                CatalogSource::Plugin,
+                |stem| format!("{plugin_name}:{stem}"),
+            ));
+        }
+        out
+    }
+
+    fn models_cache(codex_home: &Path) -> Vec<CatalogModel> {
+        let Some(root) = crate::ext::read_json(&codex_home.join("models_cache.json")) else {
+            return Vec::new();
+        };
+        let Some(models) = root.get("models").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        models
+            .iter()
+            .filter(|m| m.get("visibility").and_then(Value::as_str) == Some("list"))
+            .filter_map(|m| {
+                let id = m.get("slug").and_then(Value::as_str)?.to_string();
+                let label = m
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(CatalogModel {
+                    id,
+                    label,
+                    current: false,
+                })
+            })
+            .collect()
+    }
+
+    fn config_value(codex_home: &Path) -> Option<toml::Value> {
+        toml::from_str(&fs::read_to_string(codex_home.join("config.toml")).ok()?).ok()
+    }
+
+    /// Prefers the live pane's footer (already parsed for codex by
+    /// `conversation_activity::pane_activity`) since it reflects an in-session `/model` switch;
+    /// falls back to `~/.codex/config.toml`'s top-level `model` key, the configured default,
+    /// when no pane text is available yet (e.g. right after spawn).
+    pub async fn current_model(ctx: &Ctx, window: &str, repo_root: &Path) -> Option<String> {
+        let backend = ctx.backend.clone();
+        let win = window.to_string();
+        let live = tokio::task::spawn_blocking(move || {
+            backend.capture_named(&win, CaptureOpts::visible()).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+        .and_then(|pane| pane_activity("codex", &pane))
+        .and_then(|activity| activity.model);
+        if live.is_some() {
+            return live;
+        }
+        let _ = repo_root;
+        let home = directories::BaseDirs::new()?.home_dir().join(".codex");
+        config_value(&home)?
+            .get("model")?
+            .as_str()
+            .map(String::from)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn models_cache_keeps_only_listed_visibility_and_falls_back_to_slug_for_the_label() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join("models_cache.json"),
+                r#"{"models":[
+                    {"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list"},
+                    {"slug":"gpt-5.6-luna","visibility":"list"},
+                    {"slug":"hidden-model","display_name":"Hidden","visibility":"hide"}
+                ]}"#,
+            )
+            .unwrap();
+            let models = models_cache(dir.path());
+            assert_eq!(models.len(), 2);
+            assert!(
+                models
+                    .iter()
+                    .any(|m| m.id == "gpt-6-astra" && m.label == "GPT-6-Astra")
+            );
+            assert!(
+                models
+                    .iter()
+                    .any(|m| m.id == "gpt-5.6-luna" && m.label == "gpt-5.6-luna")
+            );
+            assert!(!models.iter().any(|m| m.id == "hidden-model"));
+        }
+
+        #[test]
+        fn models_cache_is_empty_when_the_file_is_missing() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(models_cache(dir.path()).is_empty());
+        }
+    }
+}
+
+mod opencode {
+    //! User/project command files (`~/.config/opencode/command(s)/*.md` and `<repo>/.opencode/
+    //! command(s)/*.md`) are discovered from disk. opencode's `plugin` config array names npm
+    //! packages, not a file cache the way Claude's and codex's plugins do, so plugin-sourced
+    //! commands are not resolved here - an unhandled case stated plainly rather than guessed at.
+    //! The model list comes from actually running `opencode models` (no local manifest exists);
+    //! that call is slow enough on this machine (several seconds for ~100 entries) to need its
+    //! own long-lived cache and a hard timeout, kept separate from `STATIC_TTL` above.
+    use super::*;
+
+    pub async fn discover(ctx: &Ctx, repo_root: &Path) -> StaticValue {
+        let root = repo_root.to_path_buf();
+        let commands = tokio::task::spawn_blocking(move || file_commands(&root))
+            .await
+            .unwrap_or_default();
+        let models = models_via_cli(ctx).await;
+        StaticValue {
+            commands,
+            models,
+            model_command: None,
+        }
+    }
+
+    fn file_commands(repo_root: &Path) -> Vec<CatalogCommand> {
+        let mut out = Vec::new();
+        if let Some(home) = directories::BaseDirs::new() {
+            let config = home.home_dir().join(".config/opencode");
+            out.extend(commands_in_dir(
+                &config.join("command"),
+                CatalogSource::User,
+                |stem| stem.to_string(),
+            ));
+            out.extend(commands_in_dir(
+                &config.join("commands"),
+                CatalogSource::User,
+                |stem| stem.to_string(),
+            ));
+        }
+        let project = repo_root.join(".opencode");
+        out.extend(commands_in_dir(
+            &project.join("command"),
+            CatalogSource::User,
+            |stem| stem.to_string(),
+        ));
+        out.extend(commands_in_dir(
+            &project.join("commands"),
+            CatalogSource::User,
+            |stem| stem.to_string(),
+        ));
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.dedup_by(|a, b| a.name == b.name);
+        out
+    }
+
+    async fn models_via_cli(ctx: &Ctx) -> Vec<CatalogModel> {
+        {
+            let cache = super::opencode_models_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((at, models)) = cache.as_ref() {
+                if at.elapsed() < OPENCODE_MODELS_TTL {
+                    return models.clone();
+                }
+            }
+        }
+        let _ = ctx;
+        let output = tokio::time::timeout(
+            Duration::from_secs(8),
+            tokio::task::spawn_blocking(|| {
+                std::process::Command::new("opencode")
+                    .arg("models")
+                    .output()
+            }),
+        )
+        .await;
+        let models = match output {
+            Ok(Ok(Ok(out))) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|id| CatalogModel {
+                    id: id.to_string(),
+                    label: id.to_string(),
+                    current: false,
+                })
+                .collect(),
+            // A timeout or a failed/missing CLI is an honest "not knowable right now", not an
+            // error to surface - the cache still remembers the timestamp so a slow/offline
+            // machine does not retry the expensive call on every catalog request.
+            _ => Vec::new(),
+        };
+        *super::opencode_models_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), models.clone()));
+        models
+    }
+}
+
+type TimestampedModels = Option<(Instant, Vec<CatalogModel>)>;
+
+fn opencode_models_cache() -> &'static Mutex<TimestampedModels> {
+    static CACHE: OnceLock<Mutex<TimestampedModels>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+mod antigravity {
+    //! Plugin commands (`~/.gemini/config/plugins/<name>/commands/*.md` and `~/.gemini/plugins/
+    //! <name>/commands/*.md`, plus the same two paths under the repo's `.gemini/`), the same
+    //! directories `ext::scan_antigravity` already treats as a plugin's install root. On this
+    //! machine every installed plugin has only `skills/`/`references/`/`examples/` - no
+    //! `commands/` dir anywhere - so this is real scanning that currently, correctly, finds
+    //! nothing; not a hardcoded empty answer. No user command convention or model list was found
+    //! for antigravity, so both stay empty rather than curated.
+    use super::*;
+
+    pub fn discover(repo_root: &Path) -> StaticValue {
+        let mut commands = Vec::new();
+        if let Some(home) = directories::BaseDirs::new() {
+            let gemini = home.home_dir().join(".gemini");
+            commands.extend(plugin_commands(&gemini.join("config/plugins")));
+            commands.extend(plugin_commands(&gemini.join("plugins")));
+        }
+        let repo_gemini = repo_root.join(".gemini");
+        commands.extend(plugin_commands(&repo_gemini.join("config/plugins")));
+        commands.extend(plugin_commands(&repo_gemini.join("plugins")));
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands.dedup_by(|a, b| a.name == b.name);
+        StaticValue {
+            commands,
+            models: Vec::new(),
+            model_command: None,
+        }
+    }
+
+    fn plugin_commands(plugins_dir: &Path) -> Vec<CatalogCommand> {
+        let Ok(entries) = fs::read_dir(plugins_dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            out.extend(commands_in_dir(
+                &path.join("commands"),
+                CatalogSource::Plugin,
+                |stem| format!("{name}:{stem}"),
+            ));
+        }
+        out
+    }
+}
+
+mod hermes {
+    //! No user command directory or plugin/command mechanism was found for hermes - its
+    //! `skills` are a distinct, separate mechanism from a slash-command palette, so they are not
+    //! surfaced as commands here. The model list is real, from `~/.hermes/cache/
+    //! model_catalog.json`'s per-provider `models[]`. `current` is the real configured default,
+    //! `~/.hermes/config.yaml`'s `model.default`, read with a small hand-rolled scan rather than
+    //! pulling in a YAML crate for two fields (matches this codebase's existing frontmatter
+    //! parsing precedent in `ext.rs` rather than adding a new dependency for one config file).
+    //! `model_command` is `null`: `hermes model` is a documented CLI subcommand, but its own
+    //! `--help` describes an interactive OAuth-backed picker, not a one-shot chat command.
+    use super::*;
+
+    pub fn discover() -> StaticValue {
+        let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().join(".hermes")) else {
+            return StaticValue {
+                commands: Vec::new(),
+                models: Vec::new(),
+                model_command: None,
+            };
+        };
+        let models = model_catalog(&home);
+        StaticValue {
+            commands: Vec::new(),
+            models,
+            model_command: None,
+        }
+    }
+
+    fn model_catalog(home: &Path) -> Vec<CatalogModel> {
+        let Some(root) = crate::ext::read_json(&home.join("cache/model_catalog.json")) else {
+            return Vec::new();
+        };
+        let Some(providers) = root.get("providers").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for provider in providers.values() {
+            let Some(models) = provider.get("models").and_then(Value::as_array) else {
+                continue;
+            };
+            for m in models {
+                let Some(id) = m.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let label = m
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or(id);
+                out.push(CatalogModel {
+                    id: id.to_string(),
+                    label: label.to_string(),
+                    current: false,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out.dedup_by(|a, b| a.id == b.id);
+        out
+    }
+
+    /// `model:\n  default: <id>` in `~/.hermes/config.yaml`, the value the operator actually
+    /// configured - distinct from the catalog's own per-provider "default" flag, which only
+    /// marks what hermes silently falls back to when nothing was ever configured.
+    pub fn current_model() -> Option<String> {
+        let home = directories::BaseDirs::new()?.home_dir().join(".hermes");
+        let text = fs::read_to_string(home.join("config.yaml")).ok()?;
+        default_from_config_yaml(&text)
+    }
+
+    fn default_from_config_yaml(text: &str) -> Option<String> {
+        let mut lines = text.lines();
+        loop {
+            let line = lines.next()?;
+            if line.trim_end() == "model:" {
+                break;
+            }
+        }
+        for line in lines {
+            let indent = line.len() - line.trim_start().len();
+            if indent == 0 && !line.trim().is_empty() {
+                return None; // left the `model:` block without finding `default:`
+            }
+            if let Some(value) = line.trim().strip_prefix("default:") {
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                return (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn model_catalog_flattens_providers_and_prefers_a_non_empty_description_as_the_label() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir_all(dir.path().join("cache")).unwrap();
+            fs::write(
+                dir.path().join("cache/model_catalog.json"),
+                r#"{"providers":{
+                    "openrouter":{"models":[{"id":"anthropic/claude-fable-5.1","description":""}]},
+                    "nous":[{"id":"ignored, not an object"}],
+                    "custom":{"models":[{"id":"z-ai/glm-5.2","description":"default"}]}
+                }}"#,
+            )
+            .unwrap();
+            let models = model_catalog(dir.path());
+            assert_eq!(models.len(), 2);
+            assert!(
+                models.iter().any(|m| m.id == "anthropic/claude-fable-5.1"
+                    && m.label == "anthropic/claude-fable-5.1")
+            );
+            assert!(
+                models
+                    .iter()
+                    .any(|m| m.id == "z-ai/glm-5.2" && m.label == "default")
+            );
+        }
+
+        #[test]
+        fn default_from_config_yaml_reads_the_configured_default_not_the_provider() {
+            let text =
+                "model:\n  default: tencent/hy3:free\n  provider: nous\nagent:\n  max_turns: 60\n";
+            assert_eq!(
+                default_from_config_yaml(text).as_deref(),
+                Some("tencent/hy3:free")
+            );
+        }
+
+        #[test]
+        fn default_from_config_yaml_is_none_without_a_model_block() {
+            assert_eq!(default_from_config_yaml("agent:\n  max_turns: 60\n"), None);
+        }
+    }
+}
+
+mod aider {
+    //! Not installed on this development machine, and no verified evidence of its actual
+    //! slash-command set exists anywhere in this session - "nothing" is the honest answer for
+    //! commands and models here, not a curated guess from general knowledge of the CLI. The one
+    //! real thing worth reading is `~/.aider.conf.yml`'s `model:` key, when the file exists, as
+    //! the configured current model.
+    use super::*;
+
+    pub fn discover(repo_root: &Path) -> StaticValue {
+        let _ = repo_root;
+        StaticValue {
+            commands: Vec::new(),
+            models: Vec::new(),
+            model_command: None,
+        }
+    }
+
+    /// `model: <id>` at the top level of `.aider.conf.yml`, checked in the two places aider
+    /// itself reads it from: the repo root, then the home directory.
+    pub fn current_model(repo_root: &Path) -> Option<String> {
+        let home = directories::BaseDirs::new().map(|d| d.home_dir().join(".aider.conf.yml"));
+        for path in [Some(repo_root.join(".aider.conf.yml")), home]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(model) = model_from_conf(&text) {
+                return Some(model);
+            }
+        }
+        None
+    }
+
+    fn model_from_conf(text: &str) -> Option<String> {
+        text.lines().find_map(|line| {
+            let value = line.strip_prefix("model:")?.trim();
+            let value = value.trim_matches('"').trim_matches('\'');
+            (!value.is_empty()).then(|| value.to_string())
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn model_from_conf_reads_the_top_level_model_key() {
+            let text = "model: gpt-5-codex\nedit-format: diff\n";
+            assert_eq!(model_from_conf(text).as_deref(), Some("gpt-5-codex"));
+        }
+
+        #[test]
+        fn model_from_conf_strips_quotes_and_ignores_a_blank_value() {
+            assert_eq!(
+                model_from_conf("model: \"claude-sonnet-5\"\n").as_deref(),
+                Some("claude-sonnet-5")
+            );
+            assert_eq!(model_from_conf("model:\n"), None);
+            assert_eq!(model_from_conf("edit-format: diff\n"), None);
+        }
+    }
+}

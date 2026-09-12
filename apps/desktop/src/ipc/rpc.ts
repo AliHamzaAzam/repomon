@@ -5,6 +5,7 @@ import type {
   AgentChoice,
   ApprovalRule,
   BrowseResult,
+  CommandCatalog,
   Commit,
   CommitShow,
   DialogClass,
@@ -373,6 +374,8 @@ interface RpcMap {
     result: TranscriptPage;
   };
   "agent.transcript_watch": { params: TranscriptTarget & { on: boolean }; result: TranscriptPage | null };
+  // A read, cached daemon-side per (kind, repo root); see crates/repomon-daemon/src/command_catalog.rs.
+  "agent.command_catalog": { params: { lane_id: number; window?: string }; result: CommandCatalog };
   "lane.set_view": { params: { lane_id: number; view_mode: "terminal" | "conversation" | null }; result: null };
   "agent.prompt": { params: { lane_id: number; window?: string }; result: { dialog: PendingDialog | null } };
   "agent.answer": { params: { lane_id: number; window?: string; choice: number; expect_summary?: string }; result: { answered: string; sent: string[] } };

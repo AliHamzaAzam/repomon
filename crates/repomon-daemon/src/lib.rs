@@ -5,6 +5,7 @@ pub mod auto_continue;
 pub mod bytes_stream;
 /// FIRST-CHAT-OPEN INSTRUMENTATION. Self-contained; see the module docs to remove it.
 pub mod chat_open_trace;
+pub mod command_catalog;
 pub mod conn;
 pub mod ext;
 pub mod files;

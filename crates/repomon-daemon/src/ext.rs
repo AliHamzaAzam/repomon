@@ -111,12 +111,12 @@ pub fn account_config_dir(account: Option<&str>) -> Option<PathBuf> {
     }
 }
 
-fn read_json(path: &Path) -> Option<Value> {
+pub(crate) fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
 /// `enabledPlugins` from one settings file; missing file or key is just an empty map.
-fn enabled_map(settings: &Path) -> BTreeMap<String, bool> {
+pub(crate) fn enabled_map(settings: &Path) -> BTreeMap<String, bool> {
     read_json(settings)
         .as_ref()
         .and_then(|v| v.get("enabledPlugins"))
@@ -155,7 +155,7 @@ fn collect_block_scalar(lines: &[&str], key_indent: usize) -> (String, usize) {
 /// Parse the `name:`/`description:` frontmatter lines from a SKILL.md. Handles both plain
 /// single-line values and YAML block scalars (`|`, `>`, `|-`, `>-`) commonly used for multi-line
 /// descriptions.
-fn skill_frontmatter(path: &Path) -> (Option<String>, Option<String>) {
+pub(crate) fn skill_frontmatter(path: &Path) -> (Option<String>, Option<String>) {
     let Ok(text) = fs::read_to_string(path) else {
         return (None, None);
     };
@@ -224,7 +224,7 @@ fn scan_skills(dir: &Path, source: SkillSource) -> Vec<SkillInfo> {
     out
 }
 
-fn count_dir(path: &Path) -> u32 {
+pub(crate) fn count_dir(path: &Path) -> u32 {
     fs::read_dir(path)
         .map(|d| d.flatten().count() as u32)
         .unwrap_or(0)
@@ -232,7 +232,9 @@ fn count_dir(path: &Path) -> u32 {
 
 /// Installed plugin records: id -> (version, install_path). First instance wins (the cache is
 /// shared; instances differ only in scope bookkeeping we deliberately ignore).
-fn installed_plugins(claude_home: &Path) -> BTreeMap<String, (Option<String>, Option<PathBuf>)> {
+pub(crate) fn installed_plugins(
+    claude_home: &Path,
+) -> BTreeMap<String, (Option<String>, Option<PathBuf>)> {
     let mut out = BTreeMap::new();
     let Some(root) = read_json(&claude_home.join("plugins/installed_plugins.json")) else {
         return out;

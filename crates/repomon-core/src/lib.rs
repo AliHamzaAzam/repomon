@@ -5,6 +5,7 @@ pub mod agent;
 pub mod analytics;
 pub mod client;
 pub mod clipboard;
+pub mod command_catalog;
 pub mod config;
 pub mod error;
 pub mod exec;
