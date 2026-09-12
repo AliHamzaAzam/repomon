@@ -55,6 +55,58 @@ function validDialog(value: unknown): value is PendingDialog {
   const dialog = value as PendingDialog;
   return typeof dialog.question === "string" && Array.isArray(dialog.options) && dialog.options.every((option) => typeof option.text === "string");
 }
+
+function optionLabel(option: PendingDialog["options"][number]): string {
+  return option.text.replace(/\.\s*$/, "");
+}
+function PendingDecision(props: { dialog: PendingDialog; busy: boolean; onAnswer: (index: number) => void }) {
+  const optionRefs: (HTMLButtonElement | undefined)[] = [];
+  const [focusedIndex, setFocusedIndex] = createSignal(0);
+  let lastQuestion: string | undefined;
+  createEffect(() => {
+    if (props.dialog.question === lastQuestion) return;
+    lastQuestion = props.dialog.question;
+    const start = props.dialog.selected ?? 0;
+    setFocusedIndex(start);
+    optionRefs[start]?.focus();
+  });
+  const move = (delta: number) => {
+    const count = props.dialog.options.length;
+    const next = (focusedIndex() + delta + count) % count;
+    setFocusedIndex(next);
+    optionRefs[next]?.focus();
+  };
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") { event.preventDefault(); move(1); }
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") { event.preventDefault(); move(-1); }
+    else if (event.key === "Enter") { event.preventDefault(); props.onAnswer(focusedIndex()); }
+    else if (/^[1-9]$/.test(event.key)) {
+      const index = Number(event.key) - 1;
+      if (index < props.dialog.options.length) { event.preventDefault(); setFocusedIndex(index); props.onAnswer(index); }
+    }
+  }
+  return <div class="conversation-dialog">
+    <p class="conversation-question"><Show when={props.dialog.title}>{(title) => <span class="conversation-question-title">{title()}: </span>}</Show>{props.dialog.question}</p>
+    <Show when={props.dialog.body?.length}><pre class="conversation-raw conversation-excerpt">{props.dialog.body?.join("\n")}</pre></Show>
+    <div class="conversation-dialog-options" role="group" aria-label="Choose one" onKeyDown={onKeyDown}>
+      <For each={props.dialog.options}>{(option, index) => <button
+        ref={(el) => { optionRefs[index()] = el; }}
+        type="button"
+        tabIndex={focusedIndex() === index() ? 0 : -1}
+        class="conversation-dialog-option focus-ring"
+        disabled={props.busy}
+        onFocus={() => setFocusedIndex(index())}
+        onClick={() => props.onAnswer(index())}
+      >
+        <span class="conversation-dialog-option-key" aria-hidden="true">{index() + 1}</span>
+        <span class="conversation-dialog-option-text">
+          <span class="conversation-dialog-option-label">{optionLabel(option)}</span>
+          <Show when={option.description}>{(description) => <span class="conversation-dialog-option-description">{description()}</span>}</Show>
+        </span>
+      </button>}</For>
+    </div>
+  </div>;
+}
 function TextBody(props: { text: string; laneId: number }) {
   const parsed = createMemo(() => { try { return parseMarkdown(props.text); } catch { return null; } });
   return <ErrorBoundary fallback={<pre class="conversation-raw">{props.text}</pre>}><Show when={parsed()} fallback={<pre class="conversation-raw">{props.text}</pre>}>{(value) => <MarkdownRenderer ast={value().ast} laneId={props.laneId} />}</Show></ErrorBoundary>;
@@ -553,13 +605,7 @@ export default function ConversationPane(props: { target: TranscriptTarget; visi
       </div>
     </Show>
     <footer class="conversation-footer" classList={{"is-pending": !!dialog()}}>
-      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><Show when={props.onCommand}><button class="conversation-controls focus-ring" onClick={() => void controls()}>Agent controls</button></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <div class="conversation-dialog">
-        <div class="min-w-0 flex-1">
-          <p class="conversation-question"><Show when={pending().title}><span>{pending().title}: </span></Show>{pending().question}</p>
-          <Show when={pending().body?.length}><pre class="conversation-raw">{pending().body?.join("\n")}</pre></Show>
-        </div>
-        <div class="flex flex-wrap gap-2"><For each={pending().options}>{(option, index) => <button class="focus-ring rounded border border-line bg-surface px-3 py-1.5 text-xs hover:border-attention disabled:opacity-50" disabled={busy()} onClick={() => void answer(index())}>{option.text}</button>}</For></div>
-      </div>}</Show>
+      <Show when={dialog()} fallback={<div class="conversation-terminal-line"><Show when={transcript.activity() && activityLabel(transcript.activity()!)}>{(label) => <span class="conversation-activity">{label()}</span>}</Show><Show when={props.lane}><span class="conversation-compact-context"><strong>{props.lane!.repo.label ?? props.lane!.repo.name}</strong><span>{props.lane!.worktree.branch ?? "Detached HEAD"}</span><Show when={props.lane!.state?.dirty}><span>{props.lane!.state.dirty.staged} staged · {props.lane!.state.dirty.unstaged} unstaged</span></Show></span></Show><Show when={props.onCommand}><button class="conversation-controls focus-ring" onClick={() => void controls()}>Agent controls</button></Show><button class="conversation-tail focus-ring" onClick={props.onTerminal} aria-label="Expand terminal">Open live terminal <IconChevronRight size={12} /></button></div>}>{(pending) => <PendingDecision dialog={pending()} busy={busy()} onAnswer={(index) => void answer(index)} />}</Show>
       <Show when={error()}><p class="text-xs text-fault px-5 py-2" role="alert">{error()}</p></Show>
       <AttachmentComposer kind={props.kind} model={transcript.activity()?.model ?? model()} disabled={!!dialog()} busy={busy()} onSend={send}
         catalog={catalog()} catalogError={!!catalogError()} catalogLoading={catalogLoading()} onSelectModel={(id) => void selectModel(id)}

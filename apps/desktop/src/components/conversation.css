@@ -64,9 +64,17 @@
 .conversation-controls + .conversation-tail { margin-left:0; }
 .conversation-tail { display:flex; align-items:center; gap:6px; margin-left:auto; flex-shrink:0; font-size:10px; color:var(--muted); }
 .conversation-tail:hover { color:var(--foreground); }
-.conversation-dialog { display:flex; flex-wrap:wrap; align-items:center; gap:10px 24px; padding:12px 16px; max-height:220px; max-width:var(--conversation-track); margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); user-select:text; }
-.conversation-question { font:12px/1.6 var(--font-sans); margin:0; }
-.conversation-dialog > div:first-child { min-width:180px; }
+.conversation-dialog { display:flex; flex-direction:column; gap:10px; padding:14px 16px; max-height:min(60vh, 420px); max-width:var(--conversation-track); margin:0 auto 10px; overflow:auto; background:var(--surface); border-top:2px solid var(--attention); user-select:text; }
+.conversation-question { font:13px/1.5 var(--font-sans); font-weight:600; color:var(--foreground); margin:0; }
+.conversation-question-title { font-weight:500; color:var(--muted); }
+.conversation-dialog-options { display:flex; flex-direction:column; gap:6px; }
+.conversation-dialog-option { display:flex; align-items:flex-start; gap:10px; width:100%; text-align:left; padding:8px 10px; border-radius:6px; border:1px solid var(--line); background:var(--surface); cursor:pointer; }
+.conversation-dialog-option:hover:not(:disabled) { border-color:var(--attention); background:var(--raised); }
+.conversation-dialog-option:disabled { opacity:.5; cursor:default; }
+.conversation-dialog-option-key { flex:none; font:10px var(--font-mono); color:var(--muted); padding-top:2px; min-width:12px; }
+.conversation-dialog-option-text { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.conversation-dialog-option-label { font:13px/1.4 var(--font-sans); color:var(--foreground); }
+.conversation-dialog-option-description { font:11px/1.5 var(--font-sans); color:var(--muted); }
 .conversation-compose { max-width:var(--conversation-track); margin-inline:auto; }
 .conversation-reply { position:relative; width:100%; background:var(--surface); border:1px solid var(--line); }
 .conversation-reply:focus-within { border-color:var(--signal); }
