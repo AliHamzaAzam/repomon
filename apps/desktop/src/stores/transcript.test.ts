@@ -32,6 +32,13 @@ describe("orderRows", () => {
     const current = [row("a")];
     expect(orderRows(current, ["ghost", "a"]).map((r) => r.key)).toEqual(["a"]);
   });
+  it("keeps a row that drops out of one order snapshot from jumping above settled history", () => {
+    // u2 was seated by an earlier order (it's in everLive) but this tick's order omits it - a
+    // daemon-side hiccup mid-handoff, not a demotion to older, paged-in history.
+    const current = [row("u1"), row("a1"), row("u2")];
+    const ordered = orderRows(current, ["u1", "a1"], new Set(["u1", "a1", "u2"]));
+    expect(ordered.map((r) => r.key)).toEqual(["u1", "a1", "u2"]);
+  });
 });
 
 describe("createTranscript, end to end", () => {

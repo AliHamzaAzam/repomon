@@ -16,12 +16,14 @@ export function attachmentTextParts(text: string): AttachmentTextPart[] {
       prose.push(line); continue;
     }
     if (!fence && line.startsWith("Attached file: ")) {
-      try {
-        const path: unknown = JSON.parse(line.slice("Attached file: ".length));
-        if (typeof path === "string" && /^(\/|~\/|[A-Za-z]:[\\/]|\\\\)/.test(path) && !/[\r\n\0]/.test(path)) {
-          flush(); parts.push({ attachment: attachmentFromPath(path) }); continue;
-        }
-      } catch { /* Preserve incomplete streaming and malformed delivery lines. */ }
+      const rest = line.slice("Attached file: ".length);
+      // Some agents echo the composer's own JSON-quoted line back into their transcript with the
+      // quotes stripped; fall back to the bare path so that round trip still renders a thumbnail.
+      let path: unknown;
+      try { path = JSON.parse(rest); } catch { path = rest; }
+      if (typeof path === "string" && /^(\/|~\/|[A-Za-z]:[\\/]|\\\\)/.test(path) && !/[\r\n\0]/.test(path)) {
+        flush(); parts.push({ attachment: attachmentFromPath(path) }); continue;
+      }
     }
     prose.push(line);
   }

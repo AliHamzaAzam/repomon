@@ -17,7 +17,7 @@
 .conversation-skeleton-row { display:flex; flex-direction:column; gap:8px; }
 .conversation-skeleton-line { height:10px; border-radius:.25rem; background:var(--raised); animation:conversation-skeleton-pulse 1.4s ease-in-out infinite; }
 @keyframes conversation-skeleton-pulse { 50% { opacity:.5; } }
-.conversation-ledger { width:100%; max-width:var(--conversation-width); padding:28px var(--conversation-edge) 40px; margin-inline:auto; user-select:text; }
+.conversation-ledger { width:100%; max-width:var(--conversation-width); padding:28px var(--conversation-edge) 64px; margin-inline:auto; user-select:text; }
 .conversation-row { display:grid; grid-template-columns:var(--conversation-gutter) minmax(0,1fr) var(--conversation-gutter); column-gap:var(--conversation-gap); margin-bottom:28px; }
 .conversation-gutter { display:flex; flex-direction:column; gap:3px; align-content:start; font:10px/1.5 var(--font-mono); color:var(--muted); padding-top:3px; min-width:0; }
 .conversation-gutter span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -55,7 +55,7 @@
 .conversation-history-boundary { font-size:11px; color:var(--muted); margin:0 calc(var(--conversation-gutter) + var(--conversation-gap)) 24px; }
 .conversation-footer { flex:none; width:100%; max-width:var(--conversation-width); margin-inline:auto; background:var(--background); padding:0 calc(var(--conversation-edge) + var(--conversation-gutter) + var(--conversation-gap)) 16px; }
 .conversation-terminal-line { display:flex; align-items:baseline; gap:16px; max-width:var(--conversation-track); margin-inline:auto; padding:8px 0; }
-.conversation-activity { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:10px/1.5 var(--font-mono); color:var(--muted); }
+.conversation-activity { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:10px/1.5 var(--font-mono); color:var(--signal); }
 .conversation-compact-context { display:flex; align-items:baseline; gap:10px; min-width:0; font-size:10px; color:var(--muted); }
 .conversation-compact-context strong { font-weight:500; color:var(--foreground); }
 .conversation-compact-context > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
