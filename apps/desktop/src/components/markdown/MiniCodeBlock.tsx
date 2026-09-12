@@ -10,6 +10,7 @@ export interface MiniCodeBlockProps {
 }
 
 export default function MiniCodeBlock(props: MiniCodeBlockProps) {
+  let wrapperRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
   let view: EditorView | null = null;
   const [copied, setCopied] = createSignal(false);
@@ -29,36 +30,57 @@ export default function MiniCodeBlock(props: MiniCodeBlockProps) {
     let active = true;
     const lang = props.language?.trim().toLowerCase() || "";
 
-    if (!lang || !containerRef) {
+    if (!lang || !containerRef || !wrapperRef) {
       return;
     }
 
-    void resolveLanguageSupport("file." + lang, null, lang).then((support) => {
-      if (!active || !containerRef || !support) return;
+    const build = () => {
+      void resolveLanguageSupport("file." + lang, null, lang).then((support) => {
+        if (!active || !containerRef || !support) return;
 
-      try {
-        const state = EditorState.create({
-          doc: props.code,
-          extensions: [
-            EditorState.readOnly.of(true),
-            EditorView.editable.of(false),
-            EditorView.lineWrapping,
-            support,
-            appTheme,
-            syntaxHighlighting(highlightStyle),
-          ],
-        });
+        try {
+          const state = EditorState.create({
+            doc: props.code,
+            extensions: [
+              EditorState.readOnly.of(true),
+              EditorView.editable.of(false),
+              EditorView.lineWrapping,
+              support,
+              appTheme,
+              syntaxHighlighting(highlightStyle),
+            ],
+          });
 
-        view = new EditorView({
-          state,
-          parent: containerRef,
-        });
-        setCmReady(true);
-      } catch {
+          view = new EditorView({
+            state,
+            parent: containerRef,
+          });
+          setCmReady(true);
+        } catch {
 
-        setCmReady(false);
-      }
-    });
+          setCmReady(false);
+        }
+      });
+    };
+
+    // A real CodeMirror instance is expensive; building one per code block regardless of
+    // visibility is what stutters a long ledger's initial open. The <pre> fallback below already
+    // shows the real text, so nothing is missing before this fires.
+    if (typeof IntersectionObserver === "undefined") {
+      build();
+    } else {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            observer.disconnect();
+            build();
+          }
+        },
+        { rootMargin: "600px 0px" },
+      );
+      observer.observe(wrapperRef);
+      onCleanup(() => observer.disconnect());
+    }
 
     onCleanup(() => {
       active = false;
@@ -70,7 +92,7 @@ export default function MiniCodeBlock(props: MiniCodeBlockProps) {
   });
 
   return (
-    <div class="group relative my-4 overflow-hidden rounded-md border border-line bg-surface/70">
+    <div ref={wrapperRef} class="group relative my-4 overflow-hidden rounded-md border border-line bg-surface/70">
 
       <div class="flex h-7 items-center justify-between border-b border-line/60 bg-raised/30 px-3 font-mono text-[11px] text-muted">
         <span>{props.language || "text"}</span>

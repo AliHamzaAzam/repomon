@@ -19,6 +19,12 @@ describe("attachment delivery display", () => {
       { text:"Check the\n" }, { attachment:{ path, name:"shot.png" } }, { text:"\nlayout please" },
     ]);
   });
+  it("falls back to a bare path when an agent echoes the line back with its quotes stripped", () => {
+    const path = "/Users/me/Application Support/attachment-image.png";
+    expect(attachmentTextParts(`Attached file: ${path}\n\nWhat do you see?`)).toEqual([
+      { attachment: { path, name: "attachment-image.png" } }, { text: "\nWhat do you see?" },
+    ]);
+  });
   it("recognizes Windows paths but never web URLs", () => {
     const path = 'C:\\Users\\me\\photo.png';
     expect(attachmentTextParts(`Attached file: ${JSON.stringify(path)}`)).toEqual([{attachment:{path,name:"photo.png"}}]);

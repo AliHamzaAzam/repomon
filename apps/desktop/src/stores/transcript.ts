@@ -36,13 +36,18 @@ export function mergeTranscript(current: ConversationRow[], incoming: Conversati
 // suffix after whatever loaded (older-page) rows are absent from it. Never a timestamp sort -
 // ordered upserts alone can't seat a newly-ingested user row before an assistant partial that
 // answered it, since the partial kept an earlier arrival slot; `order` is what can.
-export function orderRows(rows: ConversationRow[], order: string[]): ConversationRow[] {
+// `everLive` distinguishes a row order has never mentioned (genuinely older, paged-in history -
+// belongs leading) from one that dropped out of this one order snapshot after previously being in
+// it (a daemon-side hiccup mid-turn, e.g. a pending input handed off between representations) -
+// the latter keeps its seated position instead of jumping back above already-settled history.
+export function orderRows(rows: ConversationRow[], order: string[], everLive?: ReadonlySet<string>): ConversationRow[] {
   const byId = new Map(rows.map((row) => [row.key, row]));
   const inOrder = new Set(order);
-  const leading = rows.filter((row) => !inOrder.has(row.key));
+  const leading = rows.filter((row) => !inOrder.has(row.key) && !everLive?.has(row.key));
+  const stale = rows.filter((row) => !inOrder.has(row.key) && everLive?.has(row.key));
   const suffix: ConversationRow[] = [];
   for (const id of order) { const row = byId.get(id); if (row) suffix.push(row); }
-  return [...leading, ...suffix];
+  return [...leading, ...suffix, ...stale];
 }
 
 /// One watch per mounted pane. Reconciliation keeps Solid's row proxies and DOM nodes alive
@@ -71,6 +76,9 @@ export function createTranscript(target: () => TranscriptTarget | null) {
   const rebuildIndex = () => { indexByKey = new Map(state.rows.map((row, i) => [row.key, i])); };
   let lastOrderKey: string | undefined;
   const orderKeyOf = (order: string[]) => order.join(" ");
+  // Every id this pane's live watch has ever placed in an `order` array - see orderRows' `everLive`
+  // param. Reset alongside lastOrderKey whenever the pane identity changes.
+  let seenInOrder = new Set<string>();
 
   const apply = (rows: ConversationRow[], removed: string[] = [], prepend = false, order?: string[]): boolean => {
     const structural = prepend || removed.length > 0 || rows.some((row) => !indexByKey.has(row.key));
@@ -80,7 +88,11 @@ export function createTranscript(target: () => TranscriptTarget | null) {
     let changed = rows.length > 0 || removed.length > 0;
     if (structural) {
       let merged = mergeTranscript([...state.rows], rows, removed, prepend);
-      if (order && !prepend) { merged = orderRows(merged, order); lastOrderKey = orderKeyOf(order); }
+      if (order && !prepend) {
+        for (const id of order) seenInOrder.add(id);
+        merged = orderRows(merged, order, seenInOrder);
+        lastOrderKey = orderKeyOf(order);
+      }
       setState("rows", reconcile(merged, { key: "key" }));
       rebuildIndex();
     } else {
@@ -88,7 +100,8 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       if (order) {
         const key = orderKeyOf(order);
         if (key !== lastOrderKey) {
-          setState("rows", reconcile(orderRows([...state.rows], order), { key: "key" }));
+          for (const id of order) seenInOrder.add(id);
+          setState("rows", reconcile(orderRows([...state.rows], order, seenInOrder), { key: "key" }));
           rebuildIndex();
           changed = true;
         }
@@ -150,6 +163,7 @@ export function createTranscript(target: () => TranscriptTarget | null) {
       setState("rows", cachedPage?.rows ?? []);
       indexByKey = new Map((cachedPage?.rows ?? []).map((row, i) => [row.key, i]));
       lastOrderKey = undefined;
+      seenInOrder = new Set();
       setNextBefore(cachedPage?.nextBefore ?? null);
       setRemaining(cachedPage?.remaining ?? null);
       setPagedOnce(false);
