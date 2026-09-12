@@ -48,11 +48,72 @@ fn codex_chrome(line: &str) -> bool {
 /// handled structurally alongside every other CLI's; these are the decorations left over, and
 /// none of them has a counterpart in the durable brain transcript.
 fn antigravity_chrome(line: &str) -> bool {
+    // The running-turn frame: a braille spinner cell, a verb, and the cancel hint with the
+    // model name right-aligned onto the same row. It carries none of the timer-and-counter
+    // grammar `conversation_activity::timed_line` recognises, so nothing caught it and it was
+    // seated as assistant prose.
+    if line.starts_with(|c: char| ('\u{2800}'..='\u{28ff}').contains(&c)) {
+        return true;
+    }
+    if line.to_lowercase().contains("esc to cancel") {
+        return true;
+    }
     line.starts_with('▸')
         // A banner row is the half-block logo on the left with the account, model or working
         // directory printed to its right, so match the row by the glyph that opens it.
         || line.starts_with(['▄', '▀', '█', '▌', '▐'])
         || line.starts_with("Antigravity CLI ")
+}
+
+/// OpenCode renders its conversation and a status sidebar as columns of one grid, so a sidebar
+/// row shares every line with the conversation. The columns are separated by a wide run of
+/// spaces that ordinary prose does not contain, which is what splits them. A fenced code block
+/// with deep indentation could in principle be cut short here; the sidebar is the common case
+/// and a truncated preview is recoverable, where a preview full of sidebar text is not.
+const OPENCODE_COLUMN_GAP: usize = 6;
+
+fn opencode_conversation_column(line: &str) -> &str {
+    let mut run = 0usize;
+    for (at, c) in line.char_indices() {
+        if c == ' ' {
+            run += 1;
+            continue;
+        }
+        if run >= OPENCODE_COLUMN_GAP && at > run && line[..at - run].trim().len() > 2 {
+            return &line[..at - run];
+        }
+        run = 0;
+    }
+    line
+}
+
+/// The composer and status bar OpenCode paints under the conversation: a rule drawn from `╹`
+/// and `▀`, the gutter rows of the empty input above it, and the status line below. The gutter
+/// glyph is the same one that marks a user prompt, so the composer is identified by position
+/// (the run of gutter rows that reaches the rule) rather than by its content.
+fn opencode_body(plain: &str) -> String {
+    let lines: Vec<&str> = plain.lines().map(opencode_conversation_column).collect();
+    let rule = lines.iter().rposition(|l| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().all(|c| matches!(c, '╹' | '▀' | ' '))
+    });
+    let mut end = rule.unwrap_or(lines.len());
+    while end > 0 {
+        let t = lines[end - 1].trim();
+        if t.starts_with('┃') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    lines[..end].join("\n")
+}
+
+/// OpenCode's per-turn decorations: the thinking time above an answer and the model footer
+/// below it. Neither has a counterpart in its message table.
+fn opencode_chrome(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("+ Thought:") || t.starts_with('▣')
 }
 
 /// Decorations this CLI draws around its conversation, which are never content. One definition
@@ -62,11 +123,18 @@ fn kind_chrome(kind: &str, line: &str) -> bool {
         || conversation_activity::timed_line(kind, line).is_some()
         || (kind == "codex" && codex_chrome(line.trim()))
         || (kind == "antigravity" && antigravity_chrome(line.trim()))
+        || (kind == "opencode" && opencode_chrome(line))
 }
 
 /// Preserve excerpt content while removing the same structured status decorations as prose.
 pub fn pane_content(kind: &str, pane: &str) -> String {
-    super::conversation_queue::without_queue(kind, pane)
+    let plain = super::conversation_queue::without_queue(kind, pane);
+    let plain = if kind == "opencode" {
+        opencode_body(&plain)
+    } else {
+        plain
+    };
+    plain
         .lines()
         .filter(|line| !kind_chrome(kind, line))
         .collect::<Vec<_>>()
@@ -75,7 +143,13 @@ pub fn pane_content(kind: &str, pane: &str) -> String {
 
 /// Strip only recognized CLI decorations. Unknown kinds preserve the raw plain pane tail.
 pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
-    let plain = super::repomail::split(&super::conversation_queue::without_queue(kind, pane), None)
+    let source = super::conversation_queue::without_queue(kind, pane);
+    let source = if kind == "opencode" {
+        opencode_body(&source)
+    } else {
+        source
+    };
+    let plain = super::repomail::split(&source, None)
         .into_iter()
         .filter(|row| row.mail.is_none())
         .map(|row| row.text)
@@ -84,7 +158,10 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
     // Antigravity's pane is as structured as Codex's: a banner, rules between turns, a "> "
     // prompt echo and a thinking disclosure. Parsing it is what stops a live preview from being
     // a raw dump of the banner and every earlier answer.
-    let supported = matches!(kind, "claude-code" | "codex" | "antigravity");
+    // OpenCode is a grid, not a stream, but it is still structured: a gutter for prompts, a
+    // thinking row, an answer, and a model footer per turn. Parsing it is what stops its
+    // preview from being an opaque dump of the whole pane.
+    let supported = matches!(kind, "claude-code" | "codex" | "antigravity" | "opencode");
     let mut prose = Vec::new();
     let mut tools: Vec<TranscriptItem> = Vec::new();
     let mut codex_tool_output = false;
@@ -110,6 +187,7 @@ pub fn pane_items(kind: &str, pane: &str) -> Vec<TranscriptItem> {
             if line.starts_with('❯')
                 || line.starts_with('›')
                 || (kind == "antigravity" && line.starts_with('>'))
+                || (kind == "opencode" && line.starts_with('┃'))
             {
                 let input = line.chars().skip(1).collect::<String>();
                 let placeholder = kind == "codex"
@@ -797,48 +875,122 @@ mod tests {
         assert!(preview.text.contains("A second line"));
     }
 
-    /// PARKED REPRODUCTION of the OpenCode terminal-excerpt defect, deliberately failing.
-    ///
-    /// Traced on lane-81-4: every `chat_open` resolved `source=durable`, so binding is not
-    /// involved. When the durable row lands BEFORE the pane preview is captured (OpenCode
-    /// flushed while the pane was still painting, or the WAL fingerprint moved first), the
-    /// pairing at the top of `update` runs against an empty `pending` and consumes nothing.
-    /// The preview is then seated afterwards with no durable row left to claim it, and it
-    /// stays as a "Terminal excerpt" row with speaker "terminal" for the rest of the session.
-    ///
-    /// The reverse order works and is covered by
-    /// `partial_updates_and_final_replace_one_identity_without_resurrection`. Run with
-    /// `--ignored` to see the defect; it is parked, not fixed, because the correct rule is a
-    /// content-redundancy test and delaying the preview instead would reintroduce the blank
-    /// wait the conversation view exists to avoid.
+    /// The running-turn frame was seated as an assistant message: the spinner row itself, read
+    /// as prose, with the streaming marker under it. Its shape is a braille cell plus a verb
+    /// plus the cancel hint and model name, with none of the timer-and-counter grammar
+    /// `conversation_activity::timed_line` recognises, so nothing was catching it.
     #[test]
-    #[ignore]
-    fn opencode_durable_before_preview_orphans_the_excerpt_unfixed() {
-        let pane = "  write a poem\n\n     Code compiles, tests pass green,\n     Deploy succeeds, the pipeline clean.\n\n  Build - Nemotron";
-        let durable = |n: usize| -> Vec<TranscriptItem> {
-            (0..n)
-                .map(|i| {
-                    let kind = if i % 2 == 0 { "user" } else { "assistant" };
-                    let mut it = TranscriptItem::new(kind, format!("durable row {i}"), None);
-                    it.id = Some(format!("/db:msg{i}"));
-                    it
-                })
-                .collect()
-        };
-        let mut stream = ConversationStream::default();
-        stream.update(durable(17), Vec::new(), false);
-        // The durable row lands first; `pending` is empty so nothing pairs with it.
-        stream.update(durable(19), Vec::new(), true);
-        // Only now is the pane captured, showing the same reply.
-        stream.update(durable(19), pane_items("opencode", pane), true);
-        let quiet = stream.update(durable(19), pane_items("opencode", pane), false);
+    fn antigravity_running_turn_chrome_is_never_seated_as_prose() {
+        let pane = include_str!("fixtures/antigravity_suggestion_chips.txt");
+        let items = pane_items("antigravity", pane);
+        for item in &items {
+            for banned in ["Loading", "esc to cancel", "Gemini 3.8 Flash"] {
+                assert!(
+                    !item.text.contains(banned),
+                    "{banned:?} seated as content: {:?}",
+                    item.text
+                );
+            }
+        }
+        // The answer that was actually in flight is still previewed.
         assert!(
-            !quiet
+            items.iter().any(|i| i.text.contains("The tide rolls in")),
+            "the in-flight answer must still preview: {items:#?}"
+        );
+        // The same rows are chrome for the excerpt that backs an unbound window.
+        let excerpt = pane_content("antigravity", pane);
+        assert!(!excerpt.contains("esc to cancel"), "{excerpt}");
+        assert!(!excerpt.contains("Loading"), "{excerpt}");
+    }
+
+    /// OpenCode previews were an opaque dump of the whole pane: banner, sidebar, every past
+    /// turn. Both fixtures are the operator's real window, one with the status sidebar open and
+    /// one without, so the column split is exercised either way.
+    #[test]
+    fn real_opencode_panes_preview_only_the_current_turn() {
+        for (name, pane, answer) in [
+            (
+                "sidebar",
+                include_str!("fixtures/opencode_sidebar_v0.txt"),
+                "Code compiles, tests pass green,",
+            ),
+            (
+                "no sidebar",
+                include_str!("fixtures/opencode_turns_v0.txt"),
+                "Keyboard clacks, the logic bends,",
+            ),
+        ] {
+            let items = pane_items("opencode", pane);
+            let prose: Vec<_> = items
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i.kind.as_deref(),
+                        Some("assistant") | Some("terminal_block")
+                    )
+                })
+                .collect();
+            assert_eq!(prose.len(), 1, "{name}: {items:#?}");
+            let preview = prose[0];
+            // A pane we can parse is a message, not an opaque terminal dump.
+            assert_eq!(preview.kind.as_deref(), Some("assistant"), "{name}");
+            assert!(preview.text.contains(answer), "{name}: {:?}", preview.text);
+            for banned in [
+                "+ Thought:",            // the per turn thinking row
+                "Build \u{b7} Nemotron", // the per turn model footer
+                "Context",               // sidebar
+                "tokens",                // sidebar
+                "OpenCode",              // status bar
+                "ctrl+p",                // status bar
+            ] {
+                assert!(
+                    !preview.text.contains(banned),
+                    "{name}: preview still carries {banned:?}: {:?}",
+                    preview.text
+                );
+            }
+        }
+    }
+
+    /// The OpenCode terminal-excerpt defect, traced on lane-81-4. Every `chat_open` resolved
+    /// `source=durable`, so binding was not involved. The failing order is the durable row
+    /// landing BEFORE the pane preview is captured: the pairing at the top of `update` runs
+    /// against an empty `pending` and consumes nothing, and the preview is seated afterwards
+    /// with no durable row left to claim it.
+    ///
+    /// Parsing the pane is what dissolves it. The preview is now an `assistant` item carrying
+    /// only the current turn, so the durable-answer strip empties it the moment that answer is
+    /// already known, and an orphan can never be seated, in either arrival order.
+    #[test]
+    fn an_opencode_answer_already_durable_is_never_seated_as_an_excerpt() {
+        let pane = include_str!("fixtures/opencode_turns_v0.txt");
+        let answer = "Keyboard clacks, the logic bends,";
+        let mut durable = TranscriptItem::new(
+            "assistant",
+            "Keyboard clacks, the logic bends,\nA feature born, a bug depends.\n\
+             Push to prod, the metrics rise\u{2014}\nCode lives on, it never dies.",
+            None,
+        );
+        durable.id = Some("/db:answer".into());
+        let mut stream = ConversationStream::default();
+        stream.update(Vec::new(), Vec::new(), false);
+        // The durable row lands first, so `pending` is empty and nothing pairs with it.
+        stream.update(vec![durable.clone()], Vec::new(), true);
+        // Only now is the pane captured, still showing that same answer.
+        let update = stream.update(vec![durable.clone()], pane_items("opencode", pane), true);
+        assert!(
+            !update
                 .items
                 .iter()
-                .chain(stream.last_live.iter())
                 .any(|i| i.kind.as_deref() == Some("terminal_block")),
-            "a terminal excerpt outlived the durable rows that already cover it"
+            "an opaque excerpt was seated: {:#?}",
+            update.items
+        );
+        let quiet = stream.update(vec![durable], pane_items("opencode", pane), false);
+        assert!(
+            !quiet.items.iter().any(|i| i.text.contains(answer)),
+            "the already durable answer was previewed again: {:#?}",
+            quiet.items
         );
     }
 

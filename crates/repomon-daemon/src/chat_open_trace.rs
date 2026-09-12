@@ -184,6 +184,23 @@ pub fn install() {
     repomon_core::store::set_slow_call_hook(store_wait);
 }
 
+/// A submitted input still pinned long after it was sent. Consumption needs `same_source` and
+/// either a matching mail id or (`after_send` and equal text); this names which of those refused
+/// the best candidate row, so a stuck brief identifies its own cause. One line per ticket.
+pub fn input_stuck(
+    age_ms: i64,
+    user_rows: usize,
+    same_source: bool,
+    after_send: bool,
+    text_equal: bool,
+    chars: usize,
+) {
+    stall(format_args!(
+        "input_stuck age_ms={age_ms} user_rows={user_rows} same_source={same_source} \
+         after_send={after_send} text_equal={text_equal} chars={chars}"
+    ));
+}
+
 /// Built once per daemon start, on the first conversation that has costed events to price.
 pub fn price_table(since: Instant, models: usize) {
     write(format_args!(
