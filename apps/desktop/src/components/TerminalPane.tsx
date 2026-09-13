@@ -1065,9 +1065,8 @@ export default function TerminalPane(props: TerminalPaneProps) {
         </Show>
         <div class="ml-2 flex shrink-0 items-center gap-2">
           <Show when={!props.shell && !finding()}>
-            <button class="pointer-events-auto focus-ring text-[10px] normal-case tracking-normal hover:text-foreground" title="Use the default view from Settings > Agents" onClick={() => setView(null)}>Use default</button>
-            <ViewToggle value={view()} onChange={setView} />
             <Show when={view() === "conversation"}><TranscriptDetailToggle value={detail()} onChange={setDetail} /></Show>
+            <ViewToggle value={view()} onChange={setView} />
           </Show>
         </div>
       </div>
