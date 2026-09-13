@@ -32,12 +32,24 @@ describe("orderRows", () => {
     const current = [row("a")];
     expect(orderRows(current, ["ghost", "a"]).map((r) => r.key)).toEqual(["a"]);
   });
-  it("keeps a row that drops out of one order snapshot from jumping above settled history", () => {
+  it("keeps a row that drops out of one order snapshot at the position it already occupies", () => {
     // u2 was seated by an earlier order (it's in everLive) but this tick's order omits it - a
-    // daemon-side hiccup mid-handoff, not a demotion to older, paged-in history.
-    const current = [row("u1"), row("a1"), row("u2")];
+    // daemon-side hiccup mid-handoff, not a demotion to older, paged-in history. "Keeps its
+    // seated position" means the index it already occupies relative to the rows around it: u2
+    // stays between u1 and a1. The stale row starts MID-list because that is the only
+    // arrangement that can tell "kept its position" apart from "appended to the end" - and
+    // appending is what promoted a Friday message to the newest slot in the operator's Chat.
+    const current = [row("u1"), row("u2"), row("a1")];
     const ordered = orderRows(current, ["u1", "a1"], new Set(["u1", "a1", "u2"]));
-    expect(ordered.map((r) => r.key)).toEqual(["u1", "a1", "u2"]);
+    expect(ordered.map((r) => r.key)).toEqual(["u1", "u2", "a1"]);
+  });
+  it("seats a stale row after the leading block it already followed, without merging into it", () => {
+    // Two rows order has never named: older-1 is paged-in history (leading), stale-1 dropped out
+    // of an order that once carried it. They are different classes and must not collapse into
+    // one block - stale-1 stays where it sits, below older-1 and above live-1.
+    const current = [row("older-1"), row("stale-1"), row("live-1")];
+    const ordered = orderRows(current, ["live-1"], new Set(["live-1", "stale-1"]));
+    expect(ordered.map((r) => r.key)).toEqual(["older-1", "stale-1", "live-1"]);
   });
 });
 
@@ -112,6 +124,63 @@ describe("createTranscript, end to end", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(transcript.activity()?.elapsed_seconds).toBe(2);
     expect(transcript.revision()).toBe(before);
+    dispose();
+  });
+
+  it("drops a live preview the re-attached watch no longer names instead of seating it beside the durable row that replaced it", async () => {
+    // A turn can end without ever writing its durable row - a usage limit, an interrupt, an auth
+    // failure, a crash. The daemon stamps `partial = active.then_some(true)`, so the pane preview
+    // it leaves behind has `partial` absent and kind "assistant": it matched neither half of the
+    // old eviction test (partial, or a transient kind), so it outlived the watch that issued it.
+    // The next watch re-sent the same turn under its durable id and both rows rendered - the
+    // preview boxed as a pane excerpt, the durable one plain. `live:` is the daemon's namespace
+    // for rows that only exist while a watch is attached, and its serial is per-stream, so a
+    // watch can never reconcile one it did not issue itself.
+    const text = "Hi Kent, checking in. Ready for the next milestone.";
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    const watch = (items: unknown[], order: string[]) => vi.mocked(daemonCall).mockImplementation(async (method, ...args) => (
+      method === "agent.transcript_watch" && (args[0] as { on: boolean }).on ? { items, next_before: null, order } as never : null
+    ));
+    watch([
+      { id: "u1", kind: "user", role: "user", text: "Status?", at: null },
+      { id: "live:7", kind: "assistant", role: "assistant", text, at: null },
+    ], ["u1", "live:7"]);
+    const first = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(first.transcript.rows().map((r) => r.key)).toEqual(["u1", "live:7"]);
+    first.dispose();
+    // The next watch issues its own stream: the same turn, now durable, under an id of its own.
+    watch([
+      { id: "u1", kind: "user", role: "user", text: "Status?", at: null },
+      { id: "claude:abc", kind: "assistant", role: "assistant", text, at: null },
+    ], ["u1", "claude:abc"]);
+    const second = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(second.transcript.rows().map((r) => r.key)).toEqual(["u1", "claude:abc"]);
+    second.dispose();
+  });
+
+  it("keeps both copies of a prompt the operator sent twice, and any live row the watch still names", async () => {
+    // The eviction above keys on the daemon's ephemeral id namespace, never on rendered text.
+    // Two identical prompts are two real turns, and a live row the current order still names is
+    // simply the turn in flight - neither may be collapsed away.
+    vi.mocked(subscribeDaemon).mockImplementation(async () => vi.fn());
+    vi.mocked(daemonCall).mockImplementation(async (method, ...args) => (
+      method === "agent.transcript_watch" && (args[0] as { on: boolean }).on ? {
+        items: [
+          { id: "u1", kind: "user", role: "user", text: "retry the build", at: null },
+          { id: "u2", kind: "user", role: "user", text: "retry the build", at: null },
+          { id: "live:3", kind: "assistant", role: "assistant", text: "On it.", at: null, partial: true },
+        ], next_before: null, order: ["u1", "u2", "live:3"],
+      } as never : null
+    ));
+    const { transcript, dispose } = createRoot((dispose) => ({ transcript: createTranscript(() => ({ lane_id: 1, window: "lane-1" })), dispose }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transcript.rows().map((r) => r.key)).toEqual(["u1", "u2", "live:3"]);
+    expect(transcript.rows().filter((r) => r.item.text === "retry the build")).toHaveLength(2);
     dispose();
   });
 
