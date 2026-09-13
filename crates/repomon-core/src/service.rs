@@ -484,6 +484,48 @@ pub fn repomond_path() -> PathBuf {
     PathBuf::from("repomond")
 }
 
+/// The bundled executable that runs the MCP bridge. It is a second name for the daemon binary,
+/// not a second program: macOS reports a process by its executable (`comm`), so a bridge invoked
+/// as `repomond` reads as another daemon in Activity Monitor no matter what `argv[0]` says.
+pub const MCP_BRIDGE_BIN: &str = "repomond-mcp";
+
+/// Whether `path` names the MCP bridge executable, ignoring any directory and `.exe` suffix.
+pub fn is_mcp_bridge_name(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(MCP_BRIDGE_BIN))
+}
+
+/// Whether this process was started under the bridge name. `argv[0]` and the executable are both
+/// consulted so neither a rewritten argv nor a launcher that passes a bare name can hide it.
+pub fn invoked_as_mcp_bridge() -> bool {
+    let argv0 = std::env::args_os().next().map(PathBuf::from);
+    let exe = std::env::current_exe().ok();
+    [argv0, exe]
+        .into_iter()
+        .flatten()
+        .any(|path| is_mcp_bridge_name(&path))
+}
+
+/// How to launch the MCP bridge next to `daemon`: the dedicated executable when the install ships
+/// one, otherwise the daemon and its `mcp` subcommand. Installs without the bridge (a plain
+/// `cargo install`, or any config written before the rename) keep working unchanged.
+pub fn mcp_bridge_argv_beside(daemon: &Path) -> (PathBuf, &'static [&'static str]) {
+    let bridge = daemon
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(format!("{MCP_BRIDGE_BIN}{}", std::env::consts::EXE_SUFFIX)));
+    match bridge.filter(|path| path.is_file()) {
+        Some(bridge) => (bridge, &[]),
+        None => (daemon.to_path_buf(), &["mcp"]),
+    }
+}
+
+/// [`mcp_bridge_argv_beside`] for the daemon this install actually ships.
+pub fn mcp_bridge_argv() -> (PathBuf, &'static [&'static str]) {
+    mcp_bridge_argv_beside(&repomond_path())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +627,51 @@ mod tests {
         assert_eq!(parse_query_status(csv).as_deref(), Some("Ready"));
         assert_eq!(parse_query_status(""), None);
         assert_eq!(parse_query_status("\r\n"), None);
+    }
+
+    #[test]
+    fn only_the_bridge_executable_answers_to_the_bridge_name() {
+        assert!(is_mcp_bridge_name(Path::new(
+            "/Applications/Repomon.app/Contents/MacOS/repomond-mcp"
+        )));
+        assert!(is_mcp_bridge_name(Path::new(
+            "/Program Files/Repomon/repomond-mcp.exe"
+        )));
+        assert!(!is_mcp_bridge_name(Path::new("/usr/local/bin/repomond")));
+        assert!(!is_mcp_bridge_name(Path::new("/usr/local/bin/repomon")));
+        assert!(!is_mcp_bridge_name(Path::new(
+            "/usr/local/bin/repomond-mcp-backup"
+        )));
+        assert!(!is_mcp_bridge_name(Path::new("")));
+    }
+
+    #[test]
+    fn bridge_argv_prefers_the_dedicated_executable_over_the_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = dir
+            .path()
+            .join(format!("repomond{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&daemon, b"").unwrap();
+
+        // An install with no bridge beside the daemon keeps naming the subcommand, which is what
+        // every config written before the rename already says.
+        let (program, args) = mcp_bridge_argv_beside(&daemon);
+        assert_eq!(program, daemon);
+        assert_eq!(args, ["mcp"]);
+
+        let bridge = dir
+            .path()
+            .join(format!("{MCP_BRIDGE_BIN}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&bridge, b"").unwrap();
+        let (program, args) = mcp_bridge_argv_beside(&daemon);
+        assert_eq!(program, bridge);
+        assert!(args.is_empty(), "the bridge needs no subcommand: {args:?}");
+    }
+
+    #[test]
+    fn bridge_argv_tolerates_a_bare_daemon_name_with_no_directory() {
+        let (program, args) = mcp_bridge_argv_beside(Path::new("repomond"));
+        assert_eq!(program, Path::new("repomond"));
+        assert_eq!(args, ["mcp"]);
     }
 }

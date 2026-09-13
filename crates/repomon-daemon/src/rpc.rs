@@ -5235,9 +5235,8 @@ pub async fn dispatch(
             let base = orchestrator_base_command(&agent, &customs);
             let (command, session_id) = match backend {
                 crate::OrchestratorBackend::Claude => {
-                    // Build the MCP config file that points the orchestrator's `claude` at
-                    // `repomond mcp`. The server's env is authoritative for the socket +
-                    // guardrails.
+                    // Build the MCP config file that points the orchestrator's `claude` at the
+                    // MCP bridge. The server's env is authoritative for the socket + guardrails.
                     let mcp_path =
                         write_orchestrator_mcp_config(&socket, &p.autonomy, p.max_agents)
                             .map_err(internal)?;
@@ -8512,13 +8511,49 @@ fn next_agent_window(
     ))
 }
 
+/// The Codex `-c` override naming the bridge's arguments as a TOML array. The arguments are our
+/// own literals, so plain quoting is enough.
+fn codex_bridge_args_override(args: &[&str]) -> String {
+    let items: Vec<String> = args.iter().map(|arg| format!("\"{arg}\"")).collect();
+    format!("mcp_servers.repomon.args=[{}]", items.join(","))
+}
+
+/// The Hermes wrapper script that launches the bridge. It `exec`s, and an `exec` re-points the
+/// process at the named file, so the wrapper has to name the bridge executable itself - handing it
+/// the daemon plus an `mcp` argument would put the daemon's name back on the process.
+fn hermes_bridge_wrapper(program: &Path, args: &[&str]) -> String {
+    #[cfg(unix)]
+    {
+        let mut line = format!(
+            "#!/bin/sh\nexec {}",
+            shell_quote(&program.to_string_lossy())
+        );
+        for arg in args {
+            line.push(' ');
+            line.push_str(&shell_quote(arg));
+        }
+        line.push('\n');
+        line
+    }
+    #[cfg(windows)]
+    {
+        let mut line = format!("@echo off\r\n\"{}\"", program.to_string_lossy());
+        for arg in args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        line.push_str("\r\n");
+        line
+    }
+}
+
 fn write_agent_mcp_config(window: &str) -> std::io::Result<PathBuf> {
-    let repomond = repomon_core::service::repomond_path();
+    let (program, args) = repomon_core::service::mcp_bridge_argv();
     let config = json!({
         "mcpServers": {
             "repomon": {
-                "command": repomond.to_string_lossy(),
-                "args": ["mcp"],
+                "command": program.to_string_lossy(),
+                "args": args,
             }
         }
     });
@@ -8539,15 +8574,15 @@ fn attach_agent_mcp(command: String, kind: &AgentKind, mcp_config: &Path) -> Str
             shell_quote(&mcp_config.to_string_lossy())
         ),
         AgentKind::Codex => {
-            let repomond = repomon_core::service::repomond_path();
+            let (program, args) = repomon_core::service::mcp_bridge_argv();
             let command_override = format!(
                 "mcp_servers.repomon.command=\"{}\"",
-                repomond.to_string_lossy()
+                program.to_string_lossy()
             );
             format!(
                 "{command} -c {} -c {} -c {} -c {} -c {}",
                 shell_quote(&command_override),
-                shell_quote("mcp_servers.repomon.args=[\"mcp\"]"),
+                shell_quote(&codex_bridge_args_override(args)),
                 shell_quote("mcp_servers.repomon.enabled=true"),
                 shell_quote(
                     "mcp_servers.repomon.env_vars=[\"REPOMON_MCP_SOCKET\",\"REPOMON_MCP_MODE\",\"REPOMON_MCP_IDENTITY_TOKEN\"]"
@@ -8633,16 +8668,18 @@ pub(crate) fn build_opencode_config_content(
     let mcp_object = mcp
         .as_object_mut()
         .ok_or_else(|| "OPENCODE_CONFIG_CONTENT.mcp must be an object".to_string())?;
-    let repomond = repomon_core::service::repomond_path();
+    let (program, args) = repomon_core::service::mcp_bridge_argv();
     let mut environment_map = serde_json::Map::new();
     for var in env_vars {
         environment_map.insert((*var).into(), json!(format!("{{env:{var}}}")));
     }
+    let mut argv = vec![program.to_string_lossy().into_owned()];
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
     mcp_object.insert(
         "repomon".into(),
         json!({
             "type": "local",
-            "command": [repomond.to_string_lossy(), "mcp"],
+            "command": argv,
             "environment": environment_map
         }),
     );
@@ -8680,10 +8717,10 @@ fn ensure_antigravity_mcp_registration() -> Result<(), String> {
     let servers_object = servers
         .as_object_mut()
         .ok_or_else(|| "Antigravity mcpServers must be an object".to_string())?;
-    let repomond = repomon_core::service::repomond_path();
+    let (program, args) = repomon_core::service::mcp_bridge_argv();
     let wanted = json!({
-        "command": repomond.to_string_lossy(),
-        "args": ["mcp"]
+        "command": program.to_string_lossy(),
+        "args": args
     });
     if servers_object.get("repomon") == Some(&wanted) {
         return Ok(());
@@ -8717,10 +8754,10 @@ fn ensure_cursor_mcp_registration() -> Result<(), String> {
     let servers_object = servers
         .as_object_mut()
         .ok_or_else(|| "Cursor mcpServers must be an object".to_string())?;
-    let repomond = repomon_core::service::repomond_path();
+    let (program, args) = repomon_core::service::mcp_bridge_argv();
     let wanted = json!({
-        "command": repomond.to_string_lossy(),
-        "args": ["mcp"]
+        "command": program.to_string_lossy(),
+        "args": args
     });
     if servers_object.get("repomon") == Some(&wanted) {
         return Ok(());
@@ -8753,14 +8790,8 @@ fn ensure_hermes_mcp_registration(resolved_command: &str) -> Result<(), String> 
         .parent()
         .ok_or_else(|| "Hermes MCP wrapper has no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let repomond = repomon_core::service::repomond_path();
-    #[cfg(unix)]
-    let body = format!(
-        "#!/bin/sh\nexec {} mcp\n",
-        shell_quote(&repomond.to_string_lossy())
-    );
-    #[cfg(windows)]
-    let body = format!("@echo off\r\n\"{}\" mcp\r\n", repomond.to_string_lossy());
+    let (program, args) = repomon_core::service::mcp_bridge_argv();
+    let body = hermes_bridge_wrapper(&program, args);
     std::fs::write(&wrapper, body).map_err(|error| error.to_string())?;
     #[cfg(unix)]
     {
@@ -8855,9 +8886,9 @@ fn build_codex_orchestrator_command(
     model: &Option<String>,
     prompt: &Option<String>,
 ) -> String {
-    let repomond = repomon_core::service::repomond_path();
+    let (program, bridge_args) = repomon_core::service::mcp_bridge_argv();
     let mut command = base.to_string();
-    // Interpolated straight into TOML basic strings: the paths this carries (the repomond binary,
+    // Interpolated straight into TOML basic strings: the paths this carries (the bridge binary,
     // the daemon socket) never contain quotes/backslashes on the platforms repomon ships for.
     let mut env = format!(
         "REPOMON_MCP_SOCKET = \"{}\", REPOMON_MCP_AUTONOMY = \"{autonomy}\", \
@@ -8871,9 +8902,9 @@ fn build_codex_orchestrator_command(
     for over in [
         format!(
             "mcp_servers.repomon.command=\"{}\"",
-            repomond.to_string_lossy()
+            program.to_string_lossy()
         ),
-        "mcp_servers.repomon.args=[\"mcp\"]".to_string(),
+        codex_bridge_args_override(bridge_args),
         format!("mcp_servers.repomon.env={{ {env} }}"),
     ] {
         command.push_str(" -c ");
@@ -9050,7 +9081,7 @@ pub(crate) fn write_orchestrator_mcp_config_named(
     extra_env: &[(&str, String)],
     filename: &str,
 ) -> std::io::Result<PathBuf> {
-    let repomond = repomon_core::service::repomond_path();
+    let (program, bridge_args) = repomon_core::service::mcp_bridge_argv();
     let mut env = serde_json::Map::new();
     env.insert("REPOMON_MCP_SOCKET".into(), json!(socket.to_string_lossy()));
     env.insert("REPOMON_MCP_AUTONOMY".into(), json!(autonomy));
@@ -9070,8 +9101,8 @@ pub(crate) fn write_orchestrator_mcp_config_named(
     let mcp_config = json!({
         "mcpServers": {
             "repomon": {
-                "command": repomond.to_string_lossy(),
-                "args": ["mcp"],
+                "command": program.to_string_lossy(),
+                "args": bridge_args,
                 "env": Value::Object(env),
             }
         }
@@ -11636,6 +11667,50 @@ mod tests {
             "{command}"
         );
         assert!(!command.contains("test-token"), "{command}");
+    }
+
+    /// The Hermes wrapper `exec`s, and an `exec` re-points the process at the file it names. A
+    /// wrapper that ran the daemon with an `mcp` argument would hand the process the daemon's name
+    /// back, which is the whole thing this rename exists to stop.
+    #[test]
+    fn hermes_wrapper_execs_the_bridge_itself_and_falls_back_to_the_subcommand() {
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                hermes_bridge_wrapper(
+                    Path::new("/Applications/Repomon.app/Contents/MacOS/repomond-mcp"),
+                    &[]
+                ),
+                "#!/bin/sh\nexec '/Applications/Repomon.app/Contents/MacOS/repomond-mcp'\n"
+            );
+            assert_eq!(
+                hermes_bridge_wrapper(Path::new("/usr/local/bin/repomond"), &["mcp"]),
+                "#!/bin/sh\nexec '/usr/local/bin/repomond' 'mcp'\n"
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                hermes_bridge_wrapper(Path::new(r"C:\Repomon\repomond-mcp.exe"), &[]),
+                "@echo off\r\n\"C:\\Repomon\\repomond-mcp.exe\"\r\n"
+            );
+            assert_eq!(
+                hermes_bridge_wrapper(Path::new(r"C:\Repomon\repomond.exe"), &["mcp"]),
+                "@echo off\r\n\"C:\\Repomon\\repomond.exe\" mcp\r\n"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_bridge_args_override_renders_a_toml_array() {
+        assert_eq!(
+            codex_bridge_args_override(&["mcp"]),
+            "mcp_servers.repomon.args=[\"mcp\"]"
+        );
+        assert_eq!(
+            codex_bridge_args_override(&[]),
+            "mcp_servers.repomon.args=[]"
+        );
     }
 
     #[test]

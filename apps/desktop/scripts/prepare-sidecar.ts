@@ -3,6 +3,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -106,8 +107,28 @@ function copySidecar(name: string) {
   console.info(`Prepared ${destination}`);
 }
 
+/** The MCP bridge is a second *name* for the daemon binary, not a second program. macOS reports a
+ * process by its executable, so a bridge launched as `repomond` shows up as another daemon no
+ * matter what its arguments say; a differently-named executable is the only thing that changes it.
+ * A hard link keeps staging to one copy - Tauri copies each sidecar into the bundle regardless. */
+function linkBridgeSidecar() {
+  const suffix = windows ? ".exe" : "";
+  const binaries = resolve(desktopRoot, "src-tauri", "binaries");
+  const daemon = resolve(binaries, `repomond-${target}${suffix}`);
+  const bridge = resolve(binaries, `repomond-mcp-${target}${suffix}`);
+  rmSync(bridge, { force: true });
+  try {
+    linkSync(daemon, bridge);
+  } catch {
+    copyFileSync(daemon, bridge);
+  }
+  chmodSync(bridge, 0o755);
+  console.info(`Prepared ${bridge}`);
+}
+
 copySidecar("repomond");
 copySidecar("repomon");
+linkBridgeSidecar();
 if (windows) copySidecar("repomon-agent-host");
 
 function computeSha256(data: Buffer | Uint8Array): string {

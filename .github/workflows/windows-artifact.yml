@@ -34,6 +34,8 @@ jobs:
           for bin in repomond repomon repomon-agent-host; do
             cp "target/$TARGET/release/$bin.exe" "apps/desktop/src-tauri/binaries/$bin-$TARGET.exe"
           done
+          # The MCP bridge is the daemon under a second executable name.
+          ln -f "apps/desktop/src-tauri/binaries/repomond-$TARGET.exe" "apps/desktop/src-tauri/binaries/repomond-mcp-$TARGET.exe"
       - name: Build the installer
         working-directory: apps/desktop
         env:

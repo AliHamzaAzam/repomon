@@ -28,7 +28,8 @@ struct Args {
 enum Command {
     /// Run as an MCP server over stdio for the repomind orchestrator. Connects to the running
     /// daemon as a client and exposes the fleet as MCP tools; logs go to stderr so stdout stays
-    /// a clean protocol channel. Normally launched by `repomon orchestrate`, not by hand.
+    /// a clean protocol channel. Normally launched by `repomon orchestrate`, not by hand. The
+    /// bundled `repomond-mcp` executable runs the same thing without the subcommand.
     Mcp,
 }
 
@@ -47,9 +48,12 @@ fn main() {
 async fn run() {
     let args = Args::parse();
 
-    // The MCP subcommand is a stdio protocol server: keep all logging on stderr and never run
-    // the daemon setup below (it connects to the *already-running* daemon as a client).
-    if let Some(Command::Mcp) = args.command {
+    // The MCP bridge is a stdio protocol server: keep all logging on stderr and never run the
+    // daemon setup below (it connects to the *already-running* daemon as a client). Two ways in:
+    // the `mcp` subcommand every config written so far names, and the bundled `repomond-mcp`
+    // executable, which exists so a bridge is not another `repomond` row in Activity Monitor.
+    if matches!(args.command, Some(Command::Mcp)) || repomon_core::service::invoked_as_mcp_bridge()
+    {
         run_mcp(args.socket).await;
         return;
     }
@@ -275,7 +279,8 @@ async fn start_background_tasks(ctx: Arc<Ctx>) {
     }
 }
 
-/// `repomond mcp` - serve the MCP protocol over stdio for the repomind orchestrator.
+/// Serve the MCP protocol over stdio for the repomind orchestrator and its workers, reached
+/// either as `repomond mcp` or as the `repomond-mcp` executable.
 async fn run_mcp(socket_override: Option<PathBuf>) {
     // Logs to stderr only: stdout carries the newline-delimited MCP JSON-RPC stream.
     tracing_subscriber::fmt()

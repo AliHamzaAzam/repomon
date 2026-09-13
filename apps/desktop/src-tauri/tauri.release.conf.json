@@ -3,6 +3,7 @@
     "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/repomond",
+      "binaries/repomond-mcp",
       "binaries/repomon",
       "binaries/tmux"
     ]
