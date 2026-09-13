@@ -17,6 +17,7 @@ import { primarySession } from "./agentLabel";
 import { agentSessionTitle } from "./LaneAgentRosterPopover";
 import { agentSessionTargetId } from "./agentIdentity";
 import { formatResetAt } from "./resetTime";
+import UsageMeter, { meterLevel } from "./UsageMeter";
 import Modal from "./Modal";
 import { reorderAround } from "./ordering";
 import LaneRowMenu from "./LaneRowMenu";
@@ -88,12 +89,6 @@ function formatUsageWindow(label: string): string {
     return "Model Quota";
   }
   return label;
-}
-
-function usageTone(pct: number): string {
-  if (pct >= 95) return "text-fault font-semibold";
-  if (pct >= 75) return "text-attention font-semibold";
-  return "text-foreground";
 }
 
 function LaneRow(props: {
@@ -1155,24 +1150,16 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                 </div>
               </Show>
               <div class="space-y-1">
+                <Show when={usage().report.windows.length === 0}>
+                  <p class="font-mono text-[10px] text-muted/70">No quota windows reported.</p>
+                </Show>
                 <For each={usage().report.windows}>
                   {(window) => {
-
+                    const label = formatUsageWindow(window.label);
+                    const measure = meterLevel(window.pct_used) === "unknown" ? "no data" : `${window.pct_used}% used`;
                     const resetStr = formatResetAt(window.reset_at);
-                    const tooltipText = resetStr
-                      ? `${formatUsageWindow(window.label)}: ${window.pct_used}% used · resets ${resetStr}`
-                      : `${formatUsageWindow(window.label)}: ${window.pct_used}% used`;
-                    return (
-                      <div
-                        class="flex items-center justify-between font-mono text-[10px] text-muted py-0.5"
-                        title={tooltipText}
-                      >
-                        <span class="text-muted/80">{formatUsageWindow(window.label)}</span>
-                        <span class={`rounded bg-raised px-1.5 py-0.2 ${usageTone(window.pct_used)}`}>
-                          {window.pct_used}%
-                        </span>
-                      </div>
-                    );
+                    const tooltipText = resetStr ? `${label}: ${measure} · resets ${resetStr}` : `${label}: ${measure}`;
+                    return <UsageMeter label={label} pct={window.pct_used} title={tooltipText} />;
                   }}
                 </For>
               </div>
