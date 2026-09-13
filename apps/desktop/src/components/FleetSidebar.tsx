@@ -31,7 +31,6 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
-  IconCpu,
   IconHide,
   IconHome,
   IconLayers,
@@ -89,6 +88,13 @@ function formatUsageWindow(label: string): string {
     return "Model Quota";
   }
   return label;
+}
+
+/// What the row draws. The panel's own heading already supplies the noun, so repeating "Quota" on
+/// every row costs the width that keeps "Weekly" and "Model" from truncating beside a state word
+/// in the narrow sidebar. The full name stays on the progressbar and in the row's tooltip.
+export function shortUsageWindow(name: string): string {
+  return name.replace(/ (Quota|Limit)$/, "");
 }
 
 function LaneRow(props: {
@@ -1113,57 +1119,57 @@ export default function FleetSidebar(props: FleetSidebarProps) {
       </Show>
 
       <Show when={cardUsage()}>
+        {/* No card around this. The sidebar's job is the fleet; the quotas are a quiet strip at
+            its foot, so they get a rule and the ground they already sit on, not a panel. */}
         {(usage) => (
-          <div class="border-t border-line bg-surface/50 p-2.5">
+          <div class="border-t border-line bg-surface/50 px-2.5 py-2">
+            <div class="mb-1 flex items-center justify-between gap-2 font-mono text-[10px] text-muted">
+              <span class="min-w-0 truncate font-semibold uppercase tracking-wider text-muted/90">
+                Rate Limits ({usage().label})
+              </span>
 
-            <div class="rounded-lg border border-line/60 bg-raised/30 p-2">
-              <div class="mb-1.5 flex items-center justify-between font-mono text-[10px] text-muted">
-                <span class="font-semibold uppercase tracking-wider text-muted/90 flex items-center gap-1">
-                  <IconCpu size={11} class="text-muted/70" />
-                  <span>Rate Limits ({usage().label})</span>
+              <span class="flex shrink-0 items-center gap-1">
+                {/* Short next to a refresh control, because "ago" is the only thing it could
+                    mean; the full sentence stays in the tooltip. */}
+                <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
+                  {usage().age_secs < 60 ? "now" : `${Math.floor(usage().age_secs / 60)}m`}
                 </span>
-
-                <span class="flex items-center gap-1">
-                  <span class="text-muted/60" title={`Updated ${usage().age_secs} seconds ago`}>
-                    {usage().age_secs < 60 ? "just now" : `${Math.floor(usage().age_secs / 60)}m ago`}
-                  </span>
-                  <button
-                    type="button"
-                    class="focus-ring ml-0.5 flex items-center justify-center rounded p-0.5 text-muted/50 hover:bg-raised hover:text-muted transition-colors disabled:opacity-40"
-                    title="Refresh usage data"
-                    aria-label="Refresh rate limit data"
-                    disabled={usageRefreshing()}
-                    onClick={() => void refreshUsage()}
-                  >
-                    <IconRefresh size={9} class={usageRefreshing() ? "animate-spin" : ""} />
-                  </button>
-                </span>
-              </div>
-              <Show when={usageNotice()}><p role="status" class="mb-1.5 text-[10px] text-muted">{usageNotice()}</p></Show>
-
-              <Show when={showTodayCost() && props.fleet.costToday?.() != null}>
-                <div class="mb-1.5 flex items-center justify-between font-mono text-[10px]">
-                  <span class="text-muted/90">Today</span>
-                  <span class="tabular-nums text-foreground" title="What today's tokens would cost at published API rates">
-                    {formatUsd(props.fleet.costToday?.() ?? 0)}
-                  </span>
-                </div>
-              </Show>
-              <div class="space-y-1">
-                <Show when={usage().report.windows.length === 0}>
-                  <p class="font-mono text-[10px] text-muted/70">No quota windows reported.</p>
-                </Show>
-                <For each={usage().report.windows}>
-                  {(window) => {
-                    const label = formatUsageWindow(window.label);
-                    const measure = meterLevel(window.pct_used) === "unknown" ? "no data" : `${window.pct_used}% used`;
-                    const resetStr = formatResetAt(window.reset_at);
-                    const tooltipText = resetStr ? `${label}: ${measure} · resets ${resetStr}` : `${label}: ${measure}`;
-                    return <UsageMeter label={label} pct={window.pct_used} title={tooltipText} />;
-                  }}
-                </For>
-              </div>
+                <button
+                  type="button"
+                  class="focus-ring flex items-center justify-center rounded p-0.5 text-muted/50 hover:bg-raised hover:text-muted transition-colors disabled:opacity-40"
+                  title="Refresh usage data"
+                  aria-label="Refresh rate limit data"
+                  disabled={usageRefreshing()}
+                  onClick={() => void refreshUsage()}
+                >
+                  <IconRefresh size={9} class={usageRefreshing() ? "animate-spin" : ""} />
+                </button>
+              </span>
             </div>
+            <Show when={usageNotice()}><p role="status" class="mb-1 text-[10px] text-muted">{usageNotice()}</p></Show>
+
+            <Show when={showTodayCost() && props.fleet.costToday?.() != null}>
+              {/* The cost keeps the quota rows' right-hand number column, so the strip reads as
+                  one list of values rather than two blocks. */}
+              <div class="flex items-center gap-2 py-0.5 font-mono text-[10px]">
+                <span class="min-w-0 flex-1 truncate text-muted/80">Today</span>
+                <span class="w-[3.1rem] shrink-0 text-right tabular-nums text-foreground" title="What today's tokens would cost at published API rates">
+                  {formatUsd(props.fleet.costToday?.() ?? 0)}
+                </span>
+              </div>
+            </Show>
+            <Show when={usage().report.windows.length === 0}>
+              <p class="py-0.5 font-mono text-[10px] text-muted/70">No quota windows reported.</p>
+            </Show>
+            <For each={usage().report.windows}>
+              {(window) => {
+                const name = formatUsageWindow(window.label);
+                const measure = meterLevel(window.pct_used) === "unknown" ? "no data" : `${window.pct_used}% used`;
+                const resetStr = formatResetAt(window.reset_at);
+                const tooltipText = resetStr ? `${name}: ${measure} · resets ${resetStr}` : `${name}: ${measure}`;
+                return <UsageMeter label={shortUsageWindow(name)} name={name} pct={window.pct_used} title={tooltipText} />;
+              }}
+            </For>
           </div>
         )}
       </Show>

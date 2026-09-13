@@ -101,7 +101,7 @@ describe("spawn dialog keyboard operation", () => {
 
   it("selects a runtime directly by the digit printed on its tile", async () => {
     const { radios } = await openDialog();
-    expect(screen.getByText("Arrows move, 1 to 8 picks a runtime, Enter spawns.")).toBeInTheDocument();
+    expect(screen.getByText("Arrows move, 1 to 8 picks a runtime, Enter spawns claude-code.")).toBeInTheDocument();
     fireEvent.keyDown(radios[0], { key: "3" });
     expect(document.activeElement).toBe(radios[2]);
     expect(radios[2]).toHaveAttribute("aria-checked", "true");
@@ -172,5 +172,76 @@ describe("spawn dialog keyboard operation", () => {
     fireEvent.keyDown(radios[7], { key: "Enter" });
     expect(state.spawnCalls).toEqual([]);
     expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
+  });
+});
+
+/// Arrows move focus constantly while the selection stays put, so the two states share the screen
+/// most of the time. They must not share a visual channel: selection is a tonal ground and a check
+/// mark, focus is the signal ring, and nothing in the grid is signal-toned except that ring.
+describe("spawn dialog selection against focus", () => {
+  // Anchored to whole class names, so a `hover:` variant of the same ground never counts as
+  // the selected state.
+  const SELECTION_CLASSES = /(^|\s)(bg-raised|border-muted)(\s|$)/;
+
+  it("keeps the selected tile marked while focus moves to another runtime", async () => {
+    const { container, radios } = await openDialog();
+    fireEvent.keyDown(radios[0], { key: "ArrowDown" });
+
+    // The operator's own frame: claude-code selected, codex focused, both on screen.
+    expect(document.activeElement).toBe(radios[2]);
+    expect(radios[0]).toHaveAttribute("aria-checked", "true");
+    expect(radios[2]).toHaveAttribute("aria-checked", "false");
+
+    expect(radios[0].className).toMatch(/(^|\s)bg-raised(\s|$)/);
+    expect(radios[0].className).toMatch(/(^|\s)border-muted(\s|$)/);
+    expect(radios[2].className).not.toMatch(SELECTION_CLASSES);
+
+    // The check is the persistent mark, and only the selected tile carries it.
+    expect(radios[0].querySelector("[data-selected-mark]")).not.toBeNull();
+    expect(container.querySelectorAll("[data-selected-mark]")).toHaveLength(1);
+
+    // Every tile is equally eligible for the focus ring, so the ring means focus and only focus.
+    for (const tile of radios) {
+      expect(tile.className).toMatch(/\bfocus-ring\b/);
+      expect(tile.className).not.toMatch(/signal/);
+    }
+  });
+
+  it("moves the mark with the selection, not with the focus", async () => {
+    const { container, radios } = await openDialog();
+    fireEvent.keyDown(radios[0], { key: "ArrowRight" });
+    // Focus alone leaves the mark where it was.
+    expect(document.activeElement).toBe(radios[1]);
+    expect(radios[0].querySelector("[data-selected-mark]")).not.toBeNull();
+    expect(radios[1].querySelector("[data-selected-mark]")).toBeNull();
+
+    fireEvent.keyDown(radios[1], { key: " " });
+    expect(radios[1]).toHaveAttribute("aria-checked", "true");
+    expect(radios[1].querySelector("[data-selected-mark]")).not.toBeNull();
+    expect(radios[0].querySelector("[data-selected-mark]")).toBeNull();
+    expect(radios[0].className).not.toMatch(SELECTION_CLASSES);
+    expect(container.querySelectorAll("[data-selected-mark]")).toHaveLength(1);
+  });
+
+  it("names the runtime Enter would spawn, which is the focused one", async () => {
+    const { radios } = await openDialog();
+    expect(screen.getByText("Arrows move, 1 to 8 picks a runtime, Enter spawns claude-code.")).toBeInTheDocument();
+    fireEvent.keyDown(radios[0], { key: "ArrowDown" });
+    expect(screen.getByText("Arrows move, 1 to 8 picks a runtime, Enter spawns codex.")).toBeInTheDocument();
+    // Still the selection that the dialog holds, and still the focused runtime that Enter takes.
+    expect(radios[0]).toHaveAttribute("aria-checked", "true");
+    fireEvent.keyDown(radios[2], { key: "Enter" });
+    await waitFor(() => expect(state.spawnCalls).toHaveLength(1));
+    expect(state.spawnCalls[0]).toMatchObject({ agent: "codex" });
+  });
+
+  it("leaves a missing runtime dashed and unmarked when focus lands on it", async () => {
+    const { radios } = await openDialog({ onOpenSettingsTab: vi.fn() });
+    fireEvent.keyDown(radios[0], { key: "7" });
+    expect(document.activeElement).toBe(radios[6]);
+    expect(radios[6].className).toMatch(/\bborder-dashed\b/);
+    expect(radios[6].querySelector("[data-selected-mark]")).toBeNull();
+    expect(radios[6].className).not.toMatch(SELECTION_CLASSES);
+    expect(radios[0].querySelector("[data-selected-mark]")).not.toBeNull();
   });
 });

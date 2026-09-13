@@ -5,7 +5,7 @@ import { pickDefaultAgent } from "../ipc/agentChoices";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall } from "../ipc/rpc";
 import { cachedAgentChoices, loadAgentChoices, refreshAgentChoices } from "../stores/agentChoices";
-import { AgentIcon, IconExternalLink } from "./icons";
+import { AgentIcon, IconCheck, IconExternalLink } from "./icons";
 import Modal from "./Modal";
 
 /// The runtime grid is two columns at every width, so Left and Right always cross columns and Up
@@ -204,7 +204,9 @@ export default function SpawnModal(props: {
     }
     const digits = Math.min(choices().length, MAX_DIGIT_SHORTCUTS);
     const direct = digits > 1 ? `1 to ${digits} picks a runtime, ` : "";
-    return `Arrows move, ${direct}Enter spawns.`;
+    // Enter acts on the focused tile, not the checked one, so the hint names it. Colour and the
+    // check mark answer this at a glance; the sentence answers it for anyone reading the words.
+    return `Arrows move, ${direct}Enter spawns ${choice ? choice.name : "the focused runtime"}.`;
   }
 
   return (
@@ -280,9 +282,9 @@ export default function SpawnModal(props: {
                       title={choice.name}
                       class={`focus-ring flex min-w-0 items-center justify-between gap-2 rounded-xl border p-3 text-left transition-colors ${
                         agent() === choice.name
-                          ? "border-signal bg-signal/5 ring-1 ring-signal/20 text-foreground"
+                          ? "border-muted bg-raised text-foreground"
                           : choice.detected
-                            ? "border-line bg-surface text-muted hover:border-muted/50 hover:bg-raised/40"
+                            ? "border-line bg-surface text-muted hover:bg-raised/40"
                             : "border-dashed border-line bg-surface text-muted hover:border-fault/40 hover:bg-raised/40"
                       }`}
                       onFocus={() => setFocusIndex(index())}
@@ -294,22 +296,35 @@ export default function SpawnModal(props: {
                             {index() + 1}
                           </span>
                         </Show>
-                        <span class={`shrink-0 ${agent() === choice.name ? "text-signal" : "text-muted"}`}>
+                        <span class={`shrink-0 ${agent() === choice.name ? "text-foreground" : "text-muted"}`}>
                           <AgentIcon agent={choice.name} size={15} />
                         </span>
-                        <span class="min-w-0 truncate text-xs font-medium">{choice.name}</span>
-                      </span>
-                      <Show when={choice.default}>
-                        <span class="shrink-0 rounded bg-signal/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-signal">default</span>
-                      </Show>
-                      <Show when={!choice.detected}>
-                        <span class="flex shrink-0 items-center gap-1 rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">
-                          missing
-                          <Show when={canExplainMissing()}>
-                            <IconExternalLink size={9} />
-                          </Show>
+                        <span class={`min-w-0 truncate text-xs ${agent() === choice.name ? "font-semibold" : "font-medium"}`}>
+                          {choice.name}
                         </span>
-                      </Show>
+                      </span>
+                      <span class="flex shrink-0 items-center gap-1.5">
+                        <Show when={choice.default}>
+                          {/* Which runtime is configured as the default is a fact about settings,
+                              not a state of this dialog, so it stays out of the semantic hues. */}
+                          <span class="rounded bg-line/70 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-muted">default</span>
+                        </Show>
+                        <Show when={!choice.detected}>
+                          <span class="flex items-center gap-1 rounded bg-fault/10 px-1.5 py-0.5 font-mono text-[9px] uppercase font-semibold text-fault">
+                            missing
+                            <Show when={canExplainMissing()}>
+                              <IconExternalLink size={9} />
+                            </Show>
+                          </span>
+                        </Show>
+                        {/* The selection mark. A check is a fact that stays put; the focus ring is
+                            a ring that moves. Nothing else in this grid is either. */}
+                        <Show when={agent() === choice.name}>
+                          <span data-selected-mark class="flex text-foreground">
+                            <IconCheck size={13} />
+                          </span>
+                        </Show>
+                      </span>
                     </button>
                   )}
                 </For>

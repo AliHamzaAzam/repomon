@@ -58,6 +58,31 @@ describe("usage meter", () => {
     expect(screen.getByText("100%")).toBeInTheDocument();
   });
 
+  it("keeps the label, the state word, the bar and the number on one row", () => {
+    render(() => <UsageMeter label="Weekly" name="Weekly Quota" pct={88} />);
+    const row = screen.getByRole("progressbar", { name: "Weekly Quota" }).parentElement!;
+    expect(row).toHaveTextContent("Weekly");
+    expect(row).toHaveTextContent("tight");
+    expect(row).toHaveTextContent("88%");
+    // A short fixed track, not a full-width rule: four of these stack into a column.
+    expect(screen.getByRole("progressbar", { name: "Weekly Quota" }).className).toMatch(/\bw-12\b/);
+  });
+
+  it("says more to a screen reader than the row has room to draw", () => {
+    render(() => <UsageMeter label="Weekly" name="Weekly Quota" pct={0} />);
+    expect(screen.getByRole("progressbar", { name: "Weekly Quota" })).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.queryByText("Weekly Quota")).not.toBeInTheDocument();
+  });
+
+  it("puts something on the track for a window barely used, so 1 percent is not 0 percent", () => {
+    render(() => <UsageMeter label="5-Hour" pct={1} />);
+    const one = fill(screen.getByRole("progressbar", { name: "5-Hour" }));
+    expect(one?.style.width).toBe("1%");
+    // At this track length one percent would round away to nothing without a floor.
+    expect(one?.style.minWidth).toBe("3px");
+  });
+
   it("warns in words as well as colour once a window is tight", () => {
     render(() => <UsageMeter label="Weekly Quota" pct={88} />);
     expect(screen.getByText("tight")).toBeInTheDocument();
