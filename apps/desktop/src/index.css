@@ -188,6 +188,40 @@
   --chart-6: hsl(100 50% 62%);
 }
 
+/* Motion vocabulary. Two spring families read out of bencho.dev's framer-motion configs and
+   reproduced as CSS `linear()`, plus the short feedback step this app already spoke in. Every
+   transition names a pair from this set; no bare millisecond literals.
+
+   Spring durations are the full settle, not the perceived one: `--motion-snap` carries a control
+   90% of the way in 96ms and spends the rest of its 310ms on a 1.7% overshoot nobody waits for.
+
+   `--motion-tap` is deliberately not a spring. A spring's worth is its overshoot and its tail,
+   both invisible in a colour channel, and its honest duration would make hover feel late.
+
+   The settling family (stiffness 330, damping 28, mass 0.75) is left out until a surface needs
+   it: an uncalibrated curve is not vocabulary, it is a guess with a name.
+
+   This WKWebView parses `linear()`, verified against the framework Tauri embeds, so the
+   cubic-bezier defaults only ever serve a macOS older than Safari 17.2. */
+:root {
+  --motion-tap: 110ms;
+  --motion-snap: 310ms;
+  --motion-play: 640ms;
+
+  --ease-tap: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-snap: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-play: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    /* stiffness 660, damping 34, mass 0.7 */
+    --ease-snap: linear(0, 0.0646, 0.2083, 0.3772, 0.5397, 0.6799, 0.7918, 0.8756, 0.9346, 0.9737, 0.9975, 1.0104, 1.0161, 1.0172, 1.0158, 1.0132, 1.0103, 1.0075, 1.0052, 1.0033, 1.002, 1.001, 1.0004, 1, 1);
+    /* stiffness 210, damping 17, mass 0.7 */
+    --ease-play: linear(0, 0.0858, 0.2723, 0.4824, 0.6724, 0.8224, 0.9282, 0.9947, 1.0302, 1.0441, 1.0445, 1.0379, 1.0285, 1.0192, 1.0114, 1.0055, 1.0016, 0.9993, 0.9982, 0.9979, 0.9981, 0.9985, 0.9989, 0.9993, 1);
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -450,7 +484,9 @@ summary:focus-visible,
   font-size: 12px;
   font-weight: 500;
   text-align: left;
-  transition: all 120ms ease;
+  transition: border-color var(--motion-tap) var(--ease-tap), background-color var(--motion-tap) var(--ease-tap),
+    color var(--motion-tap) var(--ease-tap), transform var(--motion-tap) var(--ease-tap),
+    box-shadow var(--motion-tap) var(--ease-tap);
   box-shadow: 0 1px 2px var(--shadow);
 }
 
@@ -490,12 +526,79 @@ summary:focus-visible,
   font-family: var(--font-sans);
   font-size: 12px;
   outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: border-color var(--motion-tap) var(--ease-tap), box-shadow var(--motion-tap) var(--ease-tap);
 }
 
 .settings-input:focus {
   border-color: var(--signal);
   box-shadow: 0 0 0 1px var(--signal);
+}
+
+/* The Terminal/Chat switch, and the same control in Settings. Its selected ground is a liquid
+   pill: a lead blob on the snappy spring and a softer, shorter follower on the playful one,
+   both behind the labels so the gooey blur never touches text. The filter (#repomon-liquid, in
+   index.html) blurs the pair together and re-hardens the alpha, so the lag between the two
+   springs reads as surface tension instead of as two shapes. The follower hides inside the lead
+   at rest, which is why the control looks ordinary until it is used.
+
+   The blur wants a stadium: thresholding a blurred rectangle rounds its corners to roughly the
+   blur radius anyway, so the pill declares the shape the filter would impose on it. */
+.view-toggle {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  padding: 2px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.view-toggle__liquid {
+  position: absolute;
+  inset: 2px;
+  filter: url(#repomon-liquid);
+  pointer-events: none;
+}
+
+.view-toggle__blob {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 50%;
+  border-radius: 999px;
+  background: var(--surface);
+  transform: translate3d(var(--view-toggle-travel, 0%), 0, 0);
+  transition: transform var(--motion-snap) var(--ease-snap);
+}
+
+.view-toggle__blob.is-follower {
+  transform: translate3d(var(--view-toggle-travel, 0%), 0, 0) scale(0.9, 0.58);
+  transition: transform var(--motion-play) var(--ease-play);
+}
+
+.view-toggle__option {
+  position: relative;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color var(--motion-tap) var(--ease-tap);
+}
+
+.view-toggle__option:hover:not(:disabled),
+.view-toggle__option[aria-pressed="true"] {
+  color: var(--foreground);
+}
+
+.view-toggle__option:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .resizable-split-handle {
@@ -517,7 +620,7 @@ summary:focus-visible,
   width: 1px;
   transform: translateX(-50%);
   background: var(--line);
-  transition: background-color 120ms ease;
+  transition: background-color var(--motion-tap) var(--ease-tap);
 }
 
 .resizable-split-handle:hover::before,
@@ -692,7 +795,8 @@ summary:focus-visible,
   min-height: 1.55rem;
   color: var(--muted);
   font-size: 12px;
-  transition: background-color 100ms ease, border-color 100ms ease, color 100ms ease;
+  transition: background-color var(--motion-tap) var(--ease-tap), border-color var(--motion-tap) var(--ease-tap),
+    color var(--motion-tap) var(--ease-tap);
 }
 
 .fleet-row:hover {
@@ -916,6 +1020,12 @@ summary:focus-visible,
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* Both springs are collapsed above, so the toggle's follower can never leave its lead and the
+     gooey blur has nothing to merge. Drop the filter rather than raster a shape it cannot change. */
+  .view-toggle__liquid {
+    filter: none;
   }
 }
 
