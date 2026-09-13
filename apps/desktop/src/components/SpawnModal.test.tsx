@@ -75,24 +75,23 @@ describe("SpawnModal error rendering", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps runtime selection and install help as separate keyboard controls", async () => {
+  it("offers the runtimes as a single-select radiogroup rather than eight toggles", async () => {
     state.agents = [
       { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
-      { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
+      { name: "codex", command: "codex", detected: true, default: false, custom: false },
     ];
-    const onOpenSettingsTab = vi.fn();
-    const { container } = render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} onOpenSettingsTab={onOpenSettingsTab} />);
-    const claude = await screen.findByRole("button", { name: "Select claude-code" });
-    const cursor = screen.getByRole("button", { name: "Select cursor" });
-    expect(claude).toHaveAttribute("aria-pressed", "true");
-    expect(cursor).toHaveAttribute("aria-pressed", "false");
-    expect(container.querySelector("button button")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /View install instructions for cursor/ }));
-    expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
-    expect(claude).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(cursor);
-    expect(cursor).toHaveAttribute("aria-pressed", "true");
-    expect(claude).toHaveAttribute("aria-pressed", "false");
+    render(() => <SpawnModal lane={dummyLane} onClose={vi.fn()} onDone={vi.fn()} />);
+    const claude = await screen.findByRole("radio", { name: "claude-code, default runtime" });
+    const codex = screen.getByRole("radio", { name: "codex" });
+    expect(screen.getByRole("radiogroup", { name: "Select Runtime" })).toBeInTheDocument();
+    expect(claude).toHaveAttribute("aria-checked", "true");
+    expect(codex).toHaveAttribute("aria-checked", "false");
+    // Roving tab index: one stop for the whole group, not one per tile.
+    expect(claude).toHaveAttribute("tabindex", "0");
+    expect(codex).toHaveAttribute("tabindex", "-1");
+    fireEvent.click(codex);
+    expect(codex).toHaveAttribute("aria-checked", "true");
+    expect(claude).toHaveAttribute("aria-checked", "false");
     expect(state.spawnCalls).toEqual([]);
   });
 
@@ -128,7 +127,7 @@ describe("SpawnModal error rendering", () => {
     expect(friendlyMsg).toBeInTheDocument();
   });
 
-  it("navigates to Settings > System health when clicking missing badge on undetected agent", async () => {
+  it("navigates to Settings > System health when activating a missing runtime", async () => {
     state.agents = [
       { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
       { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
@@ -146,15 +145,27 @@ describe("SpawnModal error rendering", () => {
       />
     ));
 
-    await screen.findByText("claude-code");
-    expect(screen.getByText("cursor")).toBeInTheDocument();
-
-    const missingBtn = screen.getByRole("button", { name: /View install instructions for cursor/i });
-    expect(missingBtn).toBeInTheDocument();
-    fireEvent.click(missingBtn);
+    const cursor = await screen.findByRole("radio", { name: "cursor, not installed" });
+    expect(cursor).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(cursor);
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onOpenSettingsTab).toHaveBeenCalledWith("system");
+    expect(cursor).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("says nothing about install instructions it cannot open", async () => {
+    state.agents = [
+      { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
+      { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
+    ];
+    const onClose = vi.fn();
+    render(() => <SpawnModal lane={dummyLane} onClose={onClose} onDone={vi.fn()} />);
+    const cursor = await screen.findByRole("radio", { name: "cursor, not installed" });
+    fireEvent.focus(cursor);
+    expect(screen.getByText("cursor is not installed, so it cannot be spawned.")).toBeInTheDocument();
+    fireEvent.click(cursor);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
