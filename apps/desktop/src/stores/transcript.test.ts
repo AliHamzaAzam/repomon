@@ -32,12 +32,24 @@ describe("orderRows", () => {
     const current = [row("a")];
     expect(orderRows(current, ["ghost", "a"]).map((r) => r.key)).toEqual(["a"]);
   });
-  it("keeps a row that drops out of one order snapshot from jumping above settled history", () => {
+  it("keeps a row that drops out of one order snapshot at the position it already occupies", () => {
     // u2 was seated by an earlier order (it's in everLive) but this tick's order omits it - a
-    // daemon-side hiccup mid-handoff, not a demotion to older, paged-in history.
-    const current = [row("u1"), row("a1"), row("u2")];
+    // daemon-side hiccup mid-handoff, not a demotion to older, paged-in history. "Keeps its
+    // seated position" means the index it already occupies relative to the rows around it: u2
+    // stays between u1 and a1. The stale row starts MID-list because that is the only
+    // arrangement that can tell "kept its position" apart from "appended to the end" - and
+    // appending is what promoted a Friday message to the newest slot in the operator's Chat.
+    const current = [row("u1"), row("u2"), row("a1")];
     const ordered = orderRows(current, ["u1", "a1"], new Set(["u1", "a1", "u2"]));
-    expect(ordered.map((r) => r.key)).toEqual(["u1", "a1", "u2"]);
+    expect(ordered.map((r) => r.key)).toEqual(["u1", "u2", "a1"]);
+  });
+  it("seats a stale row after the leading block it already followed, without merging into it", () => {
+    // Two rows order has never named: older-1 is paged-in history (leading), stale-1 dropped out
+    // of an order that once carried it. They are different classes and must not collapse into
+    // one block - stale-1 stays where it sits, below older-1 and above live-1.
+    const current = [row("older-1"), row("stale-1"), row("live-1")];
+    const ordered = orderRows(current, ["live-1"], new Set(["live-1", "stale-1"]));
+    expect(ordered.map((r) => r.key)).toEqual(["older-1", "stale-1", "live-1"]);
   });
 });
 

@@ -43,11 +43,20 @@ export function mergeTranscript(current: ConversationRow[], incoming: Conversati
 export function orderRows(rows: ConversationRow[], order: string[], everLive?: ReadonlySet<string>): ConversationRow[] {
   const byId = new Map(rows.map((row) => [row.key, row]));
   const inOrder = new Set(order);
-  const leading = rows.filter((row) => !inOrder.has(row.key) && !everLive?.has(row.key));
-  const stale = rows.filter((row) => !inOrder.has(row.key) && everLive?.has(row.key));
-  const suffix: ConversationRow[] = [];
-  for (const id of order) { const row = byId.get(id); if (row) suffix.push(row); }
-  return [...leading, ...suffix, ...stale];
+  const isStale = (row: ConversationRow) => !inOrder.has(row.key) && !!everLive?.has(row.key);
+  const seated = rows.filter((row) => !inOrder.has(row.key) && !isStale(row));
+  for (const id of order) { const row = byId.get(id); if (row) seated.push(row); }
+  // Seated position means the index it already occupies, so put each stale row back directly
+  // below the nearest row above it that survived into `seated` (the head, when none did).
+  // Appending them instead would hand a row the daemon momentarily stopped naming the newest
+  // slot in the window - the exact jump this branch exists to prevent.
+  for (const [index, row] of rows.entries()) {
+    if (!isStale(row)) continue;
+    let anchor = -1;
+    for (let above = index - 1; above >= 0 && anchor < 0; above--) anchor = seated.findIndex((seat) => seat.key === rows[above].key);
+    seated.splice(anchor + 1, 0, row);
+  }
+  return seated;
 }
 
 /// One watch per mounted pane. Reconciliation keeps Solid's row proxies and DOM nodes alive
