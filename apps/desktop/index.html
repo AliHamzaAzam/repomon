@@ -25,6 +25,19 @@
     <noscript>Repomon Desktop requires JavaScript.</noscript>
     <div id="root"></div>
 
+    <!-- The gooey primitive behind the Terminal/Chat switch, mounted once for the document because
+         a filter id has to be unique. Blur bleeds the switch's two spring-driven blobs into one
+         another; the steep alpha ramp re-hardens the result to a crisp edge, so a lead and a
+         follower a few pixels apart neck and merge instead of reading as two pills. sRGB keeps
+         --surface exact through the blur, which linearRGB would shift. The region is widened
+         because the default one clips a blur this size. -->
+    <svg width="0" height="0" aria-hidden="true" focusable="false" style="position: absolute">
+      <filter id="repomon-liquid" color-interpolation-filters="sRGB" x="-20%" y="-75%" width="140%" height="250%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="smear" />
+        <feColorMatrix in="smear" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -10" />
+      </filter>
+    </svg>
+
     <script src="/src/index.tsx" type="module"></script>
   </body>
 </html>
