@@ -3623,7 +3623,7 @@ impl App {
             KeyCode::Char('r') => {
                 self.orch_restart_armed = true;
                 self.status =
-                    "restart repomind with saved settings? it ends the live session — press r \
+                    "restart repomind with saved settings? it ends the live session: press r \
                      again to confirm"
                         .to_string();
             }
@@ -4771,7 +4771,7 @@ impl App {
                     self.repo_remove_armed = Some(repo_id);
                     self.status = format!(
                         "remove repo {name} ({n} lanes) from repomon? \
-                         files & agents left untouched — press X again to confirm"
+                         files & agents left untouched: press X again to confirm"
                     );
                     return;
                 }
@@ -4784,7 +4784,7 @@ impl App {
                     Ok(_) => {
                         self.refresh().await;
                         self.status = format!(
-                            "removed repo {name} — worktrees & agents left running; \
+                            "removed repo {name}: worktrees & agents left running; \
                              re-add with `repomon add`"
                         );
                     }

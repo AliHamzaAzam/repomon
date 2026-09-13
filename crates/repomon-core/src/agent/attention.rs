@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(
             agent_attention(&sess(
                 AgentStatus::Waiting,
-                Some("Bash command — Do you want to proceed?")
+                Some("Bash command: Do you want to proceed?")
             )),
             Attention::Permission
         );

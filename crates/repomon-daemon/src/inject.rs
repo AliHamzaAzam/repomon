@@ -857,7 +857,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::new(vec![DIALOG_B.to_string()]));
         let ctx = make_ctx(backend.clone());
 
-        let expect = Expectation::DialogSummary("Bash command — Do you want to proceed?".into());
+        let expect = Expectation::DialogSummary("Bash command: Do you want to proceed?".into());
         let payload = Payload::Keys(vec!["1".into(), "Enter".into()]);
         let seed = test_seed("lane-1");
 
@@ -936,7 +936,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::new(vec![DIALOG_A.to_string()]));
         let ctx = make_ctx(backend.clone());
 
-        let expect = Expectation::DialogSummary("Bash command — Do you want to proceed?".into());
+        let expect = Expectation::DialogSummary("Bash command: Do you want to proceed?".into());
         let payload = Payload::Keys(vec!["1".into(), "Enter".into()]);
         let seed = test_seed("lane-1");
 
@@ -972,7 +972,7 @@ mod tests {
         ]));
         let ctx = make_ctx(backend.clone());
 
-        let expect = Expectation::DialogSummary("Bash command — Do you want to proceed?".into());
+        let expect = Expectation::DialogSummary("Bash command: Do you want to proceed?".into());
         let payload = Payload::Keys(vec!["1".into(), "Enter".into()]);
         let seed = test_seed("lane-1");
 
@@ -1003,7 +1003,7 @@ mod tests {
         );
         let ctx = make_ctx(backend.clone());
 
-        let expect = Expectation::DialogSummary("Bash command — Do you want to proceed?".into());
+        let expect = Expectation::DialogSummary("Bash command: Do you want to proceed?".into());
         let payload = Payload::Keys(vec!["1".into(), "Enter".into()]);
         let seed = test_seed("lane-1");
 
@@ -1039,7 +1039,7 @@ mod tests {
 
         let s1 = verified_send(
             &ctx,
-            Expectation::DialogSummary("Bash command — Do you want to proceed?".into()),
+            Expectation::DialogSummary("Bash command: Do you want to proceed?".into()),
             Payload::Keys(vec!["1".into()]),
             test_seed("lane-1"),
         )
@@ -1057,7 +1057,7 @@ mod tests {
 
         let s3 = verified_send(
             &ctx,
-            Expectation::DialogSummary("Bash command — Do you want to proceed?".into()),
+            Expectation::DialogSummary("Bash command: Do you want to proceed?".into()),
             Payload::Keys(vec!["1".into()]),
             test_seed("lane-3"),
         )
@@ -1121,7 +1121,7 @@ mod tests {
         let fail_ctx = make_ctx(fail_backend);
         let s7 = verified_send(
             &fail_ctx,
-            Expectation::DialogSummary("Bash command — Do you want to proceed?".into()),
+            Expectation::DialogSummary("Bash command: Do you want to proceed?".into()),
             Payload::Keys(vec!["1".into()]),
             test_seed("lane-8"),
         )

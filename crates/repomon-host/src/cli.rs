@@ -31,7 +31,7 @@ pub struct HostArgs {
     /// Extra environment for the child, on top of the host's inherited environment.
     #[arg(long = "env", value_parser = parse_env_pair)]
     pub env: Vec<(String, String)>,
-    /// The agent program and its arguments (structured — never a shell string).
+    /// The agent program and its arguments (structured, never a shell string).
     #[arg(last = true, required = true, num_args = 1..)]
     pub command: Vec<String>,
 }

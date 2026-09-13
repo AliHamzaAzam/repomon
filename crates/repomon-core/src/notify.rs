@@ -254,7 +254,7 @@ pub fn compose(
         }
         _ => kind.verb(),
     };
-    let title = format!("{} {} {} — {}", kind.glyph(), agent, verb, lane.repo.name);
+    let title = format!("{} {} {}: {}", kind.glyph(), agent, verb, lane.repo.name);
 
     let mut parts = vec![
         lane.state
@@ -985,7 +985,7 @@ mod tests {
     fn compose_names_the_attention_for_needs_you() {
         let mut s = sess(Some("abc"), AgentStatus::Waiting, false);
 
-        s.pending_prompt = Some("Bash command — Do you want to proceed?".into());
+        s.pending_prompt = Some("Bash command: Do you want to proceed?".into());
         let (title, _) = compose(NotifKind::NeedsYou, &lane(), Some(&s), None, true);
         assert!(title.contains("is asking permission"), "{title}");
 

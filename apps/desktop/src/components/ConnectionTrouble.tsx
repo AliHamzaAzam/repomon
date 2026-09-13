@@ -48,12 +48,12 @@ export default function ConnectionTrouble(props: ConnectionTroubleProps) {
     <div class="flex min-w-0 items-center gap-2 pl-3.5" data-testid="connection-trouble">
       <Show when={props.snapshot.hint}>
         {(hint) => (
-          <span class="truncate font-sans text-[11px] text-attention" title={hint()}>
+          <span class="truncate min-w-0 font-sans text-[11px] text-attention" title={hint()}>
             {hint()}
           </span>
         )}
       </Show>
-      <span class="shrink-0 truncate text-[10px] text-muted" title={props.snapshot.endpoint}>
+      <span class="min-w-0 truncate text-[10px] text-muted" title={props.snapshot.endpoint}>
         {props.snapshot.endpoint}
       </span>
       <button

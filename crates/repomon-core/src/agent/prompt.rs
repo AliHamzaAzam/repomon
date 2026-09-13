@@ -117,7 +117,7 @@ impl PendingDialog {
     /// The compact one-line summary - exactly what [`detect_pending_prompt`] returns.
     pub fn summary(&self) -> String {
         let s = match &self.title {
-            Some(t) => format!("{t} — {}", self.question),
+            Some(t) => format!("{t}: {}", self.question),
             None => self.question.clone(),
         };
         truncate(&s, 120)
@@ -1005,7 +1005,7 @@ mod tests {
             ╰──────────────────────────────────────────────╯";
         assert_eq!(
             detect_pending_prompt(pane).as_deref(),
-            Some("Bash command — Do you want to proceed?")
+            Some("Bash command: Do you want to proceed?")
         );
     }
 
@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn classify_permission_dialogs() {
         for s in [
-            "Bash command — Do you want to proceed?",
+            "Bash command: Do you want to proceed?",
             "Do you want to make this edit to app.rs?",
             "Do you trust the files in this folder?",
             "Do you trust this folder?",
@@ -1351,7 +1351,7 @@ mod tests {
             ]
         );
         assert_eq!(d.selected, Some(0));
-        assert_eq!(d.summary(), "Bash command — Do you want to proceed?");
+        assert_eq!(d.summary(), "Bash command: Do you want to proceed?");
         assert_eq!(d.class(), PromptClass::Permission);
     }
 

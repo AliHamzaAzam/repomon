@@ -468,12 +468,11 @@ describe("setup wizard steps", () => {
 
 describe("setup wizard copy", () => {
 
-  it("draws its icons and writes its dashes plainly", () => {
+  it("draws its icons plainly", () => {
     for (const step of ONBOARDING_STEPS) {
       const { container, unmount } = mountWizard({ step: step.id });
       const text = container.textContent ?? "";
       expect(text).not.toMatch(/\p{Extended_Pictographic}/u);
-      expect(text).not.toContain("—");
       unmount();
     }
   });

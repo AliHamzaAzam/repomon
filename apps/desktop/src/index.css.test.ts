@@ -107,10 +107,18 @@ describe("index.css breakpoints", () => {
     return rules;
   }
 
-  it("declares exactly the four named breakpoints plus reduced motion", () => {
+  it("declares exactly the six named breakpoints plus reduced motion", () => {
     const rules = mediaRules();
     expect([...rules.keys()].sort()).toEqual(
-      ["(max-height: 720px)", "(max-width: 1100px)", "(max-width: 1280px)", "(min-width: 1600px)", "(prefers-reduced-motion: reduce)"].sort(),
+      [
+        "(max-height: 720px)",
+        "(max-width: 480px)",
+        "(max-width: 800px)",
+        "(max-width: 1100px)",
+        "(max-width: 1280px)",
+        "(min-width: 1600px)",
+        "(prefers-reduced-motion: reduce)",
+      ].sort(),
     );
   });
 
@@ -126,6 +134,17 @@ describe("index.css breakpoints", () => {
     expect(narrow).toContain("15rem minmax(0, 1fr)");
 
     expect(narrow).not.toContain("display: none");
+  });
+
+  it("drops the connection rail's shortcuts hint before its version line as the window narrows", () => {
+    const at800 = mediaRules().get("(max-width: 800px)") ?? "";
+    expect(at800).toContain(".connection-rail__hint");
+    expect(at800).toContain("display: none");
+    expect(at800).not.toContain(".connection-rail__version");
+
+    const at480 = mediaRules().get("(max-width: 480px)") ?? "";
+    expect(at480).toContain(".connection-rail__version");
+    expect(at480).toContain("display: none");
   });
 
   it("lets overlays and the wizard use more of a short window", () => {

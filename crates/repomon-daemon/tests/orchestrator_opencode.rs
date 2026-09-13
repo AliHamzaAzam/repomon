@@ -90,7 +90,7 @@ async fn opencode_backend_starts_degrades_transcript_and_stops() {
     assert_eq!(status["autonomy"], json!("read-only"), "status: {status}");
     assert!(
         status["session_id"].is_null(),
-        "opencode can't pin a session id — must be null, got: {status}"
+        "opencode can't pin a session id: must be null, got: {status}"
     );
 
     // The transcript reads as an empty chat for an opencode backend.

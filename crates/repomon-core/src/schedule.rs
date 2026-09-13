@@ -19,7 +19,7 @@ pub enum Spec {
 pub fn parse_spec(s: &str) -> Result<Spec> {
     let err = || {
         Error::Config(format!(
-            "bad schedule spec {s:?} — use \"daily HH:MM\", \"weekdays HH:MM\", \
+            "bad schedule spec {s:?}: use \"daily HH:MM\", \"weekdays HH:MM\", \
              \"weekends HH:MM\", \"every 30m\", or \"every 2h\""
         ))
     };

@@ -827,6 +827,32 @@ summary:focus-visible,
   background: var(--surface);
 }
 
+/* Each side of the rail clips to its own box instead of overflowing into the other: the
+   leading (connection status) side must never sit under the trailing (fleet stats) side, and
+   dropped trailing items (below) disappear cleanly rather than truncating mid-word. */
+.connection-rail__leading,
+.connection-rail__trailing {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Narrow window: the trailing group sheds its least essential items first so the rail stays a
+   single row and the connection status never has to share space with it. The shortcuts hint is
+   a discoverability nudge only - the shortcut itself and the command palette still open the
+   guide with it hidden - so it goes first; the version line goes next, since it duplicates the
+   status button's own tooltip and the System Health panel that button opens. */
+@media (max-width: 800px) {
+  .connection-rail__hint {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .connection-rail__version {
+    display: none;
+  }
+}
+
 .terminal-host {
   background: var(--background);
 }

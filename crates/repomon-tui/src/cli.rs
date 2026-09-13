@@ -60,7 +60,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
-    /// Talk to repomind — an orchestrator agent that manages the fleet for you. Launches an
+    /// Talk to repomind, an orchestrator agent that manages the fleet for you. Launches an
     /// agent session (`claude` by default, `--agent codex` for Codex) wired to the repomon MCP
     /// server (and your mnemind memory, if present). Repomind now runs in the controller lane
     /// at its home repo (`~/repomind` by default; see `repomon repomind status`) rather than a
@@ -90,7 +90,7 @@ pub enum Command {
         /// An initial goal to start repomind with (optional).
         prompt: Option<String>,
     },
-    /// (Windows) Attach this console to an agent host window — raw proxy; F12 detaches.
+    /// (Windows) Attach this console to an agent host window: raw proxy; F12 detaches.
     AttachHost { window: String },
     /// List or remove standing-orchestration schedules (see `orchestrate --schedule`).
     Schedules {
@@ -822,7 +822,7 @@ fn handle_remote_config(cmd: RemoteCmd) -> Result<()> {
                 None => {
                     let ip = tailscale_ip().ok_or_else(|| {
                         anyhow!(
-                            "couldn't detect a Tailscale IP — is Tailscale running? \
+                            "couldn't detect a Tailscale IP: is Tailscale running? \
                              (or pass --bind <ip:port> explicitly)"
                         )
                     })?;
@@ -1258,7 +1258,7 @@ async fn handle_approvals(
                 )
                 .await?;
             println!(
-                "allowlisted '{pattern}' in {repo} — the daemon now auto-approves matching \
+                "allowlisted '{pattern}' in {repo}: the daemon now auto-approves matching \
                  Bash permissions (destructive commands still always escalate)"
             );
         }
@@ -1726,11 +1726,11 @@ async fn handle_lane(cmd: LaneCmd, config: &Config, socket: Option<PathBuf>) -> 
             match attention {
                 Attention::Permission => {}
                 Attention::Decision => eprintln!(
-                    "warning: this lane is on a DECISION, not a routine permission — make sure \
+                    "warning: this lane is on a DECISION, not a routine permission: make sure \
                      you mean to answer it for the human."
                 ),
                 Attention::EndOfTurn | Attention::DoneCandidate => eprintln!(
-                    "warning: the agent ended its turn (no open dialog) — your keypress will go \
+                    "warning: the agent ended its turn (no open dialog): your keypress will go \
                      to the prompt. Consider `lane send` instead."
                 ),
                 Attention::None => {

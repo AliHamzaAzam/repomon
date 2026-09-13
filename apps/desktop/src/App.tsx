@@ -884,14 +884,14 @@ function App(props: AppProps) {
       <footer
         role="status"
         aria-label="Daemon connection"
-        class="connection-rail flex items-center justify-between border-t border-line bg-surface px-3.5 py-1.5 font-mono text-[11px] text-muted"
+        class="connection-rail flex min-w-0 items-center justify-between border-t border-line bg-surface px-3.5 py-1.5 font-mono text-[11px] text-muted"
       >
-        <div class="flex flex-col gap-0.5 min-w-0">
+        <div class="connection-rail__leading flex flex-col gap-0.5 min-w-0">
           <div class="flex items-center gap-2 min-w-0">
             <button
               type="button"
               class="focus-ring flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -mx-1.5 text-foreground font-medium hover:bg-line/40 transition-colors cursor-pointer text-left"
-              title={`Daemon socket: ${connection().endpoint} · Click to view System Health`}
+              title={`Daemon socket: ${connection().endpoint} · App ${appVersion() || "--"} · daemon ${connection().daemon?.version ?? "--"} · Click to view System Health`}
               aria-label="View system health and daemon connection"
               onClick={() => actions.openSettingsTab("system")}
             >
@@ -899,7 +899,7 @@ function App(props: AppProps) {
               <span class="uppercase tracking-wider text-[10px]">{phaseLabel(connection().phase)}</span>
             </button>
             <Show when={connection().message}>
-              {(msg) => <span class="truncate text-fault ml-2 font-sans text-xs">{msg()}</span>}
+              {(msg) => <span class="truncate min-w-0 text-fault ml-2 font-sans text-xs" title={msg()}>{msg()}</span>}
             </Show>
           </div>
 
@@ -912,11 +912,11 @@ function App(props: AppProps) {
           </Show>
         </div>
 
-        <div class="flex items-center gap-4 text-muted shrink-0">
+        <div class="connection-rail__trailing flex shrink-0 items-center gap-4 text-muted">
           <Show when={showShortcutsHint()}>
             <button
               type="button"
-              class="focus-ring rounded px-1 -mx-1 text-signal hover:text-foreground transition-colors"
+              class="connection-rail__hint focus-ring rounded px-1 -mx-1 text-signal hover:text-foreground transition-colors"
               onClick={() => actions.openShortcutsGuide()}
             >
               {formatChord("mod+?")} for shortcuts
@@ -926,7 +926,7 @@ function App(props: AppProps) {
             {connection().daemon?.repos ?? 0} repos / {connection().daemon?.lanes ?? 0} lanes
           </span>
           <span>Uptime {formatUptime(connection().daemon?.uptime_secs)}</span>
-          <span>App {appVersion() || "--"} · daemon {connection().daemon?.version ?? "--"}</span>
+          <span class="connection-rail__version">App {appVersion() || "--"} · daemon {connection().daemon?.version ?? "--"}</span>
         </div>
       </footer>
 
