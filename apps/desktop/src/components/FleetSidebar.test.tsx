@@ -331,9 +331,12 @@ describe("fleet sidebar hiding", () => {
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     expect(screen.getByText(/Rate Limits/)).toBeInTheDocument();
-    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    // The row draws the short name; the full one stays on the progressbar and in the tooltip.
+    expect(screen.getByText("5-Hour")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "5-Hour Quota" })).toBeInTheDocument();
     expect(screen.getByText("12%")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Quota")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Weekly Quota" })).toBeInTheDocument();
     expect(screen.getByText("85%")).toBeInTheDocument();
   });
 
@@ -364,6 +367,42 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("at limit")).toBeInTheDocument();
   });
 
+  it("gives each quota one row carrying its label, state word, bar and number", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "codex",
+      age_secs: 15,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 12 },
+          { label: "wk", pct_used: 88 },
+          { label: "sonnet", pct_used: 100 },
+          { label: "mo", pct_used: undefined },
+        ],
+      },
+    });
+    (fleet as any).costToday = () => 124.7;
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    // One row per window: the label, the warning word and the number share the bar's own row, so
+    // four quotas cost four lines rather than eight.
+    const tight = screen.getByRole("progressbar", { name: "Weekly Quota" }).parentElement!;
+    expect(tight).toHaveTextContent("Weekly");
+    expect(tight).toHaveTextContent("tight");
+    expect(tight).toHaveTextContent("88%");
+
+    const unread = screen.getByRole("progressbar", { name: "Monthly Quota" }).parentElement!;
+    expect(unread).toHaveTextContent("no data");
+
+    // No card around the strip: it sits on the sidebar's own ground under a single rule.
+    const strip = tight.closest(".border-t")!;
+    expect(strip.querySelector(".rounded-lg")).toBeNull();
+    expect(strip).toHaveTextContent("$124.7");
+    expect(screen.getAllByRole("progressbar")).toHaveLength(4);
+  });
+
   it("says the report is empty instead of leaving the rate-limits panel blank", () => {
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
@@ -392,9 +431,10 @@ describe("fleet sidebar hiding", () => {
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     expect(screen.getByText("Rate Limits (codex)")).toBeInTheDocument();
-    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour")).toBeInTheDocument();
     expect(screen.getByText("20%")).toBeInTheDocument();
-    expect(screen.getByText("Monthly Quota")).toBeInTheDocument();
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Monthly Quota" })).toBeInTheDocument();
     expect(screen.getByText("65%")).toBeInTheDocument();
   });
 
@@ -417,12 +457,13 @@ describe("fleet sidebar hiding", () => {
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     expect(screen.getByText("Rate Limits (antigravity)")).toBeInTheDocument();
-    expect(screen.getByText("5-Hour Quota")).toBeInTheDocument();
+    expect(screen.getByText("5-Hour")).toBeInTheDocument();
     expect(screen.getByText("8%")).toBeInTheDocument();
-    expect(screen.getByText("Weekly Quota")).toBeInTheDocument();
+    expect(screen.getByText("Weekly")).toBeInTheDocument();
     expect(screen.getByText("29%")).toBeInTheDocument();
-    expect(screen.getByText("Claude 5h Quota")).toBeInTheDocument();
-    expect(screen.getByText("Claude Weekly Quota")).toBeInTheDocument();
+    expect(screen.getByText("Claude 5h")).toBeInTheDocument();
+    expect(screen.getByText("Claude Weekly")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Claude Weekly Quota" })).toBeInTheDocument();
   });
 
   it("auto-collapses inactive lane row by default and allows expanding/minimizing", () => {
@@ -783,7 +824,8 @@ describe("sidebar cost visibility", () => {
     expect(screen.getByText("Today")).toBeInTheDocument();
     expect(screen.queryByLabelText("Hide today's cost in the sidebar")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Refresh rate limit data")).toBeInTheDocument();
-    expect(screen.getByText("just now")).toBeInTheDocument();
+    // The age sits next to a refresh control, so it reads "now" and keeps the sentence in its title.
+    expect(screen.getByTitle("Updated 0 seconds ago")).toHaveTextContent("now");
     saveSidebarShowTodayCost(false);
     expect(screen.queryByText("Today")).not.toBeInTheDocument();
     first.unmount();
