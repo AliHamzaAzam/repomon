@@ -208,6 +208,29 @@ const AGENT_CHOICES = [
   { name: "opencode", command: "opencode", detected: true, default: false, custom: false },
 ];
 
+// The operator's own eight, two of them off PATH, for the keyboard-navigation screenshots: the
+// arrow grid and the unselectable-but-focusable missing tile only exist at this length.
+const AGENT_CHOICES_EIGHT = [
+  { name: "claude-code", command: "claude", detected: true, default: true, custom: false },
+  { name: "claude-work", command: "claude-work", detected: true, default: false, custom: true },
+  { name: "codex", command: "codex", detected: true, default: false, custom: false },
+  { name: "hermes", command: "hermes", detected: true, default: false, custom: false },
+  { name: "opencode", command: "opencode", detected: true, default: false, custom: false },
+  { name: "antigravity", command: "antigravity", detected: true, default: false, custom: false },
+  { name: "aider", command: "aider", detected: false, default: false, custom: false },
+  { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
+];
+
+// Quota pressure worth looking at: one quiet window, one tight, one at the limit, and one the
+// probe could not read at all. `?usage=` opts a screenshot in; every other scenario keeps the
+// empty report, because most accounts have nothing probed.
+const USAGE_WINDOWS = [
+  { label: "5h", pct_used: 12, reset_at: "2026-09-14T18:30:00Z" },
+  { label: "wk", pct_used: 88, reset_at: null },
+  { label: "sonnet", pct_used: 100, reset_at: null },
+  { label: "mo", pct_used: undefined as unknown as number, reset_at: null },
+];
+
 const PULL_REQUESTS = [
   {
     repo_id: 1,
@@ -296,8 +319,10 @@ const scenarioAgent = query.get("agent") ?? (scenario === "no-source" ? "hermes"
 // loading forever (agent.detect never resolves below) for the loading-skeleton screenshot.
 const agentsDemo = query.has("agentsDemo");
 const spawnLoading = scenario === "spawn-loading";
+const spawnKeys = scenario === "spawn-keys";
+const usageProbed = query.has("usage");
 const agyState = (query.get("states") ?? "sent") as "sent" | "queued" | "consumed" | "delivered";
-const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "agy-cleared", "mail-pinned", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: spawnLoading ? [] : [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : []), ...(agentsDemo ? [agentSession({id:103,agent:"claude-code",session_id:null,tmux_window:null,external:true,status:"idle",custom_label:"design-review"})] : [])] });
+const conversationLane = lane({ id: 10, repo: defects ? defectRepo : scenario === "operator" ? OPERATOR_REPOS[0] : REPOS[0], branch: defects || ["dull", "attachments", "no-source", "antigravity", "agy-cleared", "mail-pinned", "long-history", "operator"].includes(scenario) ? "main" : "codex/charms-collections", last_activity_at: ago(4), view_mode: "conversation", agent_sessions: spawnLoading || spawnKeys ? [] : [agentSession({ id:101, agent: scenarioAgent, session_id: scenario === "no-source" ? null : "s10", tmux_window:"lane-10", status: scenario === "dull" ? "idle" : "running" }), ...(defects ? [agentSession({id:102,agent:"claude-code",session_id:"s11",tmux_window:"lane-10/2",status:"idle",custom_label:"ai-chatbot-development"})] : []), ...(agentsDemo ? [agentSession({id:103,agent:"claude-code",session_id:null,tmux_window:null,external:true,status:"idle",custom_label:"design-review"})] : [])] });
 const fixtureRepos = defects ? [defectRepo] : fleetMode === "operator" || scenario === "operator" || defects ? OPERATOR_REPOS : ordinary || real ? ORDINARY_REPOS : REPOS;
 const fixtureLanes = surface === "conversation" ? [conversationLane] : fleetMode === "operator" ? OPERATOR_LANES : ordinary ? ORDINARY_LANES : real ? REAL_LANES : LANES;
 
@@ -518,7 +543,7 @@ if (surface === "settings") {
     else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.click();
   }, 100);
 }
-if (spawnLoading) {
+if (spawnLoading || spawnKeys) {
   // The real, unforced route to the Spawn dialog: a lane with no agent yet shows this button
   // instead of a mounted pane, so no keyboard-shortcut simulation is needed to reach it.
   const openSpawn = setInterval(() => {
@@ -624,7 +649,10 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   "agent.command_catalog": () => nativeCatalog ?? { commands: [], models: [], model_command: null, efforts: [], effort_command: null },
   "repo.list": () => fixtureRepos,
   "lane.list": () => fixtureLanes,
-  "usage.get": () => [],
+  "usage.get": () => (usageProbed
+    ? [{ key: "default", label: "main", age_secs: 42, report: { windows: USAGE_WINDOWS } },
+       { key: "codex", label: "codex", age_secs: 42, report: { windows: USAGE_WINDOWS } }]
+    : []),
   "terminal.list_all": () => [],
   // Carries no `theme`/`accent` so App.tsx's config.get handler leaves the `?theme=` query
   // param (read by index.html's boot script) in charge of the screenshot's theme.
@@ -668,7 +696,7 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
   // Never resolves for spawn-loading: the daemon serialises this behind the chat's own first
   // page in the reported bug, so the fixture holds it open indefinitely for the loading-skeleton
   // screenshot rather than approximating the delay with a timer.
-  "agent.detect": () => (spawnLoading ? new Promise(() => undefined) : AGENT_CHOICES),
+  "agent.detect": () => (spawnLoading ? new Promise(() => undefined) : spawnKeys ? AGENT_CHOICES_EIGHT : AGENT_CHOICES),
   "lane.headline": (params) => {
     const id = (params as { lane_id:number }).lane_id;
     if (surface === "conversation" && scenario === "operator") return "Theme-swap watch for aventhi-voice";
