@@ -613,6 +613,27 @@ describe("Terminal / Chat", () => {
   });
 });
 
+describe("Pane header stability", () => {
+  it("keeps the Terminal/Chat picker as the header's last control in both views, so its position cannot depend on view()", async () => {
+    watchTerminalMock.mockResolvedValue({ ack: { cols: 80, rows: 24, generation: 1, sequence: 1 }, stop: vi.fn().mockResolvedValue(undefined) });
+    daemonCallMock.mockImplementation(async (method: string) => {
+      if (method === "agent.capture") return { content: "" };
+      if (method === "agent.prompt") return { dialog: null };
+      if (method === "agent.transcript_watch") return { items: [], next_before: null };
+      return null;
+    });
+    const { container } = render(() => <TerminalPane laneId={21} window="lane-21" label="codex" renderer="dom" visible focused />);
+    await flushMicrotasks();
+    expect(screen.queryByText("Use default")).not.toBeInTheDocument();
+    const picker = () => container.querySelector(".view-toggle");
+    // Right-anchored group: whatever sits after the picker pushes it left. Last child, always.
+    expect(picker()?.nextElementSibling).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await flushMicrotasks();
+    expect(picker()?.nextElementSibling).toBeNull();
+    expect(picker()?.previousElementSibling).not.toBeNull();
+  });
+});
 
 it("reuses the mounted terminal for command controls and returns to the same chat draft", async () => {
   watchTerminalMock.mockResolvedValue({ack:{cols:120,rows:32,generation:1,sequence:1},stop:vi.fn().mockResolvedValue(undefined)});
