@@ -31,6 +31,24 @@ describe("Switch", () => {
     expect(checked()).toBe(false);
   });
 
+  it("hands the knob's position to the sheet through aria-checked", () => {
+    const [checked, setChecked] = createSignal(false);
+    const { container } = render(() => <Switch label="Coalesce bursts" checked={checked()} onChange={setChecked} />);
+
+    const control = screen.getByRole("switch", { name: "Coalesce bursts" });
+    const knob = container.querySelector(".switch-knob");
+    expect(control).toHaveClass("switch-track");
+    expect(knob).not.toBeNull();
+    // The selector that moves the knob is `.switch-track[aria-checked="true"] .switch-knob`, so
+    // the knob has to be a descendant of the control that carries the state, and the state has to
+    // be a real attribute rather than a class the markup sets separately.
+    expect(knob?.parentElement).toBe(control);
+    expect(control).toHaveAttribute("aria-checked", "false");
+
+    fireEvent.click(control);
+    expect(control).toHaveAttribute("aria-checked", "true");
+  });
+
   it("does not fire onChange when disabled", () => {
     let calls = 0;
     render(() => <Switch label="Locked" checked={false} disabled onChange={() => { calls += 1; }} />);
