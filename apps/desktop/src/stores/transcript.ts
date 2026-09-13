@@ -211,7 +211,13 @@ export function createTranscript(target: () => TranscriptTarget | null) {
           if (!page) throw new Error("The transcript watch returned no page. Open terminal or retry.");
           const incoming = page.items.map((item, index) => transcriptRow(item, `page:latest:${index}`));
           const present = new Set(incoming.map((row) => row.key));
-          const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
+          // Rows this re-attached watch no longer carries. `live:` is the daemon's namespace for
+          // rows that exist only while a watch is attached (pane previews, turn/working status,
+          // dialogs) and its serial is per-stream, so a watch can never reconcile one it did not
+          // issue. Testing `partial` and the transient kinds alone missed a preview whose turn
+          // ended without a durable row - a usage limit, interrupt or crash all leave `partial`
+          // cleared - which then sat beside the durable row the next watch seated for that turn.
+          const staleLive = state.rows.filter((row) => !present.has(row.key) && (row.key.startsWith("live:") || row.item.partial || ["status", "dialog", "terminal_block"].includes(row.item.kind ?? ""))).map((row) => row.key);
           apply(incoming, staleLive, false, page.order);
           if (!paged) { setNextBefore(page.next_before); setRemaining(page.older_message_count ?? null); }
           if (page.activity !== undefined) setActivity(page.activity);
