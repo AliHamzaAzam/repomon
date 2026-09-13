@@ -58,7 +58,11 @@ runs over a Unix socket on macOS/Linux and a named pipe on Windows; the JSON-RPC
 - **repomon-mcp**: the stdio MCP server library invoked as `repomond mcp` (see "repomind" below). It
   backs both the orchestrator's full fleet tool surface and the restricted `fleet_status` /
   `message_send` / `message_inbox` / `message_mark_read` surface managed worker agents get for fleet mail
-  (see [messaging.md](messaging.md)).
+  (see [messaging.md](messaging.md)). Bundles ship it a second time as `repomond-mcp`, a hard link to
+  the daemon that runs the bridge with no subcommand: a process is named by its executable, so a
+  bridge launched as `repomond` reads as another daemon in Activity Monitor. Installs without that
+  executable (a plain `cargo install`, and every config written before it existed) keep using the
+  `mcp` subcommand.
 
 ## Usage ledger
 

@@ -16,6 +16,17 @@ fn managed_daemon_path() -> PathBuf {
         .join(format!("repomond{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The bundled MCP bridge beside this app's executable, when the build ships one.
+fn bundled_mcp_bridge_path() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|directory| {
+        directory.join(format!(
+            "{}{}",
+            service::MCP_BRIDGE_BIN,
+            std::env::consts::EXE_SUFFIX
+        ))
+    })
+}
+
 #[cfg(windows)]
 fn bundled_agent_host_path() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(|directory| {
@@ -122,6 +133,19 @@ pub async fn apply_pending_daemon_update(
     }
 
     copy_daemon(&bundled, &managed)?;
+    // The bridge only keeps its own name while it sits beside the daemon that launches it: that
+    // is where `mcp_bridge_argv` looks, and a missing bridge falls back to `repomond mcp`.
+    if let Some(bridge) = bundled_mcp_bridge_path().filter(|path| path.is_file()) {
+        let destination = managed
+            .parent()
+            .context("managed daemon path has no parent")?
+            .join(format!(
+                "{}{}",
+                service::MCP_BRIDGE_BIN,
+                std::env::consts::EXE_SUFFIX
+            ));
+        copy_daemon(&bridge, &destination)?;
+    }
     #[cfg(windows)]
     if let Some(host) = bundled_agent_host_path().filter(|path| path.is_file()) {
         let destination = managed

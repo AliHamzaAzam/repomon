@@ -126,14 +126,22 @@ jobs:
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
             done
+            # The MCP bridge is the daemon under a second executable name, which is what keeps a
+            # bridge from reading as another daemon in Activity Monitor.
+            for slice in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+              ln -f "apps/desktop/src-tauri/binaries/repomond-$slice" \
+                "apps/desktop/src-tauri/binaries/repomond-mcp-$slice"
+            done
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
             cargo build --release --locked -p repomon-daemon -p repomon-tui --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond.exe" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe"
             cp "target/${{ matrix.target }}/release/repomon.exe" "apps/desktop/src-tauri/binaries/repomon-${{ matrix.target }}.exe"
+            ln -f "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}.exe" "apps/desktop/src-tauri/binaries/repomond-mcp-${{ matrix.target }}.exe"
           else
             cargo build --release --locked -p repomon-daemon -p repomon-tui --target "${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomond" "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/repomon" "apps/desktop/src-tauri/binaries/repomon-${{ matrix.target }}"
+            ln -f "apps/desktop/src-tauri/binaries/repomond-${{ matrix.target }}" "apps/desktop/src-tauri/binaries/repomond-mcp-${{ matrix.target }}"
           fi
       - name: Build agent-host sidecar (Windows)
         if: ${{ matrix.host_sidecar }}

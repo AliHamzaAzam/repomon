@@ -159,6 +159,119 @@ fn spawn_mcp_child(sock: &Path, extra_env: &[(&str, &str)]) -> Child {
     child
 }
 
+/// Spawn an arbitrary executable as the MCP bridge, wired exactly like [`spawn_mcp_child`] but
+/// with caller-chosen argv - the rename ships a second *executable name*, so the test has to
+/// exercise a real differently-named file rather than a rewritten `argv[0]`.
+fn spawn_bridge_program(program: &Path, args: &[&str]) -> Child {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    cmd.env_remove("REPOMON_MCP_MODE");
+    cmd.env_remove("REPOMON_MCP_IDENTITY_TOKEN");
+    let mut child = cmd.spawn().expect("spawn the MCP bridge");
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[bridge stderr] {line}");
+            }
+        });
+    }
+    child
+}
+
+/// Drive the MCP handshake and return the server name the child reported. A child that is not
+/// running the bridge never answers, so the read timeout is the failure.
+async fn bridge_server_name(child: &mut Child) -> (String, ChildStdin) {
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+    mcp_request(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "repomon-it", "version": "0.0.0" } }),
+    )
+    .await;
+    let resp = mcp_read(&mut lines).await;
+    (
+        resp["result"]["serverInfo"]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        stdin,
+    )
+}
+
+/// The bundled second name for the daemon binary. A hard link keeps it byte-identical to the
+/// daemon; the point is only that the kernel records a different executable for the process.
+fn link_bridge_executable(dir: &Path) -> PathBuf {
+    let bridge = dir.join(format!(
+        "{}{}",
+        repomon_core::service::MCP_BRIDGE_BIN,
+        std::env::consts::EXE_SUFFIX
+    ));
+    let daemon = Path::new(env!("CARGO_BIN_EXE_repomond"));
+    if std::fs::hard_link(daemon, &bridge).is_err() {
+        std::fs::copy(daemon, &bridge).expect("stage the bridge executable");
+    }
+    bridge
+}
+
+/// A process invoked as `repomond-mcp` must run the bridge with no subcommand, and must report
+/// that name as its executable - `comm` is what Activity Monitor shows, and it is the whole
+/// reason the bridge ships under a second name instead of a rewritten process title.
+#[tokio::test]
+async fn bridge_executable_name_runs_the_bridge_and_is_the_process_name() {
+    let (sock, _control, _state_dir) = boot_daemon("bridge-name").await;
+    let staging = tempfile::tempdir().unwrap();
+    let bridge = link_bridge_executable(staging.path());
+
+    let mut child = spawn_bridge_program(&bridge, &["--socket", &sock.to_string_lossy()]);
+    let (server_name, stdin) = bridge_server_name(&mut child).await;
+    assert_eq!(
+        server_name,
+        "repomon",
+        "a process invoked as {} must run the MCP bridge",
+        repomon_core::service::MCP_BRIDGE_BIN
+    );
+
+    #[cfg(unix)]
+    {
+        let pid = child.id().expect("bridge pid");
+        let comm = StdCommand::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps -o comm=");
+        let comm = String::from_utf8_lossy(&comm.stdout).trim().to_string();
+        assert!(
+            Path::new(&comm).file_stem().and_then(|s| s.to_str())
+                == Some(repomon_core::service::MCP_BRIDGE_BIN),
+            "ps -o comm= reported {comm:?}, which is what Activity Monitor would show"
+        );
+    }
+
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// Every MCP config already on disk names the daemon plus an `mcp` argument. The rename must not
+/// orphan them, so the subcommand keeps running the same bridge.
+#[tokio::test]
+async fn mcp_subcommand_still_runs_the_bridge_after_the_rename() {
+    let (sock, _control, _state_dir) = boot_daemon("bridge-subcmd").await;
+    let mut child = spawn_bridge_program(
+        Path::new(env!("CARGO_BIN_EXE_repomond")),
+        &["--socket", &sock.to_string_lossy(), "mcp"],
+    );
+    let (server_name, stdin) = bridge_server_name(&mut child).await;
+    assert_eq!(server_name, "repomon");
+    shutdown_mcp_child(child, stdin).await;
+    let _ = std::fs::remove_file(&sock);
+}
+
 async fn mcp_send(stdin: &mut ChildStdin, msg: &Value) {
     let mut line = msg.to_string();
     line.push('\n');
