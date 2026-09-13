@@ -337,6 +337,44 @@ describe("fleet sidebar hiding", () => {
     expect(screen.getByText("85%")).toBeInTheDocument();
   });
 
+  it("gives every quota window a bar and separates no data from zero", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({
+      label: "claude-3-5-sonnet",
+      age_secs: 15,
+      report: {
+        windows: [
+          { label: "5h", pct_used: 0 },
+          { label: "wk", pct_used: 97 },
+          // A window the probe could not read: the wire type says number, the probe does not.
+          { label: "sonnet", pct_used: undefined },
+        ],
+      },
+    });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByRole("progressbar", { name: "5-Hour Quota" })).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByRole("progressbar", { name: "Weekly Quota" })).toHaveAttribute("aria-valuenow", "97");
+    const unread = screen.getByRole("progressbar", { name: "Model Quota" });
+    expect(unread).not.toHaveAttribute("aria-valuenow");
+    expect(screen.getByText("no data")).toBeInTheDocument();
+    expect(unread.closest("[title]")?.getAttribute("title")).toBe("Model Quota: no data");
+    expect(screen.getByText("at limit")).toBeInTheDocument();
+  });
+
+  it("says the report is empty instead of leaving the rate-limits panel blank", () => {
+    const alpha = repo(1, "alpha");
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    (fleet as any).focusedUsage = () => ({ label: "main", age_secs: 15, report: { windows: [] } });
+
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText("No quota windows reported.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("progressbar")).toHaveLength(0);
+  });
+
   it("renders codex usage with monthly quota correctly", () => {
     const alpha = repo(1, "alpha");
     const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
@@ -462,13 +500,13 @@ describe("fleet sidebar hiding", () => {
     render(() => <FleetSidebar fleet={fleet} actions={actions} />);
 
     // Window with a valid, same-day reset_at gets a time-only tooltip clause.
-    expect(screen.getByText("12%").parentElement?.getAttribute("title")).toMatch(/resets at/);
+    expect(screen.getByText("12%").closest("[title]")?.getAttribute("title")).toMatch(/resets at/);
     // Window with no reset_at omits the reset clause entirely rather than showing nothing useful.
-    const weeklyTitle = screen.getByText("85%").parentElement?.getAttribute("title");
+    const weeklyTitle = screen.getByText("85%").closest("[title]")?.getAttribute("title");
     expect(weeklyTitle).not.toMatch(/resets at/);
     expect(weeklyTitle).toMatch(/85% used$/);
     // Window with an unparsable reset_at is treated the same as absent (formatResetAt returns null).
-    const monthlyTitle = screen.getByText("40%").parentElement?.getAttribute("title");
+    const monthlyTitle = screen.getByText("40%").closest("[title]")?.getAttribute("title");
     expect(monthlyTitle).not.toMatch(/resets at/);
 
     vi.useRealTimers();
