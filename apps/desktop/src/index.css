@@ -601,6 +601,60 @@ summary:focus-visible,
   opacity: 0.5;
 }
 
+/* The on/off Switch in Settings. Its knob used to be seated by two independent literals, a left
+   offset and a translate distance, and they had drifted apart: the knob left 3px of track above,
+   below and behind it but landed 1px from the rounded end in front, which reads as a knob
+   escaping its track rather than sitting in it. So the track is the only geometry declared here
+   and everything else is derived from it - the knob is the track less its border and one inset
+   per side, and the travel is whatever the track has left over once the knob is seated. The two
+   numbers cannot fall out of step again because there is only one.
+
+   At the incumbent 36x20 track with a 1px border: seated = 2 * (1 + 2) = 6px, so the knob is
+   20 - 6 = 14px and the travel is 36 - 6 - 14 = 16px. That leaves 3px of track on all four
+   sides of the knob whether it is on or off; the two states are mirror images.
+
+   Motion is --motion-tap, not a spring. Both springs in the vocabulary earn their keep with an
+   overshoot, and eleven of these sit in one Settings grid that the operator sets up rather than
+   watches: eleven overshoots at once is a wobble, not a flourish. Tap is also shorter than the
+   bare 150ms literal it replaces, so joining the vocabulary made this control quieter. */
+.switch-track {
+  --switch-border: 1px;
+  --switch-inset: 2px;
+  --switch-track-width: 2.25rem;
+  --switch-track-height: 1.25rem;
+  --switch-seated: calc(2 * (var(--switch-border) + var(--switch-inset)));
+  --switch-knob: calc(var(--switch-track-height) - var(--switch-seated));
+  --switch-travel: calc(var(--switch-track-width) - var(--switch-seated) - var(--switch-knob));
+  position: relative;
+  flex: none;
+  width: var(--switch-track-width);
+  height: var(--switch-track-height);
+  /* Width and style only. The checked and unchecked border colours stay on the component, where
+     the background they pair with lives. */
+  border-width: var(--switch-border);
+  border-style: solid;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color var(--motion-tap) var(--ease-tap),
+    border-color var(--motion-tap) var(--ease-tap);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 50%;
+  left: var(--switch-inset);
+  width: var(--switch-knob);
+  height: var(--switch-knob);
+  border-radius: 999px;
+  pointer-events: none;
+  transform: translate3d(0, -50%, 0);
+  transition: transform var(--motion-tap) var(--ease-tap);
+}
+
+.switch-track[aria-checked="true"] .switch-knob {
+  transform: translate3d(var(--switch-travel), -50%, 0);
+}
+
 .resizable-split-handle {
   position: relative;
   z-index: 5;
