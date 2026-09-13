@@ -690,7 +690,9 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
     from: ago(1440),
     to: ago(0),
     groups: [],
-    totals: { cost_usd: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
+    // `?usage=` screenshots carry the operator's own day of spend, so the sidebar's Today row is
+    // as wide in a capture as it is on his screen. Every other scenario keeps the quiet zero.
+    totals: { cost_usd: usageProbed ? 124.7 : 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
     unpriced_models: [],
   }),
   // Never resolves for spawn-loading: the daemon serialises this behind the chat's own first
