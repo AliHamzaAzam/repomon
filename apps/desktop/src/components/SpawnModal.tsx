@@ -1,11 +1,11 @@
-import { For, Show, createEffect, createSignal, createUniqueId, onMount } from "solid-js";
+import { For, Show, batch, createEffect, createSignal, createUniqueId, onMount } from "solid-js";
 
 import type { AgentChoice, Lane } from "../bindings";
 import { pickDefaultAgent } from "../ipc/agentChoices";
 import { translateError, type TranslatedError } from "../ipc/errors";
 import { daemonCall } from "../ipc/rpc";
 import { cachedAgentChoices, loadAgentChoices, refreshAgentChoices } from "../stores/agentChoices";
-import { AgentIcon, IconCheck, IconExternalLink } from "./icons";
+import { AgentIcon, IconExternalLink } from "./icons";
 import Modal from "./Modal";
 
 /// The runtime grid is two columns at every width, so Left and Right always cross columns and Up
@@ -16,6 +16,12 @@ const RUNTIME_COLUMNS = 2;
 /// Direct selection only reaches as far as there are digits to press.
 const MAX_DIGIT_SHORTCUTS = 9;
 
+/// Where the caret starts, and where it retreats to when the runtime it was on stops existing.
+function defaultIndex(list: AgentChoice[]): number {
+  const preferred = pickDefaultAgent(list);
+  return Math.max(0, list.findIndex((choice) => choice.name === preferred));
+}
+
 export default function SpawnModal(props: {
   lane: Lane;
   onClose: () => void;
@@ -24,7 +30,6 @@ export default function SpawnModal(props: {
 }) {
   const initialChoices = cachedAgentChoices();
   const [choices, setChoices] = createSignal<AgentChoice[]>(initialChoices ?? []);
-  const [agent, setAgent] = createSignal(initialChoices ? pickDefaultAgent(initialChoices) : "");
   const [choicesLoading, setChoicesLoading] = createSignal(!initialChoices);
   const [choicesError, setChoicesError] = createSignal<TranslatedError | null>(null);
   const [task, setTask] = createSignal("");
@@ -32,15 +37,21 @@ export default function SpawnModal(props: {
   const [spawned, setSpawned] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<TranslatedError | null>(null);
-  const [focusIndex, setFocusIndex] = createSignal(0);
+  const [focusIndex, setFocusIndex] = createSignal(initialChoices ? defaultIndex(initialChoices) : 0);
 
   const groupLabelId = createUniqueId();
   const hintId = createUniqueId();
   const tiles: Array<HTMLButtonElement | undefined> = [];
   let contentRoot!: HTMLDivElement;
 
-  const selectedIndex = () => choices().findIndex((choice) => choice.name === agent());
   const focusedChoice = () => choices()[focusIndex()];
+  /// The selection is not a second state that could drift from the caret; it is the caret, read
+  /// through the one question that matters. So the marked runtime is always the runtime Enter
+  /// spawns, and when Enter would not spawn - an uninstalled runtime - nothing is marked at all.
+  const agent = () => {
+    const choice = focusedChoice();
+    return choice?.detected ? choice.name : "";
+  };
   /// Without a Settings tab to open there is nothing to say about a missing runtime beyond the
   /// badge, so the tile must not advertise an explanation it cannot produce.
   const canExplainMissing = () => Boolean(props.onOpenSettingsTab);
@@ -54,10 +65,13 @@ export default function SpawnModal(props: {
     const request = force ? refreshAgentChoices() : loadAgentChoices();
     void request
       .then((detected) => {
-        setChoices(detected);
-        setAgent((current) => {
-          if (!detected.length) return "";
-          return current && detected.some((choice) => choice.name === current) ? current : pickDefaultAgent(detected);
+        const held = focusedChoice()?.name;
+        // One batch, because the caret is the selection: a render between the two writes would
+        // paint the mark on whatever runtime happened to inherit the old index.
+        batch(() => {
+          setChoices(detected);
+          const kept = held ? detected.findIndex((choice) => choice.name === held) : -1;
+          setFocusIndex(kept >= 0 ? kept : defaultIndex(detected));
         });
         setChoicesLoading(false);
       })
@@ -76,11 +90,9 @@ export default function SpawnModal(props: {
     const detected = choices();
     if (adoptedFocus || !detected.length) return;
     adoptedFocus = true;
-    const index = Math.max(0, detected.findIndex((choice) => choice.name === agent()));
-    setFocusIndex(index);
     const active = document.activeElement;
     const engaged = active instanceof HTMLElement && (contentRoot.contains(active) || Boolean(active.closest("footer")));
-    if (!engaged) queueMicrotask(() => tiles[index]?.focus());
+    if (!engaged) queueMicrotask(() => tiles[focusIndex()]?.focus());
   });
 
   function focusTile(index: number) {
@@ -98,8 +110,8 @@ export default function SpawnModal(props: {
     }
   }
 
-  /// One meaning per tile: a detected runtime is the selection, a missing one is its own
-  /// explanation. Nothing here can put an uninstalled runtime into `agent`.
+  /// Reaching a tile is what selects it, so activation has nothing left to choose: on a detected
+  /// runtime it only commits, and on a missing one it can only explain.
   function activateTile(index: number, alsoSpawn: boolean) {
     const choice = choices()[index];
     if (!choice) return;
@@ -108,7 +120,6 @@ export default function SpawnModal(props: {
       openInstallHelp(choice);
       return;
     }
-    setAgent(choice.name);
     if (alsoSpawn) void spawn(choice.name);
   }
 
@@ -155,8 +166,6 @@ export default function SpawnModal(props: {
     if (index >= Math.min(count, MAX_DIGIT_SHORTCUTS)) return;
     event.preventDefault();
     focusTile(index);
-    const choice = choices()[index];
-    if (choice?.detected) setAgent(choice.name);
   }
 
   /// Enter commits the dialog from anywhere it cannot mean something else. It means a newline in
@@ -204,9 +213,9 @@ export default function SpawnModal(props: {
     }
     const digits = Math.min(choices().length, MAX_DIGIT_SHORTCUTS);
     const direct = digits > 1 ? `1 to ${digits} picks a runtime, ` : "";
-    // Enter acts on the focused tile, not the checked one, so the hint names it. Colour and the
-    // check mark answer this at a glance; the sentence answers it for anyone reading the words.
-    return `Arrows move, ${direct}Enter spawns ${choice ? choice.name : "the focused runtime"}.`;
+    // The mark answers which runtime Enter takes, so the hint is left with its real job: saying
+    // that these keys exist at all.
+    return `Arrows move, ${direct}Enter spawns.`;
   }
 
   return (
@@ -270,6 +279,10 @@ export default function SpawnModal(props: {
               >
                 <For each={choices()}>
                   {(choice, index) => (
+                    // The one mark is the raised ground. It is tonal rather than a ring because
+                    // index.css hands the signal ring to every focused button, a focused MISSING
+                    // tile included, and that tile must never read as selected; the ground also
+                    // survives focus leaving the grid, which a ring would not.
                     <button
                       ref={(element) => (tiles[index()] = element)}
                       type="button"
@@ -278,8 +291,9 @@ export default function SpawnModal(props: {
                       aria-disabled={choice.detected ? undefined : true}
                       aria-label={tileName(choice)}
                       tabindex={index() === focusIndex() ? 0 : -1}
-                      autofocus={index() === selectedIndex() || undefined}
+                      autofocus={index() === focusIndex() || undefined}
                       title={choice.name}
+                      data-selected={agent() === choice.name ? "" : undefined}
                       class={`focus-ring flex min-w-0 items-center justify-between gap-2 rounded-xl border p-3 text-left transition-colors ${
                         agent() === choice.name
                           ? "border-muted bg-raised text-foreground"
@@ -315,13 +329,6 @@ export default function SpawnModal(props: {
                             <Show when={canExplainMissing()}>
                               <IconExternalLink size={9} />
                             </Show>
-                          </span>
-                        </Show>
-                        {/* The selection mark. A check is a fact that stays put; the focus ring is
-                            a ring that moves. Nothing else in this grid is either. */}
-                        <Show when={agent() === choice.name}>
-                          <span data-selected-mark class="flex text-foreground">
-                            <IconCheck size={13} />
                           </span>
                         </Show>
                       </span>
