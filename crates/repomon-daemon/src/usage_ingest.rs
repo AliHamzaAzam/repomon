@@ -149,12 +149,12 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
             .collect(),
     };
     for (projects, account) in claude_roots {
-        for dir in read_dir(&projects) {
-            for entry in read_dir(&dir) {
+        for dir in list_sources(&projects) {
+            for entry in list_sources(&dir) {
                 // Subagent transcripts live below the parent session directory and contribute to
                 // that parent's usage.
                 if entry.is_dir() {
-                    for file in read_dir(&entry.join(CLAUDE_SUBAGENTS_DIR)) {
+                    for file in list_sources(&entry.join(CLAUDE_SUBAGENTS_DIR)) {
                         if file.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                             continue;
                         }
@@ -190,10 +190,10 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
 
     // Codex rollouts nest by year, month and day.
     let codex = codex_sessions_root();
-    for year in read_dir(&codex) {
-        for month in read_dir(&year) {
-            for day in read_dir(&month) {
-                for file in read_dir(&day) {
+    for year in list_sources(&codex) {
+        for month in list_sources(&year) {
+            for day in list_sources(&month) {
+                for file in list_sources(&day) {
                     let name = file.file_name().unwrap_or_default().to_string_lossy();
                     if name.starts_with("rollout-") && name.ends_with(".jsonl") {
                         out.push((
@@ -215,7 +215,7 @@ fn discover_all_sources() -> Vec<(SystemTime, Source)> {
     let agy_root = antigravity_root();
     let cwds = antigravity_cwds();
     let model = antigravity_configured_model(&agy_root);
-    for conversation in read_dir(&agy_root.join("brain")) {
+    for conversation in list_sources(&agy_root.join("brain")) {
         let transcript = conversation.join(".system_generated/logs/transcript.jsonl");
         if !transcript.is_file() {
             continue;
@@ -428,39 +428,71 @@ fn scan_window(
     (sources, next)
 }
 
-fn read_dir(path: &Path) -> Vec<PathBuf> {
+/// How long a directory's own timestamp must already be in the past before an unchanged timestamp
+/// is evidence that its contents are unchanged. FAT and exFAT record write times in 2-second units,
+/// and Windows promises only that a stamp is correct once the handle that changed it is closed, so
+/// inside this window a create and the remove that undoes it can share one timestamp.
+const LISTING_SETTLE: Duration = Duration::from_secs(2);
+
+/// Whether `stamp` is old enough that any later change is forced into a distinguishable timestamp.
+/// A stamp from the future, which is what clock skew against a network mount looks like, is never
+/// settled, so such a mount pays for a reread rather than risking a listing that never updates.
+fn listing_is_settled(stamp: SystemTime, observed_at: SystemTime) -> bool {
+    observed_at
+        .duration_since(stamp)
+        .is_ok_and(|age| age >= LISTING_SETTLE)
+}
+
+/// Directory entries, sorted, memoised per directory while the directory is quiet.
+///
+/// An unreadable directory is an error, never an empty listing: callers that conflate the two stop
+/// ingesting a source without ever saying so.
+fn read_dir(path: &Path) -> std::io::Result<Vec<PathBuf>> {
     use std::sync::{Mutex, OnceLock};
     type Listings = HashMap<PathBuf, (SystemTime, Vec<PathBuf>)>;
     static CACHE: OnceLock<Mutex<Listings>> = OnceLock::new();
-    let Ok(stamp) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
-        return Vec::new();
-    };
+    let stamp = std::fs::metadata(path)?.modified()?;
+    // Read before the listing: every change that lands after this instant is then guaranteed to
+    // carry a timestamp later than `stamp`, which is what makes a cache hit safe.
+    let observed_at = SystemTime::now();
     let mut cache = CACHE
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if let Some((cached, paths)) = cache.get(path) {
         if *cached == stamp {
-            return paths.clone();
+            return Ok(paths.clone());
         }
     }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut out: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    let mut out: Vec<PathBuf> = std::fs::read_dir(path)?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
     out.sort();
-    // Each nested directory is checked independently, so new transcripts remain discoverable.
-    if std::fs::metadata(path)
+    let unchanged_by_the_read = std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()
-        == Some(stamp)
-    {
+        == Some(stamp);
+    if unchanged_by_the_read && listing_is_settled(stamp, observed_at) {
         if cache.len() >= 4096 {
             cache.clear();
         }
         cache.insert(path.to_path_buf(), (stamp, out.clone()));
     }
-    out
+    Ok(out)
+}
+
+/// A source directory that is absent is genuinely empty. One that exists but cannot be read is a
+/// failure, and is reported rather than being folded into the same empty listing.
+fn list_sources(path: &Path) -> Vec<PathBuf> {
+    match read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "usage source directory unreadable; its transcripts are not being ingested");
+            Vec::new()
+        }
+    }
 }
 
 fn mtime(path: &Path) -> std::time::SystemTime {
@@ -892,14 +924,45 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let nested = root.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
-        assert_eq!(super::read_dir(root.path()), vec![nested.clone()]);
-        assert!(super::read_dir(&nested).is_empty());
+        assert_eq!(super::read_dir(root.path()).unwrap(), vec![nested.clone()]);
+        assert!(super::read_dir(&nested).unwrap().is_empty());
         let transcript = nested.join("session.jsonl");
         std::fs::write(&transcript, "{}\n").unwrap();
-        assert_eq!(super::read_dir(root.path()), vec![nested.clone()]);
-        assert_eq!(super::read_dir(&nested), vec![transcript.clone()]);
+        assert_eq!(super::read_dir(root.path()).unwrap(), vec![nested.clone()]);
+        assert_eq!(super::read_dir(&nested).unwrap(), vec![transcript.clone()]);
         std::fs::remove_file(transcript).unwrap();
-        assert!(super::read_dir(&nested).is_empty());
+        assert!(super::read_dir(&nested).unwrap().is_empty());
+    }
+
+    /// An unreadable directory and an empty one must not both read as "no transcripts here".
+    #[test]
+    fn a_missing_directory_is_an_error_not_an_empty_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("absent");
+        assert_eq!(
+            super::read_dir(&absent).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(super::list_sources(&absent).is_empty());
+    }
+
+    /// The window that made the cache unsound: a directory whose own timestamp is younger than the
+    /// coarsest write-time resolution can still absorb a change without its timestamp moving, so
+    /// its listing may not be memoised. Ages are synthetic, so this holds on every platform.
+    #[test]
+    fn only_a_settled_directory_may_be_memoised() {
+        let stamp = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (age, settled) in [(0, false), (1, false), (2, true), (3600, true)] {
+            assert_eq!(
+                super::listing_is_settled(stamp, stamp + Duration::from_secs(age)),
+                settled,
+                "a directory touched {age}s ago"
+            );
+        }
+        assert!(!super::listing_is_settled(
+            stamp,
+            stamp - Duration::from_secs(1)
+        ));
     }
 
     use super::*;

@@ -170,14 +170,30 @@ impl IpcListener {
                 security,
                 next,
             } => {
-                let server = match next.take() {
-                    Some(server) => server,
+                if next.is_none() {
                     // The previous accept failed to pre-create an instance (e.g. a transient
                     // resource error); retry here rather than being wedged forever.
-                    None => pipe_instance(name, security, false)?,
+                    *next = Some(pipe_instance(name, security, false)?);
+                }
+                // The instance stays owned by the listener across the await. A client's CreateFile
+                // can land on it before the server has accepted it, and `serve` polls this future
+                // inside a select, so holding the instance in a local would let a cancelled accept
+                // close a pipe the client is already holding: its first read then fails with
+                // ERROR_NO_DATA. `NamedPipeServer::connect` is itself cancel safe, so a later
+                // accept picks the same waiting client up.
+                let connected = match next.as_ref() {
+                    Some(parked) => parked.connect().await,
+                    None => return Err(io::Error::other("named pipe listener lost its instance")),
                 };
-                server.connect().await?;
-                *next = pipe_instance(name, security, false).ok();
+                if let Err(error) = connected {
+                    // A broken instance must not be handed to the next accept.
+                    *next = None;
+                    return Err(error);
+                }
+                let replacement = pipe_instance(name, security, false).ok();
+                let Some(server) = std::mem::replace(next, replacement) else {
+                    return Err(io::Error::other("named pipe listener lost its instance"));
+                };
                 Ok(IpcStream::PipeServer(server))
             }
         }
@@ -361,6 +377,29 @@ mod tests {
             assert_eq!(got, vec![b'0' + i]);
         }
         server.await.unwrap();
+    }
+
+    /// `serve` polls `accept` inside a select, so an abandoned accept is routine. Abandoning one
+    /// must leave the endpoint connectable: on Windows that means keeping the pre-created pipe
+    /// instance alive, because closing it strands any client that already opened it.
+    #[tokio::test]
+    async fn an_abandoned_accept_leaves_the_endpoint_connectable() {
+        let ep = test_endpoint("cancel");
+        let mut listener = listen(&ep).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "no client connected, so this accept must be abandoned by the timeout"
+        );
+
+        let mut client = connect(&ep).await.unwrap();
+        let mut server = listener.accept().await.unwrap();
+        write_frame(&mut server, b"alive").await.unwrap();
+        assert_eq!(
+            read_frame(&mut client).await.unwrap().expect("frame"),
+            b"alive"
+        );
     }
 
     /// A second listener must not evict a live Unix socket owner; Windows enforces this through
