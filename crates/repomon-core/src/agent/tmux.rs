@@ -2358,6 +2358,12 @@ while True:
         assert!(started <= chrono::Utc::now());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn process_start_time_returns_none_on_windows() {
+        assert_eq!(process_start_time(std::process::id()), None);
+    }
+
     #[test]
     fn pipe_pane_streams_raw_bytes_to_a_fifo() {
         if !TmuxRuntime::available() {
