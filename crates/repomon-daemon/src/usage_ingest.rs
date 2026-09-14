@@ -428,21 +428,6 @@ fn scan_window(
     (sources, next)
 }
 
-/// How long a directory's own timestamp must already be in the past before an unchanged timestamp
-/// is evidence that its contents are unchanged. FAT and exFAT record write times in 2-second units,
-/// and Windows promises only that a stamp is correct once the handle that changed it is closed, so
-/// inside this window a create and the remove that undoes it can share one timestamp.
-const LISTING_SETTLE: Duration = Duration::from_secs(2);
-
-/// Whether `stamp` is old enough that any later change is forced into a distinguishable timestamp.
-/// A stamp from the future, which is what clock skew against a network mount looks like, is never
-/// settled, so such a mount pays for a reread rather than risking a listing that never updates.
-fn listing_is_settled(stamp: SystemTime, observed_at: SystemTime) -> bool {
-    observed_at
-        .duration_since(stamp)
-        .is_ok_and(|age| age >= LISTING_SETTLE)
-}
-
 /// Directory entries, sorted, memoised per directory while the directory is quiet.
 ///
 /// An unreadable directory is an error, never an empty listing: callers that conflate the two stop
@@ -473,7 +458,7 @@ fn read_dir(path: &Path) -> std::io::Result<Vec<PathBuf>> {
         .and_then(|meta| meta.modified())
         .ok()
         == Some(stamp);
-    if unchanged_by_the_read && listing_is_settled(stamp, observed_at) {
+    if unchanged_by_the_read && repomon_core::fs_stamp::is_settled(stamp, observed_at) {
         if cache.len() >= 4096 {
             cache.clear();
         }
@@ -946,23 +931,22 @@ mod tests {
         assert!(super::list_sources(&absent).is_empty());
     }
 
-    /// The window that made the cache unsound: a directory whose own timestamp is younger than the
-    /// coarsest write-time resolution can still absorb a change without its timestamp moving, so
-    /// its listing may not be memoised. Ages are synthetic, so this holds on every platform.
+    /// The settle rule itself is pinned beside its definition in `repomon_core::fs_stamp`.
+    /// What belongs here is that this cache actually consults it.
     #[test]
-    fn only_a_settled_directory_may_be_memoised() {
-        let stamp = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        for (age, settled) in [(0, false), (1, false), (2, true), (3600, true)] {
-            assert_eq!(
-                super::listing_is_settled(stamp, stamp + Duration::from_secs(age)),
-                settled,
-                "a directory touched {age}s ago"
-            );
-        }
-        assert!(!super::listing_is_settled(
-            stamp,
-            stamp - Duration::from_secs(1)
-        ));
+    fn a_directory_touched_this_instant_is_not_memoised() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("hot");
+        std::fs::create_dir(&dir).unwrap();
+        let stamp = std::fs::metadata(&dir).unwrap().modified().unwrap();
+        assert!(
+            !repomon_core::fs_stamp::is_settled(stamp, SystemTime::now()),
+            "a directory created microseconds ago cannot be settled"
+        );
+        assert!(super::read_dir(&dir).unwrap().is_empty());
+        let added = dir.join("a.jsonl");
+        std::fs::write(&added, "{}\n").unwrap();
+        assert_eq!(super::read_dir(&dir).unwrap(), vec![added]);
     }
 
     use super::*;
