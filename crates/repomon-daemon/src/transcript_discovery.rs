@@ -624,23 +624,24 @@ mod tests {
         let main = dir.path().join("main");
         let wt = dir.path().join("worktree");
         std::fs::create_dir_all(&main).unwrap();
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::create_dir_all(main.join(".git/worktrees/lane")).unwrap();
-        std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         // Use real git plumbing with an isolated repository to validate linked-worktree identity.
         assert!(
             std::process::Command::new("git")
-                .args(["init", "--quiet"])
+                .args(["init", "--quiet", "--initial-branch=main"])
                 .arg(&main)
                 .status()
                 .unwrap()
                 .success()
         );
+        // `git commit` detaches `maintenance run --auto`, whose `worktree prune` deletes every
+        // `.git/worktrees/<name>` holding no lock file yet, including the one `add` is building.
         assert!(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&main)
                 .args([
+                    "-c",
+                    "maintenance.auto=false",
                     "-c",
                     "user.name=Fixture",
                     "-c",
@@ -654,7 +655,6 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        std::fs::remove_dir(&wt).unwrap();
         assert!(
             std::process::Command::new("git")
                 .arg("-C")
