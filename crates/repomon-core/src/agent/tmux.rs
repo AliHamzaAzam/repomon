@@ -2351,7 +2351,7 @@ while True:
         rt.kill_named(&window).unwrap();
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn process_start_time_reads_host_process_on_macos() {
         let started = process_start_time(std::process::id()).expect("host process start time");
