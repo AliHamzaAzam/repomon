@@ -28,12 +28,12 @@ jobs:
       - run: cargo fmt --all --check
       # Explicit Windows targets keep static-CRT flags off host proc macros.
       - run: cargo clippy --workspace --all-targets --locked ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }} -- -D warnings
-      - run: cargo test --workspace --locked ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
+      - run: cargo test --workspace --locked --no-fail-fast ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
       # Use env: because Windows PowerShell does not accept shell-style VAR=value command prefixes.
       - name: Check generated desktop bindings
         env:
           TS_RS_EXPORT_DIR: ../../apps/desktop/src/bindings
-        run: cargo test -p repomon-core --features ts export_bindings --locked ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
+        run: cargo test -p repomon-core --features ts export_bindings --locked --no-fail-fast ${{ runner.os == 'Windows' && '--target x86_64-pc-windows-msvc' || '' }}
       - run: git diff --exit-code -- apps/desktop/src/bindings
 
   frontend:
