@@ -114,6 +114,22 @@ struct Source {
 type FileStamp = Option<(u64, Option<std::time::SystemTime>, u64, u64)>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint(Vec<FileStamp>);
+
+impl Fingerprint {
+    /// Whether every file behind this fingerprint has a stamp old enough to key a cache on. Length
+    /// catches appends and truncations, but a rewrite to the same length inside one timestamp tick
+    /// moves neither length nor stamp, and on Windows there is no inode to catch a replacement
+    /// either. A file whose stamp could not be read is never settled.
+    fn is_settled(&self, observed_at: std::time::SystemTime) -> bool {
+        self.0.iter().all(|file| match file {
+            Some((_, Some(modified), _, _)) => {
+                repomon_core::fs_stamp::is_settled(*modified, observed_at)
+            }
+            Some((_, None, _, _)) => false,
+            None => true,
+        })
+    }
+}
 fn fingerprint(source: &Source) -> Fingerprint {
     let mut paths: Vec<_> = source.path.iter().cloned().collect();
     if matches!(source.kind.as_str(), "opencode" | "hermes") {
@@ -163,6 +179,19 @@ struct PriceKey {
     overrides: std::collections::HashMap<String, repomon_core::pricing::PriceOverride>,
     stamp: Option<(u64, Option<std::time::SystemTime>)>,
 }
+
+impl PriceKey {
+    /// A key with no file behind it depends only on config and is always safe to memoise. One that
+    /// names the price cache file may be memoised only once that file's stamp has settled, since a
+    /// refresh that rewrites it to the same length inside one tick would otherwise be invisible.
+    fn is_settled(&self, observed_at: std::time::SystemTime) -> bool {
+        match self.stamp {
+            None => true,
+            Some((_, Some(modified))) => repomon_core::fs_stamp::is_settled(modified, observed_at),
+            Some((_, None)) => false,
+        }
+    }
+}
 type CachedPrices = Option<(PriceKey, Arc<repomon_core::pricing::PriceTable>)>;
 /// Shared across connections, single-flight per source, with bounded source retention.
 #[derive(Default)]
@@ -193,6 +222,8 @@ impl Cache {
                 .flatten()
                 .map(|m| (m.len(), m.modified().ok())),
         };
+        // Read before the table build below, never after.
+        let observed_at = std::time::SystemTime::now();
         let mut cached = self.prices.lock().await;
         if let Some((previous, table)) = &*cached {
             if previous == &key {
@@ -206,7 +237,9 @@ impl Cache {
                 .map_err(|e| e.to_string())?,
         );
         crate::chat_open_trace::price_table(built, table.len());
-        *cached = Some((key, table.clone()));
+        if key.is_settled(observed_at) {
+            *cached = Some((key, table.clone()));
+        }
         Ok(table)
     }
     /// The reason `window`'s last discovery pass gave up, if it has run and failed.
@@ -304,6 +337,8 @@ impl Cache {
         let entry = self.entry(source);
         let mut entry = entry.parsed.lock().unwrap_or_else(|e| e.into_inner());
         let stamp = fingerprint(source);
+        // Read before the page scan below, never after.
+        let observed_at = std::time::SystemTime::now();
         if entry.stamp.as_ref() != Some(&stamp) {
             entry.pages.clear();
             entry.stamp = None;
@@ -314,7 +349,7 @@ impl Cache {
         #[cfg(test)]
         self.scans.fetch_add(1, Ordering::Relaxed);
         let value = Arc::new(scan_page(source, before)?);
-        if fingerprint(source) == stamp {
+        if fingerprint(source) == stamp && stamp.is_settled(observed_at) {
             if entry.pages.len() >= 8 {
                 entry.pages.clear();
             }
