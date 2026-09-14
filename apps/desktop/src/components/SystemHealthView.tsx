@@ -521,17 +521,21 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                               </div>
                               <div class="min-w-0">
                                 <p class="font-medium text-xs text-foreground truncate">{agent.name}</p>
-                                <p class="font-mono text-[10.5px] text-muted truncate">
+                                <p class="truncate-tail font-mono text-[10.5px] text-muted" title={agent.command}>
                                   {agent.command}
                                 </p>
                               </div>
                             </div>
 
+                            {/* Detected is the ordinary state, so it stays quiet and lets the check
+                                glyph carry the good news; absence takes the same attention tone the
+                                runtime rows above use for Missing. Spending `signal` on six healthy
+                                rows would teach the eye to discount it where it means NEEDS YOU. */}
                             <span
                               class={`shrink-0 rounded px-1.5 py-0.2 text-[9.5px] font-medium ${
                                 agent.detected
-                                  ? "bg-signal/10 border border-signal/30 text-signal"
-                                  : "bg-surface text-muted border border-line"
+                                  ? "bg-surface text-muted border border-line"
+                                  : "bg-attention/10 border border-attention/30 text-attention"
                               }`}
                             >
                               <span class="inline-flex items-center gap-1">
@@ -568,9 +572,12 @@ export default function SystemHealthView(props: SystemHealthViewProps) {
                               >
                                 {(info) => (
                                   <div class="space-y-1">
-                                    <p class="text-muted/90 truncate text-[10px]">{info().guide}</p>
+                                    <p class="text-muted/90 text-[10px]">{info().guide}</p>
                                     <div class="flex items-center gap-1.5">
-                                      <code class="flex-1 font-mono text-[9.5px] bg-surface px-1.5 py-0.5 rounded border border-line select-all text-foreground truncate">
+                                      <code
+                                        class="truncate-tail min-w-0 flex-1 font-mono text-[9.5px] bg-surface px-1.5 py-0.5 rounded border border-line select-all text-foreground"
+                                        title={info().command}
+                                      >
                                         {info().command}
                                       </code>
                                       <button
