@@ -7,8 +7,6 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Local, NaiveDateTime, TimeZone};
-
 use crate::error::{Error, Result};
 use crate::model::LaneId;
 
@@ -1339,12 +1337,14 @@ pub(super) fn process_start_time(pid: u32) -> Option<chrono::DateTime<chrono::Ut
             .ok()?
             .lines()
             .find_map(|line| line.strip_prefix("btime ")?.trim().parse::<i64>().ok())?;
-        return chrono::DateTime::from_timestamp(boot, 0).and_then(|at| {
+        chrono::DateTime::from_timestamp(boot, 0).and_then(|at| {
             at.checked_add_signed(chrono::Duration::milliseconds((ticks * 1000 / hz) as i64))
-        });
+        })
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
+        use chrono::{Local, NaiveDateTime, TimeZone};
+
         let output = Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
