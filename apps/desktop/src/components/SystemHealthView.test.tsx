@@ -135,6 +135,111 @@ describe("SystemHealthView", () => {
   });
 });
 
+/// The operator's own panel: eight agents, six on PATH and two absent, with the two custom Claude
+/// entries sharing a long boilerplate head. Six-versus-two is the case under test; a single row
+/// proves nothing about how the panel reads.
+const EIGHT_AGENTS = [
+  { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+  { kind: "claude-code", name: "Claude Work", command: "env -u CLAUDE_CONFIG_DIR claude", detected: true },
+  { kind: "claude-code", name: "Claude Alt Config", command: "CLAUDE_CONFIG_DIR='/Users/azaleas/.claude-alt' claude", detected: true },
+  { kind: "codex", name: "Codex", command: "codex", detected: true },
+  { kind: "hermes", name: "Hermes", command: "hermes", detected: true },
+  { kind: "opencode", name: "OpenCode", command: "opencode", detected: true },
+  { kind: "aider", name: "Aider", command: "aider", detected: false },
+  { kind: "cursor", name: "Cursor", command: "cursor-agent", detected: false },
+] as SystemDoctorResult["agents"];
+
+/// The badge is an outer span carrying the state colors around an inner span that holds the word,
+/// so the word's parent is the element whose classes are under test.
+function badgeFor(word: "Detected" | "Not Found"): HTMLElement[] {
+  return screen.getAllByText(word).map((label) => label.parentElement as HTMLElement);
+}
+
+describe("the Coding Agents panel's state emphasis", () => {
+  it("keeps the six detected agents quiet and spends the accent on the two that want something", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+    await screen.findByText("6 / 8 detected");
+
+    const detected = badgeFor("Detected");
+    const missing = badgeFor("Not Found");
+    expect(detected).toHaveLength(6);
+    expect(missing).toHaveLength(2);
+
+    // Detected is the ordinary state: the panel's neutral chip, no state color at all.
+    for (const badge of detected) {
+      expect(badge.className).toContain("text-muted");
+      expect(badge.className).not.toMatch(/signal|attention|fault/);
+    }
+
+    // Absence is what wants the operator, and it wears the same tone as the runtime rows' Missing.
+    for (const badge of missing) {
+      expect(badge.className).toMatch(/\battention\b/);
+      expect(badge.className).not.toMatch(/signal|fault/);
+    }
+  });
+
+  it("leaves signal free to mean NEEDS YOU by never marking a healthy agent with it", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+    await screen.findByText("6 / 8 detected");
+
+    const accented = [...badgeFor("Detected"), ...badgeFor("Not Found")]
+      .filter((badge) => /signal/.test(badge.className));
+    expect(accented).toEqual([]);
+  });
+
+  it("keeps the check glyph on a detected agent so the quiet badge still reads as good news", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+    await screen.findByText("6 / 8 detected");
+
+    expect(badgeFor("Detected")[0].querySelector("svg")).toBeInTheDocument();
+  });
+});
+
+describe("the Coding Agents panel's command truncation", () => {
+  it("clips the shared command head so the binary at the tail survives", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+
+    const command = await screen.findByText("env -u CLAUDE_CONFIG_DIR claude");
+    // .truncate-tail (pinned in index.css.fleet.test.ts) puts the ellipsis before the identifying
+    // tail; Tailwind's own truncate would cut `claude` off the end and keep the boilerplate.
+    expect(command.classList.contains("truncate-tail")).toBe(true);
+    expect(command.classList.contains("truncate")).toBe(false);
+  });
+
+  it("keeps the whole probe command reachable even though the row clips it", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+
+    const command = await screen.findByText("CLAUDE_CONFIG_DIR='/Users/azaleas/.claude-alt' claude");
+    expect(command).toHaveAttribute("title", "CLAUDE_CONFIG_DIR='/Users/azaleas/.claude-alt' claude");
+  });
+
+  it("clips the install command from the start too, where the head is npm install -g", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+
+    const install = await screen.findByText("pip install aider-chat");
+    expect(install.classList.contains("truncate-tail")).toBe(true);
+    expect(install.classList.contains("truncate")).toBe(false);
+    expect(install).toHaveAttribute("title", "pip install aider-chat");
+  });
+
+  it("lets the install hint wrap instead of clipping the remedy off its end", async () => {
+    daemonResult.current = macDoctor({ agents: EIGHT_AGENTS });
+    render(() => <SystemHealthView />);
+
+    // The hint is a sentence, not an identifier. Clipping either end loses it; the Windows Cursor
+    // hint puts the whole remedy ("download the app instead") past the cut.
+    const hint = await screen.findByText("Install Aider CLI via pip");
+    expect(hint.classList.contains("truncate")).toBe(false);
+    expect(hint.classList.contains("truncate-tail")).toBe(false);
+  });
+});
+
 describe("SystemHealthView in the setup wizard", () => {
   it("names the ConPTY runtime in the Windows verdict instead of tmux", async () => {
     daemonResult.current = windowsDoctor();

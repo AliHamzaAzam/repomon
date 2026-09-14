@@ -9,7 +9,7 @@
 /// their own commands. Shimming `invoke` itself, one level lower, covers every one of those
 /// without touching each file, and lets the real `daemonCall`/`getConnectionStatus`/etc. run
 /// unmodified against fixture data.
-import type { AgentSession, CommandCatalog, Lane, Repo, TranscriptItem, PendingDialog } from "../bindings";
+import type { AgentSession, CommandCatalog, Lane, Repo, SystemDoctorResult, TranscriptItem, PendingDialog } from "../bindings";
 // The native Channel constructor needs window.__TAURI_INTERNALS__. Screenshot callbacks
 // remain local and use the same onmessage interface; no native bridge is installed.
 export class Channel<T> { onmessage: (message: T) => void = () => undefined; }
@@ -220,6 +220,28 @@ const AGENT_CHOICES_EIGHT = [
   { name: "aider", command: "aider", detected: false, default: false, custom: false },
   { name: "cursor", command: "cursor-agent", detected: false, default: false, custom: false },
 ];
+
+// The `system.doctor` probe behind Settings > System, carrying the operator's own eight-agent
+// split: six CLIs on PATH and two absent, so the panel's six-versus-two balance is what gets
+// screenshotted rather than a flattering all-detected row. The two custom Claude entries keep
+// their env-prefixed commands, which share a long boilerplate head and differ only in the tail.
+const DOCTOR_AGENTS = [
+  { kind: "claude-code", name: "Claude Code", command: "claude", detected: true },
+  { kind: "claude-code", name: "Claude Work", command: "env -u CLAUDE_CONFIG_DIR claude", detected: true },
+  { kind: "claude-code", name: "Claude Alt Config", command: "CLAUDE_CONFIG_DIR='/Users/azaleas/.claude-alt' claude", detected: true },
+  { kind: "codex", name: "Codex", command: "codex", detected: true },
+  { kind: "hermes", name: "Hermes", command: "hermes", detected: true },
+  { kind: "opencode", name: "OpenCode", command: "opencode", detected: true },
+  { kind: "aider", name: "Aider", command: "aider", detected: false },
+  { kind: "cursor", name: "Cursor", command: "cursor-agent", detected: false },
+];
+const DOCTOR: SystemDoctorResult = {
+  platform: "macos",
+  tmux: { available: true, version: "tmux 3.5a", source: "system", path: "/opt/homebrew/bin/tmux", not_applicable: false },
+  git: { available: true, version: "git version 2.51.0", path: "/opt/homebrew/bin/git" },
+  agent_host: null,
+  agents: DOCTOR_AGENTS,
+};
 
 // Quota pressure worth looking at: one quiet window, one tight, one at the limit, and one the
 // probe could not read at all. `?usage=` opts a screenshot in; every other scenario keeps the
@@ -536,12 +558,25 @@ if (query.has("notices")) {
 }
 if (surface === "settings") {
   // Drive the real app's accessible controls. Navigation stays inside the dev-only fixture.
+  const wanted = query.get("tab") ?? "Agents";
   const navigate = setInterval(() => {
     const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const agents = tabs.find((button) => button.textContent?.trim() === "Agents");
-    if (agents) { agents.click(); clearInterval(navigate); }
+    const target = tabs.find((button) => button.textContent?.trim() === wanted);
+    if (target) { target.click(); clearInterval(navigate); }
     else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.click();
   }, 100);
+  if (wanted === "System") {
+    // The agents grid sits below two cards inside the modal's own scroller, so the shot has to
+    // be scrolled to it: a viewport capture of the panel top proves nothing about eight rows.
+    const reveal = setInterval(() => {
+      const label = [...document.querySelectorAll<HTMLElement>(".section-label")]
+        .find((node) => node.textContent?.trim() === "Coding Agents & Tooling");
+      const card = label?.closest("div.rounded-xl");
+      if (!card) return;
+      clearInterval(reveal);
+      card.scrollIntoView({ block: "end" });
+    }, 100);
+  }
 }
 if (spawnLoading || spawnKeys) {
   // The real, unforced route to the Spawn dialog: a lane with no agent yet shows this button
@@ -705,6 +740,7 @@ const DAEMON_CALL_FIXTURES: Record<string, (params: unknown) => unknown> = {
     return HEADLINES[id] ?? null;
   },
   "repo.pull_requests": () => ordinary || fleetMode === "operator" ? [] : real ? REAL_PRS : PULL_REQUESTS,
+  "system.doctor": () => DOCTOR,
   "repomind.status": () => null,
   "message.list": () => ({ messages: [], next_before: null }),
 };
