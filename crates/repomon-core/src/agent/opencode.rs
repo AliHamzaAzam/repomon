@@ -73,6 +73,17 @@ fn database_stamp(path: &Path) -> (FileStamp, FileStamp) {
     (file_stamp(path), file_stamp(Path::new(&wal)))
 }
 
+/// Whether a database stamp may be memoised. SQLite commits into recycled WAL frames, so a commit
+/// can leave the WAL's length identical; if its timestamp has not settled either, the pair is not
+/// evidence of anything. An absent file is stable: it can only start existing, which shows up as a
+/// stamp changing from `None`.
+fn stamp_is_settled(stamp: &(FileStamp, FileStamp), observed_at: SystemTime) -> bool {
+    [&stamp.0, &stamp.1].into_iter().all(|file| match file {
+        Some((modified, _)) => crate::fs_stamp::is_settled(*modified, observed_at),
+        None => true,
+    })
+}
+
 #[derive(Hash, PartialEq, Eq)]
 struct SummaryKey {
     path: PathBuf,
@@ -102,6 +113,8 @@ fn summaries_at(path: &Path, cwd: &Path, within: Duration, max: usize) -> Vec<Tr
         max,
     };
     let stamp = database_stamp(path);
+    // Read before the database read below, never after.
+    let observed_at = SystemTime::now();
     // A missing database has no sessions and must not be created by observation.
     if stamp.0.is_none() {
         return Vec::new();
@@ -114,7 +127,7 @@ fn summaries_at(path: &Path, cwd: &Path, within: Duration, max: usize) -> Vec<Tr
             return Vec::new();
         };
         // A concurrent commit must cause another read on the next overlay.
-        if database_stamp(path) == stamp {
+        if database_stamp(path) == stamp && stamp_is_settled(&stamp, observed_at) {
             if entries.len() >= 256 {
                 entries.clear();
             }

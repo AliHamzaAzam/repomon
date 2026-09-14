@@ -6378,11 +6378,18 @@ async fn overlay_agents(ctx: &Ctx, lanes: &mut [Lane]) {
             let mtime = std::fs::metadata(wt.join(agent::gate::LEDGER_REL))
                 .and_then(|m| m.modified())
                 .ok();
+            // Read before the ledger read below, never after.
+            let observed_at = std::time::SystemTime::now();
             let verdict = match cache.get(&wt) {
                 Some((m, v)) if *m == mtime => v.clone(),
                 _ => {
                     let v = mtime.and_then(|_| agent::gate::read_gate_verdict(&wt));
-                    cache.insert(wt.clone(), (mtime, v.clone()));
+                    // An absent ledger can only start existing, which changes the stamp from None.
+                    // A present one may be rewritten to the same length inside one timestamp tick,
+                    // so its verdict is memoised only once its stamp has settled.
+                    if mtime.is_none_or(|m| repomon_core::fs_stamp::is_settled(m, observed_at)) {
+                        cache.insert(wt.clone(), (mtime, v.clone()));
+                    }
                     v
                 }
             };

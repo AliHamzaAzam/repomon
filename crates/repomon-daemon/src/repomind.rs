@@ -293,50 +293,65 @@ pub fn home_counts(home: &Path) -> repomon_core::model::RepomindCounts {
     }
 }
 
-/// Markdown files directly in `dir`, excluding its `README.md`. A missing directory is zero.
+/// Markdown files directly in `dir`, excluding its `README.md`. A missing directory is zero; a
+/// directory that exists but cannot be read is reported rather than counted as zero, so a
+/// permission fault cannot masquerade as an empty home.
 fn markdown_files(dir: &Path) -> usize {
+    match counted_markdown_files(dir) {
+        Ok(count) => count,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            tracing::warn!(dir = %dir.display(), %error, "repomind home directory unreadable; its counts are reported as zero");
+            0
+        }
+    }
+}
+
+/// The memoised count. Memoised only while `dir` is quiet: an unchanged directory stamp is only
+/// evidence of unchanged contents once that stamp has settled, so a create and the remove that
+/// undoes it cannot both hide inside one timestamp tick.
+fn counted_markdown_files(dir: &Path) -> std::io::Result<usize> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::SystemTime;
     type Counts = HashMap<PathBuf, (SystemTime, usize)>;
     static CACHE: OnceLock<Mutex<Counts>> = OnceLock::new();
-    let Ok(stamp) = std::fs::metadata(dir).and_then(|meta| meta.modified()) else {
-        return 0;
-    };
+    let stamp = std::fs::metadata(dir)?.modified()?;
+    // Read before the count, never after: a change that lands during the count would otherwise be
+    // excused by a stamp that this instant has already made look settled.
+    let observed_at = SystemTime::now();
     let mut cache = CACHE
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if let Some((cached, count)) = cache.get(dir) {
         if *cached == stamp {
-            return *count;
+            return Ok(*count);
         }
     }
-    let Some(count) = count_markdown_files(dir) else {
-        return 0;
-    };
+    let count = count_markdown_files(dir)?;
     // Do not cache a count raced by a create, remove, or rename.
-    if std::fs::metadata(dir).and_then(|meta| meta.modified()).ok() == Some(stamp) {
+    let unchanged_by_the_count =
+        std::fs::metadata(dir).and_then(|meta| meta.modified()).ok() == Some(stamp);
+    if unchanged_by_the_count && repomon_core::fs_stamp::is_settled(stamp, observed_at) {
         if cache.len() >= 256 {
             cache.clear();
         }
         cache.insert(dir.to_path_buf(), (stamp, count));
     }
-    count
+    Ok(count)
 }
 
-fn count_markdown_files(dir: &Path) -> Option<usize> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    Some(
-        entries
-            .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.ends_with(".md") && !name.eq_ignore_ascii_case("README.md")
-            })
-            .count(),
-    )
+fn count_markdown_files(dir: &Path) -> std::io::Result<usize> {
+    let entries = std::fs::read_dir(dir)?;
+    Ok(entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.ends_with(".md") && !name.eq_ignore_ascii_case("README.md")
+        })
+        .count())
 }
 
 /// Bootstraps and reconciles the home, registers memory, archives journals, and queues an export,
@@ -766,6 +781,41 @@ mod tests {
         assert_eq!(home_counts(dir.path()).active_plans, 1);
         std::fs::remove_file(active.join("next.md")).unwrap();
         assert_eq!(home_counts(dir.path()).active_plans, 0);
+    }
+
+    /// Why the counts above can follow those changes at all. Every mutation in that test lands
+    /// within one timestamp tick of the directory's own stamp, so on NTFS or FAT the stamp need not
+    /// move; the count may only be memoised once the stamp has settled, and it has not here. Ages
+    /// are synthetic, so this holds on every platform and every filesystem.
+    #[test]
+    fn a_home_directory_touched_this_instant_is_never_memoised() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_layout(dir.path()).unwrap();
+        let active = dir.path().join("plans/active");
+        let stamp = std::fs::metadata(&active).unwrap().modified().unwrap();
+        assert!(
+            !repomon_core::fs_stamp::is_settled(stamp, std::time::SystemTime::now()),
+            "a directory laid out microseconds ago cannot be settled"
+        );
+        assert!(repomon_core::fs_stamp::is_settled(
+            stamp,
+            stamp + repomon_core::fs_stamp::STAMP_SETTLE
+        ));
+        assert_eq!(counted_markdown_files(&active).unwrap(), 0);
+        std::fs::write(active.join("new.md"), "plan").unwrap();
+        assert_eq!(counted_markdown_files(&active).unwrap(), 1);
+    }
+
+    /// An unreadable home directory and an empty one must not both read as zero plans.
+    #[test]
+    fn a_missing_home_directory_is_an_error_not_a_zero_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("nope").join("plans").join("active");
+        assert_eq!(
+            counted_markdown_files(&absent).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(markdown_files(&absent), 0);
     }
 
     #[test]

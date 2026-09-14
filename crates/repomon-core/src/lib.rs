@@ -9,6 +9,7 @@ pub mod command_catalog;
 pub mod config;
 pub mod error;
 pub mod exec;
+pub mod fs_stamp;
 pub mod git;
 pub mod indexer;
 pub mod input;

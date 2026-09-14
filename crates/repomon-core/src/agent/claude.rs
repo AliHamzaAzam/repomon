@@ -238,6 +238,16 @@ pub fn newest_transcript_in(dir: &Path) -> Option<PathBuf> {
 #[derive(Clone)]
 struct CacheEntry {
     key: (SystemTime, u64),
+    /// Whether `key`'s stamp had settled when this entry was built. An entry built while the stamp
+    /// could still absorb a same-length rewrite is never served as a finished summary. It may still
+    /// seed an incremental parse, but only against [`CacheEntry::prefix_hash`], which is what
+    /// actually establishes that resuming is sound.
+    servable: bool,
+    /// Hash of the `offset` bytes already folded into `state`, or `None` if they could not be read.
+    /// Resuming asserts those bytes are unchanged, and no combination of mtime, length and identity
+    /// can establish that: a rewrite of the folded bytes followed by an append is byte-for-byte
+    /// indistinguishable in metadata from a plain append. Re-reading them is the only proof.
+    prefix_hash: Option<u64>,
     seq: u64,
     summary: TranscriptSummary,
     state: SummaryState,
@@ -280,17 +290,50 @@ fn cache_seq() -> u64 {
 /// re-parse the whole set on every refresh.
 const CACHE_CAP: usize = 1024;
 
+/// Hash the first `upto` bytes of `path`, or `None` if they cannot all be read.
+///
+/// This is what an incremental resume pays for, and it is deliberately not a heuristic over part of
+/// the file: the question "are the bytes I already folded still the same bytes" has no metadata
+/// answer, so the bytes are read. At 2.7 GB/s this is about 4x cheaper than re-parsing them.
+fn prefix_hash(path: &Path, upto: u64) -> Option<u64> {
+    use std::hash::Hasher;
+    use std::io::Read;
+    if upto == 0 {
+        return Some(0);
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut remaining = upto;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        match file.read(&mut buf[..want]) {
+            // A file that ended early is shorter than what we folded, so it is not an extension.
+            Ok(0) => return None,
+            Ok(read) => {
+                hasher.write(&buf[..read]);
+                remaining -= read as u64;
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(hasher.finish())
+}
+
 /// Summarize complete JSONL records once, then fold appends from the saved offset.
 /// Replacement, truncation, and same-length rewrites reset the aggregate.
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     let metadata = std::fs::metadata(path).ok()?;
     let key = (metadata.modified().ok()?, metadata.len());
+    // Read before the scan below, never after: a rewrite landing during the scan would otherwise be
+    // excused by an instant that has already made its stamp look settled.
+    let observed_at = SystemTime::now();
     let identity = file_identity(&metadata);
     // Serialize updates so concurrent overlays cannot both reread the same append. The cache
     // holds only summary state, never the transcript body.
     let mut c = cache().lock().ok()?;
     if let Some(entry) = c.get_mut(path) {
-        if entry.key == key && entry.identity == identity {
+        if entry.servable && entry.key == key && entry.identity == identity {
             entry.seq = cache_seq();
             let mut summary = entry.summary.clone();
             if Utc::now() - summary.last_activity > IDLE_AFTER {
@@ -302,7 +345,10 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     let prior = c
         .get(path)
         .filter(|e| e.identity == identity && key.1 > e.key.1);
+    // A longer file is not necessarily the same file with more on the end. Resume only against
+    // bytes that still hash to what was folded; anything else rebuilds the aggregate from zero.
     let (mut state, offset) = prior
+        .filter(|e| e.prefix_hash.is_some() && prefix_hash(path, e.offset) == e.prefix_hash)
         .map(|e| (e.state.clone(), e.offset))
         .unwrap_or_default();
     let offset =
@@ -320,6 +366,8 @@ pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
         path.into(),
         CacheEntry {
             key,
+            servable: crate::fs_stamp::is_settled(key.0, observed_at),
+            prefix_hash: prefix_hash(path, offset),
             seq: cache_seq(),
             summary: summary.clone(),
             state,
@@ -973,10 +1021,14 @@ mod tests {
         let s1 = parse_transcript(&path).expect("parses");
 
         // Poison the cached summary, then parse again with the file unchanged: a cache hit must
-        // return the poisoned value (proving it did not re-read the file).
+        // return the poisoned value (proving it did not re-read the file). The entry is marked
+        // servable because the transcript here was written microseconds ago; a real transcript
+        // reaches that state on its own once its stamp settles.
         {
             let mut c = cache().lock().unwrap();
-            c.get_mut(&path).unwrap().summary.title = Some("SENTINEL".into());
+            let entry = c.get_mut(&path).unwrap();
+            entry.summary.title = Some("SENTINEL".into());
+            entry.servable = true;
         }
         let s2 = parse_transcript(&path).expect("parses");
         assert_eq!(
@@ -1015,12 +1067,84 @@ mod tests {
         // still report Idle: status decays by the clock, not by a file change.
         {
             let mut c = cache().lock().unwrap();
-            c.get_mut(&path).unwrap().summary.last_activity = Utc::now() - Duration::minutes(20);
+            let entry = c.get_mut(&path).unwrap();
+            entry.summary.last_activity = Utc::now() - Duration::minutes(20);
+            entry.servable = true;
         }
         assert_eq!(
             parse_transcript(&path).unwrap().status,
             AgentStatus::Idle,
             "a frozen transcript still decays to Idle on a cache hit"
+        );
+    }
+
+    /// Resuming an incremental parse asserts that the bytes already folded are unchanged. A rewrite
+    /// of those bytes followed by an append leaves exactly the `(mtime, len)` a plain append would,
+    /// so metadata cannot tell the two apart and the aggregate must be rebuilt from zero.
+    #[test]
+    fn a_rewritten_prefix_is_not_extended_by_a_later_append() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rewrite.jsonl");
+        // Two records of identical byte length, so only their content differs.
+        let record = |cwd: &str, text: &str| {
+            format!(r#"{{"type":"user","cwd":"{cwd}","message":{{"content":"{text}"}}}}"#) + "\n"
+        };
+        let first = record("/code/aaa", "hello one");
+        let rewritten = record("/code/bbb", "hello two");
+        assert_eq!(
+            first.len(),
+            rewritten.len(),
+            "the rewrite must not change the length, or length alone would catch it"
+        );
+
+        std::fs::write(&path, &first).unwrap();
+        assert_eq!(
+            parse_transcript(&path).unwrap().cwd,
+            Some(PathBuf::from("/code/aaa"))
+        );
+
+        // Rewrite what was already folded, then append, with no read in between. The cached entry
+        // is a shorter prefix of a now-longer file, which is exactly what a plain append looks like.
+        std::fs::write(&path, rewritten + &record("/code/ccc", "hello two")).unwrap();
+        assert_eq!(
+            parse_transcript(&path).unwrap().cwd,
+            Some(PathBuf::from("/code/bbb")),
+            "the rewritten prefix must be re-read, not skipped by resuming from the stale offset"
+        );
+    }
+
+    /// Length catches appends and truncations, but a rewrite to the same length inside one
+    /// timestamp tick moves neither length nor stamp. Until the stamp settles the summary is
+    /// rebuilt rather than served, so such a rewrite can never be masked.
+    #[test]
+    fn a_transcript_written_this_instant_is_not_served_from_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"user","cwd":"/code/x","message":{"content":"hello"}}"#;
+        let path = write_complete_transcript(root.path(), "hot.jsonl", &[line]);
+
+        parse_transcript(&path).expect("parses");
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            !crate::fs_stamp::is_settled(stamp, SystemTime::now()),
+            "a transcript written microseconds ago cannot be settled"
+        );
+        {
+            let c = cache().lock().unwrap();
+            assert!(
+                !c.get(&path).unwrap().servable,
+                "an entry built while the stamp is unsettled must never be served"
+            );
+        }
+
+        // Poisoning the cached summary now changes nothing: the file is re-read.
+        {
+            let mut c = cache().lock().unwrap();
+            c.get_mut(&path).unwrap().summary.title = Some("SENTINEL".into());
+        }
+        assert_ne!(
+            parse_transcript(&path).expect("parses").title.as_deref(),
+            Some("SENTINEL"),
+            "an unsettled stamp must force a re-read"
         );
     }
 

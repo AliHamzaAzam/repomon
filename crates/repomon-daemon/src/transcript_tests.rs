@@ -84,12 +84,58 @@ pub(super) fn user_record(n: usize, kind: &str) -> String {
 "
     )
 }
+/// Backdate a file's stamp past the settle window, so the caches under test are allowed to memoise
+/// it. Every mutation in these tests lands microseconds after the last, which is exactly the window
+/// where an unchanged stamp proves nothing, so without this nothing is memoised at all.
+pub(super) fn settle(path: &std::path::Path) {
+    let settled = std::time::SystemTime::now() - repomon_core::fs_stamp::STAMP_SETTLE * 2;
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(settled))
+        .unwrap();
+}
+
+/// The counterpart to the test below: while the stamp is still unsettled, a same-length rewrite
+/// would be invisible, so nothing is memoised and both readers scan.
+#[tokio::test]
+async fn an_unsettled_transcript_is_rescanned_rather_than_memoised() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, _) = context(dir.path()).await;
+    let path = dir.path().join("source.jsonl");
+    std::fs::write(&path, user_record(1, "codex")).unwrap();
+    let source = Source {
+        window: "lane-1".into(),
+        kind: "codex".into(),
+        path: Some(path.clone()),
+        session: None,
+    };
+    read_page(&ctx, source.clone(), None).await.unwrap();
+    read_page(&ctx, source.clone(), None).await.unwrap();
+    assert_eq!(
+        ctx.transcript_cache.scans.load(Ordering::Relaxed),
+        2,
+        "a transcript written this instant must not be memoised"
+    );
+
+    settle(&path);
+    read_page(&ctx, source.clone(), None).await.unwrap();
+    read_page(&ctx, source, None).await.unwrap();
+    assert_eq!(
+        ctx.transcript_cache.scans.load(Ordering::Relaxed),
+        3,
+        "once the stamp settles the page is memoised again"
+    );
+}
+
 #[tokio::test]
 async fn cache_is_shared_and_fingerprint_invalidates_append_replacement_and_truncation() {
     let dir = tempfile::tempdir().unwrap();
     let (ctx, _) = context(dir.path()).await;
     let path = dir.path().join("source.jsonl");
     std::fs::write(&path, user_record(1, "codex")).unwrap();
+    settle(&path);
     let source = Source {
         window: "lane-1".into(),
         kind: "codex".into(),
@@ -118,6 +164,7 @@ async fn cache_is_shared_and_fingerprint_invalidates_append_replacement_and_trun
         .unwrap()
         .write_all(user_record(2, "codex").as_bytes())
         .unwrap();
+    settle(&path);
     assert_eq!(
         read_page(&ctx, source.clone(), None).await.unwrap()["page_count"],
         2
@@ -125,6 +172,7 @@ async fn cache_is_shared_and_fingerprint_invalidates_append_replacement_and_trun
     let replacement = dir.path().join("replacement");
     std::fs::write(&replacement, user_record(3, "codex")).unwrap();
     std::fs::rename(replacement, &path).unwrap();
+    settle(&path);
     let value = read_page(&ctx, source.clone(), None).await.unwrap();
     assert!(
         value["items"][0]["text"]
@@ -133,6 +181,7 @@ async fn cache_is_shared_and_fingerprint_invalidates_append_replacement_and_trun
             .starts_with("message 3")
     );
     std::fs::write(&path, "").unwrap();
+    settle(&path);
     assert_eq!(
         read_page(&ctx, source, None).await.unwrap()["page_count"],
         0
