@@ -118,26 +118,33 @@ impl Registry {
 
 /// Read a repository's `repo.json` within bounds this machine sets rather than the repository.
 ///
-/// A cloned repository is written by someone else, so the path is treated as hostile: only a
-/// regular file is opened (a symlink would reach outside the checkout, a FIFO would block the
-/// blocking pool forever), and the read stops one byte past the cap so a file that grows between
-/// the stat and the read cannot get past it either.
+/// A cloned repository is written by someone else, so the path is treated as hostile. Every check
+/// is tied to the OPEN HANDLE rather than to the pathname: a pathname checked and then opened can
+/// be swapped in between, and `open` on a FIFO blocks before any read cap could apply — so the
+/// bound has to exist at open time, not after it.
 fn read_declaration(path: &Path) -> repo_json::Declaration {
     use std::io::Read;
 
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return repo_json::Declaration::None,
-        Err(_) => return repo_json::Declaration::Unusable,
+    let Some(file) = open_regular_file(path) else {
+        // No file, but only when the checkout itself is there: an unreachable directory — an
+        // unmounted volume, a disconnected share — knows nothing and must not clear what is stored.
+        let absent = matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        let checkout_present = path.parent().is_some_and(|d| d.is_dir());
+        return if absent && checkout_present {
+            repo_json::Declaration::None
+        } else {
+            repo_json::Declaration::Unusable
+        };
     };
-    if !meta.file_type().is_file() || meta.len() > repo_json::MAX_BYTES {
-        return repo_json::Declaration::Unusable;
+
+    // Size is taken from the handle, so it describes the file that was actually opened.
+    match file.metadata() {
+        Ok(m) if m.is_file() && m.len() <= repo_json::MAX_BYTES => {}
+        _ => return repo_json::Declaration::Unusable,
     }
 
-    let Ok(file) = std::fs::File::open(path) else {
-        return repo_json::Declaration::Unusable;
-    };
     let mut text = String::new();
+    // The cap is applied again: a file may grow between the metadata call and the read.
     if file
         .take(repo_json::MAX_BYTES + 1)
         .read_to_string(&mut text)
@@ -150,6 +157,27 @@ fn read_declaration(path: &Path) -> repo_json::Declaration {
         Some(d) => repo_json::Declaration::Declared(d),
         None => repo_json::Declaration::Unusable,
     }
+}
+
+/// Open `path` only if it is a regular file, refusing to follow a symlink and refusing to block.
+///
+/// `O_NOFOLLOW` makes the kernel reject a symlink at open time, and `O_NONBLOCK` means a FIFO
+/// swapped in at the last moment returns instead of parking a thread from the blocking pool.
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()
+}
+
+/// Windows has no `O_NOFOLLOW`; the handle's own metadata is what the caller checks, and a
+/// reparse point or pipe fails that check rather than being followed silently.
+#[cfg(not(unix))]
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    std::fs::File::open(path).ok()
 }
 
 /// Resolve any path inside a repo (main or linked worktree) to the main worktree path.
@@ -330,6 +358,46 @@ mod tests {
         assert_eq!(
             out.label, None,
             "a symlink is not the repository's own file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_is_refused_without_parking_a_blocking_thread() {
+        use std::ffi::CString;
+        let (tmp, reg, repo) = repo_with(None).await;
+        let path = tmp.path().join("acme-platform/repo.json");
+        let c = CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: a path inside this test's own tempdir, valid for the duration of the call.
+        assert_eq!(
+            unsafe { libc::mkfifo(c.as_ptr(), 0o600) },
+            0,
+            "mkfifo failed"
+        );
+
+        // No writer will ever open the other end. Without O_NONBLOCK this call never returns.
+        let out =
+            tokio::time::timeout(std::time::Duration::from_secs(5), reg.apply_repo_json(repo))
+                .await
+                .expect("open blocked on a FIFO with no writer")
+                .unwrap();
+        assert_eq!(out.label, None);
+        assert_eq!(out.accent, None);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_checkout_leaves_what_is_stored_alone() {
+        let (tmp, reg, repo) = repo_with(Some(r##"{"color":"#0f766e"}"##)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(repo.accent, Some(7));
+
+        // The whole checkout is gone, not just the file — an unmounted volume looks like this.
+        std::fs::remove_dir_all(tmp.path().join("acme-platform")).unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.accent,
+            Some(7),
+            "an unreachable checkout declares nothing new"
         );
     }
 
