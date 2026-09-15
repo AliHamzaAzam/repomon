@@ -441,7 +441,7 @@ Repomon reads it when the repository is added:
 The file never changes a project's `name` on disk: notes directories, MCP lookups and worktree paths
 are all derived from that, and a `git pull` should not move them. A repository without the file
 behaves exactly as before — the sidebar shows the folder name and the stripe colour is hashed from
-the project id.
+the project and lane ids, so sibling worktrees stay distinguishable.
 
 ## Repo notes
 

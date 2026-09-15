@@ -4,7 +4,7 @@
 //! answer travels to every machine that clones it. Everything here is pure: no filesystem, no
 //! clock, no network — `parse` takes the file's bytes and `nearest_accent` takes a hex string.
 
-use serde::Deserialize;
+use serde_json::Value;
 
 /// What repomon takes from a `repo.json`. Deliberately narrower than the specification:
 /// facts about the repository, not one person's arrangement of the sidebar.
@@ -18,19 +18,13 @@ pub struct RepoJson {
     pub accent: Option<u8>,
 }
 
-#[derive(Deserialize)]
-struct RawRepoJson {
-    name: Option<String>,
-    description: Option<String>,
-    color: Option<RawColor>,
-}
-
 /// `"color": "#7c3aed"` is shorthand for `{ "primary": "#7c3aed" }` (specification section 6).
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawColor {
-    Scalar(String),
-    Roles { primary: Option<String> },
+fn primary_colour(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(map) => map.get("primary").and_then(Value::as_str),
+        _ => None,
+    }
 }
 
 /// The eight `--pane-accent-N` tokens as HSL, mirroring `apps/desktop/src/index.css`. A supplied
@@ -72,16 +66,25 @@ pub enum Declaration {
 /// Parse a `repo.json`. Returns `None` when the bytes are not an object, and leaves individual
 /// fields `None` when they are absent or unusable, so one bad field never discards the rest.
 pub fn parse(text: &str) -> Option<RepoJson> {
-    let raw: RawRepoJson = serde_json::from_str(text).ok()?;
-    let color = match raw.color {
-        Some(RawColor::Scalar(s)) => Some(s),
-        Some(RawColor::Roles { primary }) => primary,
-        None => None,
+    // An object, and then each field narrowed on its own. Deserializing into a struct of typed
+    // fields would reject the WHOLE document over one field of the wrong type, so `{"name": 7}`
+    // would also discard a perfectly good colour — and a file written by someone else is exactly
+    // where a stray type shows up.
+    let object = match serde_json::from_str::<Value>(text).ok()? {
+        Value::Object(map) => map,
+        _ => return None,
+    };
+    let string = |key: &str| match object.get(key) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
     };
     Some(RepoJson {
-        name: raw.name.and_then(displayable),
-        description: raw.description.and_then(non_empty),
-        accent: color.as_deref().and_then(nearest_accent),
+        name: string("name").and_then(displayable),
+        description: string("description").and_then(non_empty),
+        accent: object
+            .get("color")
+            .and_then(primary_colour)
+            .and_then(nearest_accent),
     })
 }
 
@@ -184,6 +187,19 @@ mod tests {
         let j =
             parse(r##"{"homepage":"https://example.com","projects":[],"name":"Keep"}"##).unwrap();
         assert_eq!(j.name.as_deref(), Some("Keep"));
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_does_not_discard_the_others() {
+        // A typed struct would make serde reject the whole document over any one of these.
+        let j = parse(r##"{"name":7,"color":"#0f766e"}"##).unwrap();
+        assert_eq!(j.name, None);
+        assert_eq!(j.accent, Some(7), "a numeric name must not cost the colour");
+
+        let j = parse(r##"{"name":"Acme","description":[],"color":{"primary":12}}"##).unwrap();
+        assert_eq!(j.name.as_deref(), Some("Acme"));
+        assert_eq!(j.description, None);
+        assert_eq!(j.accent, None);
     }
 
     #[test]
