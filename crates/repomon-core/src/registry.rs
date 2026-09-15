@@ -118,10 +118,20 @@ impl Registry {
 
 /// Read a repository's `repo.json` within bounds this machine sets rather than the repository.
 ///
-/// A cloned repository is written by someone else, so the path is treated as hostile. Every check
-/// is tied to the OPEN HANDLE rather than to the pathname: a pathname checked and then opened can
-/// be swapped in between, and `open` on a FIFO blocks before any read cap could apply — so the
-/// bound has to exist at open time, not after it.
+/// **What is permitted**, rather than a list of what is refused: a `repo.json` is used only when
+/// the final path component opens without following a link and the OPEN HANDLE is a regular file
+/// no larger than [`repo_json::MAX_BYTES`] holding UTF-8 that parses as an object. Everything else
+/// — a symlink, a FIFO, a device, a directory, a socket, an oversized or unreadable or malformed
+/// file — is [`repo_json::Declaration::Unusable`], without enumerating them. The checks are tied
+/// to the handle because a pathname checked and then opened can be swapped in between, and `open`
+/// on a FIFO blocks before any read cap could apply.
+///
+/// **What is trusted, and why.** Only the final component is treated as hostile. The ancestry of
+/// `repo.path` is not re-validated: it is canonicalized when the repo is registered, and an
+/// attacker who can swap a parent directory already controls the checkout — they can put whatever
+/// they like in the real `repo.json`, so reading a different file's name and colour buys them
+/// nothing. `O_NOFOLLOW` covers the final component only, and that is the component this boundary
+/// claims.
 fn read_declaration(path: &Path) -> repo_json::Declaration {
     use std::io::Read;
 
@@ -173,10 +183,18 @@ fn open_regular_file(path: &Path) -> Option<std::fs::File> {
         .ok()
 }
 
-/// Windows has no `O_NOFOLLOW`; the handle's own metadata is what the caller checks, and a
-/// reparse point or pipe fails that check rather than being followed silently.
+/// Windows has no `O_NOFOLLOW`, so the link check is made before the open rather than by it.
+///
+/// This is weaker than the Unix path and the difference is deliberate: a reparse point swapped in
+/// between this check and the open would still be followed. Closing that would mean Win32 open
+/// flags this crate does not currently pull in, written and shipped without a Windows machine to
+/// test them on — a guarantee nobody has run is worse than a stated limit.
 #[cfg(not(unix))]
 fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
     std::fs::File::open(path).ok()
 }
 
