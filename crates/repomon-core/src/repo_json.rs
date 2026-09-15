@@ -1,0 +1,345 @@
+//! Reads a repository's own `repo.json` (<https://github.com/repos-json/repos-json>).
+//!
+//! A repository committing this file says what it is called and what colour it is, so the same
+//! answer travels to every machine that clones it. Everything here is pure: no filesystem, no
+//! clock, no network — `parse` takes the file's bytes and `nearest_accent` takes a hex string.
+
+use serde_json::Value;
+
+/// What repomon takes from a `repo.json`. Deliberately narrower than the specification:
+/// facts about the repository, not one person's arrangement of the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepoJson {
+    /// Display name. Applied to `Repo::label`, never to `Repo::name`, because `name` is identity:
+    /// notes directories, MCP lookups and worktree paths are all derived from it.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// Brand colour resolved to one of the eight `--pane-accent-N` tokens, 1-8.
+    pub accent: Option<u8>,
+}
+
+/// `"color": "#7c3aed"` is shorthand for `{ "primary": "#7c3aed" }` (specification section 6).
+fn primary_colour(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(map) => map.get("primary").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+/// The eight `--pane-accent-N` tokens as HSL, mirroring `apps/desktop/src/index.css`. A supplied
+/// hex is mapped to the nearest of these rather than used directly: the tokens were chosen to stay
+/// legible across all six themes and an arbitrary brand colour was not.
+const ACCENT_HSL: [(f64, f64, f64); 8] = [
+    (18.0, 0.84, 0.61),
+    (196.0, 0.70, 0.48),
+    (268.0, 0.60, 0.62),
+    (346.0, 0.74, 0.62),
+    (42.0, 0.90, 0.50),
+    (96.0, 0.55, 0.44),
+    (176.0, 0.60, 0.42),
+    (226.0, 0.70, 0.60),
+];
+
+/// A declared name reaches the sidebar, pane titles and the database. Cap it, and drop anything
+/// carrying control characters: the file is written by whoever wrote the repository, which on a
+/// cloned repository is not the person running repomon.
+pub const MAX_NAME_CHARS: usize = 200;
+
+/// A `repo.json` larger than this is not a `repo.json`. The specification's own "every field at
+/// once" example is under 2 KiB; the cap exists so a cloned repository cannot make `repo.add` read
+/// an arbitrary amount into memory.
+pub const MAX_BYTES: u64 = 256 * 1024;
+
+/// What the repository says about itself, or why it said nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declaration {
+    /// No `repo.json`. The repository declares nothing — which is a statement, not an absence:
+    /// a colour adopted from a file that has since been deleted must not survive it.
+    None,
+    /// A `repo.json` exists but could not be used — too large, not a regular file, unreadable, or
+    /// not an object. Nothing is known, so nothing already stored is changed.
+    Unusable,
+    Declared(RepoJson),
+}
+
+/// Parse a `repo.json`. Returns `None` when the bytes are not an object, and leaves individual
+/// fields `None` when they are absent or unusable, so one bad field never discards the rest.
+pub fn parse(text: &str) -> Option<RepoJson> {
+    // An object, and then each field narrowed on its own. Deserializing into a struct of typed
+    // fields would reject the WHOLE document over one field of the wrong type, so `{"name": 7}`
+    // would also discard a perfectly good colour — and a file written by someone else is exactly
+    // where a stray type shows up.
+    let object = match serde_json::from_str::<Value>(text).ok()? {
+        Value::Object(map) => map,
+        _ => return None,
+    };
+    let string = |key: &str| match object.get(key) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    Some(RepoJson {
+        name: string("name").and_then(displayable),
+        description: string("description").and_then(non_empty),
+        accent: object
+            .get("color")
+            .and_then(primary_colour)
+            .and_then(nearest_accent),
+    })
+}
+
+fn non_empty(s: String) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// A display string this machine is willing to show. Rejects rather than truncates: a name cut in
+/// half is a name the repository did not choose, and silently showing one is worse than showing the
+/// folder name.
+fn displayable(s: String) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() || t.chars().count() > MAX_NAME_CHARS {
+        return None;
+    }
+    if t.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// Map `#rgb` or `#rrggbb` to the nearest accent token, 1-8. Any other syntax yields `None`:
+/// the specification admits no other colour form, and guessing at one would make two consumers
+/// disagree about the same file.
+pub fn nearest_accent(hex: &str) -> Option<u8> {
+    let (r, g, b) = parse_hex(hex)?;
+    let mut best = (f64::MAX, 0usize);
+    for (i, &(h, s, l)) in ACCENT_HSL.iter().enumerate() {
+        let d = redmean_sq((r, g, b), hsl_to_rgb(h, s, l));
+        if d < best.0 {
+            best = (d, i);
+        }
+    }
+    Some(best.1 as u8 + 1)
+}
+
+fn parse_hex(hex: &str) -> Option<(f64, f64, f64)> {
+    // Bytes, not `str` slicing: a value like `#1é234` is six bytes after the `#` but slicing at
+    // byte 2 lands inside the `é` and panics. The specification admits ASCII hex only, so anything
+    // that is not an ASCII hex digit is simply not a colour.
+    let digits = hex.strip_prefix('#')?.as_bytes();
+    if !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let value = |b: &[u8]| -> Option<f64> {
+        let hi = (b[0] as char).to_digit(16)?;
+        let lo = (b[1] as char).to_digit(16)?;
+        Some(f64::from(hi * 16 + lo))
+    };
+    match digits.len() {
+        3 => Some((
+            value(&[digits[0], digits[0]])?,
+            value(&[digits[1], digits[1]])?,
+            value(&[digits[2], digits[2]])?,
+        )),
+        6 => Some((
+            value(&digits[0..2])?,
+            value(&digits[2..4])?,
+            value(&digits[4..6])?,
+        )),
+        _ => None,
+    }
+}
+
+fn hsl_to_rgb(h_deg: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h = h_deg / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    ((r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0)
+}
+
+/// "Redmean" distance: a cheap approximation of perceived colour difference that, unlike plain RGB
+/// distance, does not put a grey next to a saturated hue. Squared, because only the order matters.
+fn redmean_sq(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    let rbar = (a.0 + b.0) / 2.0;
+    let (dr, dg, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    (2.0 + rbar / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - rbar) / 256.0) * db * db
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_every_field_repomon_uses() {
+        let j = parse(r##"{"name":"Acme Platform","description":"The thing","color":"#0f766e"}"##)
+            .expect("parses");
+        assert_eq!(j.name.as_deref(), Some("Acme Platform"));
+        assert_eq!(j.description.as_deref(), Some("The thing"));
+        assert_eq!(j.accent, Some(7)); // teal
+    }
+
+    #[test]
+    fn scalar_colour_is_shorthand_for_primary() {
+        let scalar = parse(r##"{"color":"#1d4ed8"}"##).unwrap();
+        let roles = parse(r##"{"color":{"primary":"#1d4ed8","accent":"#f59e0b"}}"##).unwrap();
+        assert_eq!(scalar.accent, roles.accent);
+        assert_eq!(scalar.accent, Some(8)); // blue, not the amber accent role
+    }
+
+    #[test]
+    fn empty_file_and_unknown_fields_are_not_errors() {
+        assert_eq!(parse("{}"), Some(RepoJson::default()));
+        let j =
+            parse(r##"{"homepage":"https://example.com","projects":[],"name":"Keep"}"##).unwrap();
+        assert_eq!(j.name.as_deref(), Some("Keep"));
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_does_not_discard_the_others() {
+        // A typed struct would make serde reject the whole document over any one of these.
+        let j = parse(r##"{"name":7,"color":"#0f766e"}"##).unwrap();
+        assert_eq!(j.name, None);
+        assert_eq!(j.accent, Some(7), "a numeric name must not cost the colour");
+
+        let j = parse(r##"{"name":"Acme","description":[],"color":{"primary":12}}"##).unwrap();
+        assert_eq!(j.name.as_deref(), Some("Acme"));
+        assert_eq!(j.description, None);
+        assert_eq!(j.accent, None);
+    }
+
+    #[test]
+    fn a_field_that_cannot_be_used_does_not_discard_the_others() {
+        let j = parse(r##"{"name":"Kept","color":"rebeccapurple"}"##).unwrap();
+        assert_eq!(j.name.as_deref(), Some("Kept"));
+        assert_eq!(j.accent, None);
+    }
+
+    #[test]
+    fn blank_strings_are_absent_not_present_and_empty() {
+        let j = parse(r##"{"name":"   ","description":""}"##).unwrap();
+        assert_eq!(j.name, None);
+        assert_eq!(j.description, None);
+    }
+
+    #[test]
+    fn an_over_long_name_is_refused_rather_than_truncated() {
+        let long = "A".repeat(MAX_NAME_CHARS + 1);
+        let j = parse(&format!(r##"{{"name":"{long}","color":"#0f766e"}}"##)).unwrap();
+        assert_eq!(j.name, None, "a name cut in half is not the repo's name");
+        assert_eq!(
+            j.accent,
+            Some(7),
+            "one bad field must not discard the others"
+        );
+
+        let ok = "A".repeat(MAX_NAME_CHARS);
+        assert!(
+            parse(&format!(r##"{{"name":"{ok}"}}"##))
+                .unwrap()
+                .name
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_name_carrying_control_characters_is_refused() {
+        for bad in ["a\u{0000}b", "a\nb", "a\u{001b}[31mb", "a\u{202e}b\u{0007}"] {
+            let j = parse(&serde_json::json!({ "name": bad }).to_string()).unwrap();
+            assert_eq!(
+                j.name, None,
+                "{bad:?} reaches the sidebar and a terminal title"
+            );
+        }
+    }
+
+    #[test]
+    fn not_an_object_is_none() {
+        for bad in ["", "[]", "null", "\"x\"", "{", "not json"] {
+            assert_eq!(parse(bad), None, "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn three_digit_hex_expands_like_css() {
+        assert_eq!(nearest_accent("#0f766e"), nearest_accent("#076"));
+    }
+
+    #[test]
+    fn every_token_maps_to_itself() {
+        // The token colours as hex, so a file that already uses the palette is not moved.
+        let tokens = [
+            ("#f0793d", 1),
+            ("#25a0d0", 2),
+            ("#9a63dd", 3),
+            ("#e8496e", 4),
+            ("#f2a70d", 5),
+            ("#6aae32", 6),
+            ("#2bab9f", 7),
+            ("#5578e6", 8),
+        ];
+        for (hex, want) in tokens {
+            assert_eq!(
+                nearest_accent(hex),
+                Some(want),
+                "{hex} should stay on {want}"
+            );
+        }
+    }
+
+    /// The parser is handed a file someone else wrote, so no input may panic — not a malformed
+    /// colour, not a multi-byte character landing on a slice boundary, not a truncated document.
+    #[test]
+    fn no_generated_input_panics() {
+        let pieces = [
+            "#", "0", "f", "é", "文", "\u{202e}", "ZZ", " ", "", "7", "#0f766e", "ff",
+        ];
+        let mut checked = 0;
+        for a in pieces {
+            for b in pieces {
+                for c in pieces {
+                    let colour = format!("{a}{b}{c}");
+                    // Straight at the colour path, where the byte slicing lives.
+                    let _ = nearest_accent(&colour);
+                    // And through the whole parser, colour and name both.
+                    let doc = serde_json::json!({ "color": colour, "name": format!("{b}{c}") });
+                    let _ = parse(&doc.to_string());
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, pieces.len().pow(3), "{checked} inputs exercised");
+    }
+
+    #[test]
+    fn a_colour_is_always_resolved_to_a_token_in_range() {
+        for hex in ["#000", "#fff", "#808080", "#ff0000", "#00ff00", "#0000ff"] {
+            let a = nearest_accent(hex).unwrap_or_else(|| panic!("{hex} unresolved"));
+            assert!((1..=8).contains(&a), "{hex} gave {a}");
+        }
+    }
+
+    #[test]
+    fn malformed_colours_are_rejected_rather_than_guessed() {
+        for bad in [
+            "",
+            "#",
+            "#12",
+            "#12345",
+            "#1234567",
+            "0f766e",
+            "#gggggg",
+            "rgb(1,2,3)",
+        ] {
+            assert_eq!(nearest_accent(bad), None, "{bad:?} should be rejected");
+        }
+    }
+}

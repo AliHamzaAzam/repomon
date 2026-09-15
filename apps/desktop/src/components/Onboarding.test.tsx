@@ -325,6 +325,7 @@ describe("setup wizard steps", () => {
       hidden: false,
       position: null,
       label: null,
+      accent: null,
     };
     mountWizard({ step: "repos", repos: [repo] });
     expect(screen.getByText("repomon")).toBeInTheDocument();
@@ -442,6 +443,7 @@ describe("setup wizard steps", () => {
       hidden: false,
       position: null,
       label: null,
+      accent: null,
     };
     daemon.config = { ...BASE_CONFIG, default_agent: "codex", notify_enabled: true, notify_needs_you: true };
     mountWizard({ step: "done", repos: [repo] });

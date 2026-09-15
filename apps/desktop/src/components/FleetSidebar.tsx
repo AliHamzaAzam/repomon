@@ -6,6 +6,7 @@ import type { ActionsStore } from "../stores/actions";
 import type { RepomindStore } from "../stores/repomind";
 import type { WorkspaceStore } from "../stores/workspace";
 import { formatUsd } from "./usageMetrics";
+import { accentToken } from "./terminalTargets";
 import {
   readAutoCollapseEmptyLanes,
   readSidebarShowTodayCost,
@@ -903,6 +904,15 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                       }}
                     >
                       <span class="flex min-w-0 items-center gap-1.5">
+                        <Show when={accentToken(repo.accent)}>
+                          {(token) => (
+                            <span
+                              class="size-1.5 shrink-0 rounded-full"
+                              style={{ "background-color": token() }}
+                              title={`Colour declared in ${repo.name}'s repo.json`}
+                            />
+                          )}
+                        </Show>
                         <span
                           class="truncate font-mono text-[11px] font-semibold uppercase tracking-[0.02em] text-muted transition-colors hover:text-foreground cursor-default"
                           title={

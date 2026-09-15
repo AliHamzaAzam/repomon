@@ -83,6 +83,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0030_message_push_attempts.sql"),
     ),
     (31, include_str!("../../migrations/0031_lane_view.sql")),
+    (32, include_str!("../../migrations/0032_repo_accent.sql")),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
@@ -253,6 +254,7 @@ impl Store {
                 hidden: false,
                 position: None,
                 label: None,
+                accent: None,
             })
         })
         .await
@@ -334,6 +336,42 @@ impl Store {
                 )?;
             }
             tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Seed a repo's display label, but only while it has none.
+    ///
+    /// Separate from [`Self::set_repo_label`] because the condition has to be part of the write: a
+    /// caller that reads the label, decides it is empty, and then writes can be overtaken by a
+    /// rename in between and would silently discard it. Returns whether the seed was taken.
+    pub async fn seed_repo_label(&self, id: RepoId, label: String) -> Result<bool> {
+        self.call(move |c| {
+            let label = label.trim().to_string();
+            if label.is_empty() {
+                return Ok(false);
+            }
+            let n = c.execute(
+                "UPDATE repos SET label = ?2 WHERE id = ?1 AND label IS NULL",
+                params![id, label],
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
+    /// Set a repo's accent token, 1-8. `None` clears it, so clients fall back to hashing the id.
+    pub async fn set_repo_accent(&self, id: RepoId, accent: Option<u8>) -> Result<()> {
+        self.call(move |c| {
+            let accent = accent.filter(|a| (1..=8).contains(a));
+            let n = c.execute(
+                "UPDATE repos SET accent = ?2 WHERE id = ?1",
+                params![id, accent],
+            )?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("repo {id}")));
+            }
             Ok(())
         })
         .await
@@ -2818,12 +2856,13 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         hidden: r.get(5)?,
         position: r.get(6)?,
         label: r.get(7)?,
+        accent: r.get(8)?,
     })
 }
 
 /// The repo column list shared by every repo SELECT, matching `repo_from_row`'s indices.
 const REPO_COLUMNS: &str =
-    "id, path, name, added_at, worktree_root_template, hidden, position, label";
+    "id, path, name, added_at, worktree_root_template, hidden, position, label, accent";
 
 /// Orders explicitly positioned repositories first by position, then the rest by name.
 const REPO_ORDER: &str = "ORDER BY (position IS NULL), position, name";

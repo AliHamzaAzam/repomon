@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  accentToken,
   dedupe,
+  paneAccent,
   stableVisibleTargets,
   stabilizeTargets,
   warmTargetWindows,
@@ -127,5 +129,76 @@ describe("stableVisibleTargets", () => {
       "c",
       "d",
     ]);
+  });
+});
+
+describe("paneAccent", () => {
+  it("uses the accent the repo declares in its own repo.json", () => {
+    expect(paneAccent({ repoId: 1, laneId: 1, repoAccent: 7 })).toBe("var(--pane-accent-7)");
+  });
+
+  it("gives the same colour on two machines that disagree about ids", () => {
+    const here = paneAccent({ repoId: 3, laneId: 9, repoAccent: 4 });
+    const there = paneAccent({ repoId: 41, laneId: 2, repoAccent: 4 });
+    expect(here).toBe(there);
+  });
+
+  it("falls back to hashing the id when the repo declares nothing", () => {
+    for (const repoAccent of [undefined, null]) {
+      expect(paneAccent({ repoId: 3, laneId: 9, repoAccent })).toBe(
+        paneAccent({ repoId: 3, laneId: 9 }),
+      );
+    }
+  });
+
+  it("ignores a declared accent outside the palette rather than indexing off the end", () => {
+    for (const repoAccent of [0, 9, -1, 1.5, Number.NaN]) {
+      expect(paneAccent({ repoId: 3, laneId: 9, repoAccent })).toBe(
+        paneAccent({ repoId: 3, laneId: 9 }),
+      );
+    }
+  });
+
+  it("keeps sibling lanes of one repo distinguishable when nothing is declared", () => {
+    expect(paneAccent({ repoId: 5, laneId: 1 })).not.toBe(paneAccent({ repoId: 5, laneId: 2 }));
+  });
+});
+
+describe("stabilizeTargets and repoAccent", () => {
+  it("refreshes a declared accent onto the retained object", () => {
+    const cache = new Map<string, PaneTarget>();
+    stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 4 })]);
+
+    // The repository changed its repo.json; the window set did not change.
+    const after = stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 7 })]);
+    expect(after[0].repoAccent).toBe(7);
+    expect(paneAccent(after[0])).toBe("var(--pane-accent-7)");
+  });
+
+  it("clears it when the repository stops declaring one", () => {
+    const cache = new Map<string, PaneTarget>();
+    stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 4 })]);
+
+    const after = stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: null })]);
+    expect(after[0].repoAccent).toBeNull();
+    expect(paneAccent(after[0])).toBe(paneAccent({ repoId: 3, laneId: 1 }));
+  });
+});
+
+describe("accentToken", () => {
+  it("returns the token a repo declared", () => {
+    expect(accentToken(1)).toBe("var(--pane-accent-1)");
+    expect(accentToken(8)).toBe("var(--pane-accent-8)");
+  });
+
+  it("returns nothing when the repo declared nothing, so the sidebar shows no dot", () => {
+    expect(accentToken(null)).toBeUndefined();
+    expect(accentToken(undefined)).toBeUndefined();
+  });
+
+  it("returns nothing for a value outside the palette rather than indexing off the end", () => {
+    for (const bad of [0, 9, -1, 1.5, Number.NaN]) {
+      expect(accentToken(bad)).toBeUndefined();
+    }
   });
 });

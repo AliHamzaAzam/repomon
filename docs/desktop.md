@@ -10,7 +10,7 @@ fleet at once.
 |---|---|
 | Setup | [Install](#install), [icons](#the-app-icon) |
 | Controls | [Keyboard](#keyboard-control), [settings](#settings), [boot diagnostics](#when-the-daemon-will-not-start) |
-| Projects | [Hidden projects](#hiding-projects), [notes](#repo-notes) |
+| Projects | [Hidden projects](#hiding-projects), [notes](#repo-notes), [`repo.json`](#what-a-repository-says-about-itself) |
 | Orchestration | [Journal](#the-orchestration-journal), [playbooks](#playbooks), [duties](#standing-orchestrations), [approvals](#approval-policy), [Repomind](#repomind) |
 | Workspaces | [Git](#git-explorer), [editor](#in-app-editor), [extensions](#extensions) |
 | Usage and support | [Usage](#usage), [known gaps](#known-gaps) |
@@ -419,6 +419,29 @@ the sidebar brings any of them back.
 
 The flag lives in the daemon, so the TUI honors it too and it survives a restart. The TUI has no unhide view of its own,
 so a project hidden there stays hidden until you restore it here.
+
+## What a repository says about itself
+
+A repository can ship a [`repo.json`](https://github.com/repos-json/repos-json) at its root, and
+Repomon reads it when the repository is added:
+
+```json
+{
+  "name": "Acme Platform",
+  "description": "Billing and entitlements",
+  "color": "#0f766e"
+}
+```
+
+| Field | What Repomon does with it |
+| --- | --- |
+| `name` | Seeds the display label, but only when nobody on this machine has renamed the project — a local rename always wins. It is a seed and not a subscription: once adopted the label is an ordinary label, so changing or deleting the name in `repo.json` later does not move it. |
+| `color` | Mapped to the nearest of the eight pane-accent tokens, so the project keeps the same stripe colour on every machine that clones it. The hex is not used directly — an arbitrary brand colour does not stay legible across all six themes. |
+
+The file never changes a project's `name` on disk: notes directories, MCP lookups and worktree paths
+are all derived from that, and a `git pull` should not move them. A repository without the file
+behaves exactly as before — the sidebar shows the folder name and the stripe colour is hashed from
+the project and lane ids, so sibling worktrees stay distinguishable.
 
 ## Repo notes
 

@@ -19,6 +19,7 @@ const home: Repo = {
   hidden: false,
   position: null,
   label: null,
+  accent: null,
 };
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {
