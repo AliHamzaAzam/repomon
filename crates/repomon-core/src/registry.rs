@@ -45,20 +45,19 @@ impl Registry {
     /// Adopt what the repository says about itself in its own `repo.json`.
     ///
     /// The file is the repository's claim, not this machine's: it fills the label only when nobody
-    /// here has set one, so a local rename always wins. Nothing is written when the file is absent
-    /// or unreadable — a repo without one behaves exactly as before.
+    /// here has set one, so a local rename always wins. The accent has no local source, so it
+    /// mirrors the file exactly — including being cleared when the file stops declaring a colour.
     pub async fn apply_repo_json(&self, repo: Repo) -> Result<Repo> {
         let path = repo.path.join("repo.json");
-        let Some(declared) = tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(&path)
-                .ok()
-                .as_deref()
-                .and_then(repo_json::parse)
-        })
-        .await
-        .map_err(join_err)?
-        else {
-            return Ok(repo);
+        let declaration = tokio::task::spawn_blocking(move || read_declaration(&path))
+            .await
+            .map_err(join_err)?;
+
+        let declared = match declaration {
+            // Nothing is known about this repository, so nothing already stored is disturbed.
+            repo_json::Declaration::Unusable => return Ok(repo),
+            repo_json::Declaration::None => repo_json::RepoJson::default(),
+            repo_json::Declaration::Declared(d) => d,
         };
 
         let mut changed = false;
@@ -70,7 +69,7 @@ impl Registry {
                 changed = true;
             }
         }
-        if declared.accent.is_some() && declared.accent != repo.accent {
+        if declared.accent != repo.accent {
             self.store.set_repo_accent(repo.id, declared.accent).await?;
             changed = true;
         }
@@ -114,6 +113,42 @@ impl Registry {
         tokio::task::spawn_blocking(move || discover_walk(&root, max_depth))
             .await
             .map_err(join_err)
+    }
+}
+
+/// Read a repository's `repo.json` within bounds this machine sets rather than the repository.
+///
+/// A cloned repository is written by someone else, so the path is treated as hostile: only a
+/// regular file is opened (a symlink would reach outside the checkout, a FIFO would block the
+/// blocking pool forever), and the read stops one byte past the cap so a file that grows between
+/// the stat and the read cannot get past it either.
+fn read_declaration(path: &Path) -> repo_json::Declaration {
+    use std::io::Read;
+
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return repo_json::Declaration::None,
+        Err(_) => return repo_json::Declaration::Unusable,
+    };
+    if !meta.file_type().is_file() || meta.len() > repo_json::MAX_BYTES {
+        return repo_json::Declaration::Unusable;
+    }
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return repo_json::Declaration::Unusable;
+    };
+    let mut text = String::new();
+    if file
+        .take(repo_json::MAX_BYTES + 1)
+        .read_to_string(&mut text)
+        .is_err()
+        || text.len() as u64 > repo_json::MAX_BYTES
+    {
+        return repo_json::Declaration::Unusable;
+    }
+    match repo_json::parse(&text) {
+        Some(d) => repo_json::Declaration::Declared(d),
+        None => repo_json::Declaration::Unusable,
     }
 }
 
@@ -225,6 +260,77 @@ mod tests {
         let out = reg.apply_repo_json(repo).await.unwrap();
         assert_eq!(out.label, None);
         assert_eq!(out.accent, None);
+    }
+
+    #[tokio::test]
+    async fn an_accent_is_cleared_when_the_file_stops_declaring_one() {
+        let (tmp, reg, repo) = repo_with(Some(r##"{"color":"#0f766e"}"##)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(repo.accent, Some(7));
+
+        // The repository changed its mind. A colour it no longer declares must not survive.
+        std::fs::write(tmp.path().join("acme-platform/repo.json"), "{}").unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.accent, None,
+            "stale accent kept paneAccent off the id hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accent_is_cleared_when_the_file_is_deleted() {
+        let (tmp, reg, repo) = repo_with(Some(r##"{"color":"#0f766e"}"##)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(repo.accent, Some(7));
+
+        std::fs::remove_file(tmp.path().join("acme-platform/repo.json")).unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.accent, None, "a deleted file still declares nothing");
+    }
+
+    #[tokio::test]
+    async fn a_file_we_cannot_use_leaves_what_is_stored_alone() {
+        let (tmp, reg, repo) = repo_with(Some(r##"{"color":"#0f766e"}"##)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(repo.accent, Some(7));
+
+        // Unparseable is not the same statement as "declares nothing".
+        std::fs::write(tmp.path().join("acme-platform/repo.json"), "{ truncated").unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.accent,
+            Some(7),
+            "an unreadable file knows nothing, so it changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_file_is_refused_without_reading_it() {
+        let (tmp, reg, repo) = repo_with(None).await;
+        let path = tmp.path().join("acme-platform/repo.json");
+        let padding = " ".repeat(repo_json::MAX_BYTES as usize + 1);
+        std::fs::write(&path, format!(r##"{{"color":"#0f766e"}}{padding}"##)).unwrap();
+
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.accent, None,
+            "size is capped by this machine, not by the repository"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_file_is_refused_so_it_cannot_reach_outside_the_checkout() {
+        let (tmp, reg, repo) = repo_with(None).await;
+        let outside = tmp.path().join("outside.json");
+        std::fs::write(&outside, r##"{"name":"Reached outside"}"##).unwrap();
+        std::os::unix::fs::symlink(&outside, tmp.path().join("acme-platform/repo.json")).unwrap();
+
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.label, None,
+            "a symlink is not the repository's own file"
+        );
     }
 
     #[tokio::test]

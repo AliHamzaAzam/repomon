@@ -47,6 +47,28 @@ const ACCENT_HSL: [(f64, f64, f64); 8] = [
     (226.0, 0.70, 0.60),
 ];
 
+/// A declared name reaches the sidebar, pane titles and the database. Cap it, and drop anything
+/// carrying control characters: the file is written by whoever wrote the repository, which on a
+/// cloned repository is not the person running repomon.
+pub const MAX_NAME_CHARS: usize = 200;
+
+/// A `repo.json` larger than this is not a `repo.json`. The specification's own "every field at
+/// once" example is under 2 KiB; the cap exists so a cloned repository cannot make `repo.add` read
+/// an arbitrary amount into memory.
+pub const MAX_BYTES: u64 = 256 * 1024;
+
+/// What the repository says about itself, or why it said nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declaration {
+    /// No `repo.json`. The repository declares nothing — which is a statement, not an absence:
+    /// a colour adopted from a file that has since been deleted must not survive it.
+    None,
+    /// A `repo.json` exists but could not be used — too large, not a regular file, unreadable, or
+    /// not an object. Nothing is known, so nothing already stored is changed.
+    Unusable,
+    Declared(RepoJson),
+}
+
 /// Parse a `repo.json`. Returns `None` when the bytes are not an object, and leaves individual
 /// fields `None` when they are absent or unusable, so one bad field never discards the rest.
 pub fn parse(text: &str) -> Option<RepoJson> {
@@ -57,7 +79,7 @@ pub fn parse(text: &str) -> Option<RepoJson> {
         None => None,
     };
     Some(RepoJson {
-        name: raw.name.and_then(non_empty),
+        name: raw.name.and_then(displayable),
         description: raw.description.and_then(non_empty),
         accent: color.as_deref().and_then(nearest_accent),
     })
@@ -66,6 +88,20 @@ pub fn parse(text: &str) -> Option<RepoJson> {
 fn non_empty(s: String) -> Option<String> {
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// A display string this machine is willing to show. Rejects rather than truncates: a name cut in
+/// half is a name the repository did not choose, and silently showing one is worse than showing the
+/// folder name.
+fn displayable(s: String) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() || t.chars().count() > MAX_NAME_CHARS {
+        return None;
+    }
+    if t.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 /// Map `#rgb` or `#rrggbb` to the nearest accent token, 1-8. Any other syntax yields `None`:
@@ -162,6 +198,37 @@ mod tests {
         let j = parse(r##"{"name":"   ","description":""}"##).unwrap();
         assert_eq!(j.name, None);
         assert_eq!(j.description, None);
+    }
+
+    #[test]
+    fn an_over_long_name_is_refused_rather_than_truncated() {
+        let long = "A".repeat(MAX_NAME_CHARS + 1);
+        let j = parse(&format!(r##"{{"name":"{long}","color":"#0f766e"}}"##)).unwrap();
+        assert_eq!(j.name, None, "a name cut in half is not the repo's name");
+        assert_eq!(
+            j.accent,
+            Some(7),
+            "one bad field must not discard the others"
+        );
+
+        let ok = "A".repeat(MAX_NAME_CHARS);
+        assert!(
+            parse(&format!(r##"{{"name":"{ok}"}}"##))
+                .unwrap()
+                .name
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_name_carrying_control_characters_is_refused() {
+        for bad in ["a\u{0000}b", "a\nb", "a\u{001b}[31mb", "a\u{202e}b\u{0007}"] {
+            let j = parse(&serde_json::json!({ "name": bad }).to_string()).unwrap();
+            assert_eq!(
+                j.name, None,
+                "{bad:?} reaches the sidebar and a terminal title"
+            );
+        }
     }
 
     #[test]
