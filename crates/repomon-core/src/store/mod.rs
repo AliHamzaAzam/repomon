@@ -341,6 +341,26 @@ impl Store {
         .await
     }
 
+    /// Seed a repo's display label, but only while it has none.
+    ///
+    /// Separate from [`Self::set_repo_label`] because the condition has to be part of the write: a
+    /// caller that reads the label, decides it is empty, and then writes can be overtaken by a
+    /// rename in between and would silently discard it. Returns whether the seed was taken.
+    pub async fn seed_repo_label(&self, id: RepoId, label: String) -> Result<bool> {
+        self.call(move |c| {
+            let label = label.trim().to_string();
+            if label.is_empty() {
+                return Ok(false);
+            }
+            let n = c.execute(
+                "UPDATE repos SET label = ?2 WHERE id = ?1 AND label IS NULL",
+                params![id, label],
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     /// Set a repo's accent token, 1-8. `None` clears it, so clients fall back to hashing the id.
     pub async fn set_repo_accent(&self, id: RepoId, accent: Option<u8>) -> Result<()> {
         self.call(move |c| {

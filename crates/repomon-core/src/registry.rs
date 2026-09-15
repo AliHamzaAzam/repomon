@@ -67,20 +67,27 @@ impl Registry {
             repo_json::Declaration::Declared(d) => d,
         };
 
-        let mut changed = false;
-        if repo.label.is_none() {
-            // A declared name equal to the folder name is not an override: writing it would leave a
-            // stale label behind the moment the folder is renamed, for no visible difference.
-            if let Some(name) = declared.name.filter(|n| *n != repo.name) {
-                self.store.set_repo_label(repo.id, Some(name)).await?;
-                changed = true;
-            }
+        // `repo` is a snapshot taken before the file was read off-thread, so it is only used to
+        // decide what to ATTEMPT. Whether a write is allowed is decided by the write itself.
+        let mut wrote = false;
+
+        // A declared name equal to the folder name is not an override: writing it would leave a
+        // stale label behind the moment the folder is renamed, for no visible difference.
+        //
+        // The emptiness check belongs to the write, not to the snapshot: a rename landing during
+        // the read would otherwise be overwritten by a seed that believed there was no label.
+        if let Some(name) = declared.name.filter(|n| *n != repo.name) {
+            self.store.seed_repo_label(repo.id, name).await?;
+            wrote = true;
         }
         if declared.accent != repo.accent {
             self.store.set_repo_accent(repo.id, declared.accent).await?;
-            changed = true;
+            wrote = true;
         }
-        if changed {
+
+        // Re-read after ATTEMPTING anything, not after landing it: a refused seed means something
+        // else changed the row, and returning the snapshot would hand back the value it replaced.
+        if wrote {
             self.store.get_repo(repo.id).await
         } else {
             Ok(repo)
@@ -344,6 +351,21 @@ mod tests {
             Some("Acme Platform"),
             "and removal cannot clear it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rename_landing_during_the_file_read_is_not_overwritten() {
+        let (_t, reg, repo) = repo_with(Some(r##"{"name":"Acme Platform"}"##)).await;
+
+        // `repo` is the snapshot apply_repo_json would carry across the off-thread read. The
+        // rename happens after it was taken, which is the window the seed must not reopen.
+        reg.store
+            .set_repo_label(repo.id, Some("Renamed mid-read".into()))
+            .await
+            .unwrap();
+
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.label.as_deref(), Some("Renamed mid-read"));
     }
 
     #[tokio::test]
