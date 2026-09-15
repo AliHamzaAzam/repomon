@@ -435,7 +435,7 @@ Repomon reads it when the repository is added:
 
 | Field | What Repomon does with it |
 | --- | --- |
-| `name` | Used as the display label, but only when nobody on this machine has renamed the project. A local rename always wins. |
+| `name` | Seeds the display label, but only when nobody on this machine has renamed the project — a local rename always wins. It is a seed and not a subscription: once adopted the label is an ordinary label, so changing or deleting the name in `repo.json` later does not move it. |
 | `color` | Mapped to the nearest of the eight pane-accent tokens, so the project keeps the same stripe colour on every machine that clones it. The hex is not used directly — an arbitrary brand colour does not stay legible across all six themes. |
 
 The file never changes a project's `name` on disk: notes directories, MCP lookups and worktree paths

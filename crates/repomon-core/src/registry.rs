@@ -47,6 +47,13 @@ impl Registry {
     /// The file is the repository's claim, not this machine's: it fills the label only when nobody
     /// here has set one, so a local rename always wins. The accent has no local source, so it
     /// mirrors the file exactly — including being cleared when the file stops declaring a colour.
+    ///
+    /// **The two halves therefore converge differently, and deliberately.** A declared colour keeps
+    /// following the file. A declared name is a SEED: once adopted it is an ordinary label, and
+    /// `Repo` has no record of where a label came from, so a later change or removal in `repo.json`
+    /// does not move it. Making the name follow the file too would need that provenance — a second
+    /// stored value, and a decision about what a local rename then means — which is a product call
+    /// rather than a detail of reading the file.
     pub async fn apply_repo_json(&self, repo: Repo) -> Result<Repo> {
         let path = repo.path.join("repo.json");
         let declaration = tokio::task::spawn_blocking(move || read_declaration(&path))
@@ -308,6 +315,35 @@ mod tests {
         let out = reg.apply_repo_json(repo).await.unwrap();
         assert_eq!(out.label, None);
         assert_eq!(out.accent, None);
+    }
+
+    #[tokio::test]
+    async fn a_declared_name_is_a_seed_and_does_not_follow_later_edits() {
+        let (tmp, reg, repo) = repo_with(Some(r##"{"name":"Acme Platform"}"##)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(repo.label.as_deref(), Some("Acme Platform"));
+
+        // Once adopted the label is indistinguishable from a local rename, so the file cannot
+        // move it. This pins the current behaviour; changing it needs label provenance.
+        std::fs::write(
+            tmp.path().join("acme-platform/repo.json"),
+            r##"{"name":"Billing"}"##,
+        )
+        .unwrap();
+        let out = reg.apply_repo_json(repo.clone()).await.unwrap();
+        assert_eq!(
+            out.label.as_deref(),
+            Some("Acme Platform"),
+            "a rename would have to win too"
+        );
+
+        std::fs::write(tmp.path().join("acme-platform/repo.json"), "{}").unwrap();
+        let out = reg.apply_repo_json(out).await.unwrap();
+        assert_eq!(
+            out.label.as_deref(),
+            Some("Acme Platform"),
+            "and removal cannot clear it"
+        );
     }
 
     #[tokio::test]

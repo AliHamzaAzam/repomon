@@ -104,6 +104,7 @@ export function stabilizeTargets(
     prev.laneId = target.laneId;
     prev.repoId = target.repoId;
     prev.repoName = target.repoName;
+    prev.repoAccent = target.repoAccent;
     prev.laneName = target.laneName;
     prev.branch = target.branch;
     prev.label = target.label;

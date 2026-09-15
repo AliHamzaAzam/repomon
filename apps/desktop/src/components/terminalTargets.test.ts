@@ -164,6 +164,27 @@ describe("paneAccent", () => {
   });
 });
 
+describe("stabilizeTargets and repoAccent", () => {
+  it("refreshes a declared accent onto the retained object", () => {
+    const cache = new Map<string, PaneTarget>();
+    stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 4 })]);
+
+    // The repository changed its repo.json; the window set did not change.
+    const after = stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 7 })]);
+    expect(after[0].repoAccent).toBe(7);
+    expect(paneAccent(after[0])).toBe("var(--pane-accent-7)");
+  });
+
+  it("clears it when the repository stops declaring one", () => {
+    const cache = new Map<string, PaneTarget>();
+    stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: 4 })]);
+
+    const after = stabilizeTargets(cache, [target("lane-1", { repoId: 3, repoAccent: null })]);
+    expect(after[0].repoAccent).toBeNull();
+    expect(paneAccent(after[0])).toBe(paneAccent({ repoId: 3, laneId: 1 }));
+  });
+});
+
 describe("accentToken", () => {
   it("returns the token a repo declared", () => {
     expect(accentToken(1)).toBe("var(--pane-accent-1)");
