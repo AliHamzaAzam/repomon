@@ -119,10 +119,12 @@ impl Registry {
 /// Read a repository's `repo.json` within bounds this machine sets rather than the repository.
 ///
 /// **What is permitted**, rather than a list of what is refused: a `repo.json` is used only when
-/// the final path component opens without following a link and the OPEN HANDLE is a regular file
-/// no larger than [`repo_json::MAX_BYTES`] holding UTF-8 that parses as an object. Everything else
-/// — a symlink, a FIFO, a device, a directory, a socket, an oversized or unreadable or malformed
-/// file — is [`repo_json::Declaration::Unusable`], without enumerating them. The checks are tied
+/// the final path component passes [`open_regular_file`] — on Unix that means it opens *without
+/// following a link*, and on other platforms the weaker check documented there — and the OPEN
+/// HANDLE is a regular file no larger than [`repo_json::MAX_BYTES`] holding UTF-8 that parses as
+/// an object. Everything else — a symlink, a FIFO, a device, a directory, a socket, an oversized
+/// or unreadable or malformed file — is [`repo_json::Declaration::Unusable`], without enumerating
+/// them. The checks are tied
 /// to the handle because a pathname checked and then opened can be swapped in between, and `open`
 /// on a FIFO blocks before any read cap could apply.
 ///
