@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  accentToken,
   dedupe,
   paneAccent,
   stableVisibleTargets,
@@ -160,5 +161,23 @@ describe("paneAccent", () => {
 
   it("keeps sibling lanes of one repo distinguishable when nothing is declared", () => {
     expect(paneAccent({ repoId: 5, laneId: 1 })).not.toBe(paneAccent({ repoId: 5, laneId: 2 }));
+  });
+});
+
+describe("accentToken", () => {
+  it("returns the token a repo declared", () => {
+    expect(accentToken(1)).toBe("var(--pane-accent-1)");
+    expect(accentToken(8)).toBe("var(--pane-accent-8)");
+  });
+
+  it("returns nothing when the repo declared nothing, so the sidebar shows no dot", () => {
+    expect(accentToken(null)).toBeUndefined();
+    expect(accentToken(undefined)).toBeUndefined();
+  });
+
+  it("returns nothing for a value outside the palette rather than indexing off the end", () => {
+    for (const bad of [0, 9, -1, 1.5, Number.NaN]) {
+      expect(accentToken(bad)).toBeUndefined();
+    }
   });
 });

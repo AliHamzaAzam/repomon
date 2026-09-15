@@ -29,12 +29,19 @@ const PANE_ACCENTS = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `var(--pane-accent-${n}
 export function paneAccent(
   target: Pick<PaneTarget, "repoId" | "laneId" | "repoAccent">,
 ): string {
-  const declared = target.repoAccent;
-  if (declared != null && Number.isInteger(declared) && declared >= 1 && declared <= PANE_ACCENTS.length) {
-    return PANE_ACCENTS[declared - 1];
-  }
+  const declared = accentToken(target.repoAccent);
+  if (declared) return declared;
   const seed = (target.repoId ?? 0) * 31 + target.laneId * 17;
   return PANE_ACCENTS[Math.abs(seed) % PANE_ACCENTS.length];
+}
+
+/// The token a repo claims in its own `repo.json`, or `undefined` when it claims nothing or claims
+/// something outside the palette. Separate from `paneAccent` because the sidebar wants to show the
+/// colour only where it was actually declared, with no hashed fallback.
+export function accentToken(accent: number | null | undefined): string | undefined {
+  if (accent == null || !Number.isInteger(accent)) return undefined;
+  if (accent < 1 || accent > PANE_ACCENTS.length) return undefined;
+  return PANE_ACCENTS[accent - 1];
 }
 
 export function dedupe(targets: PaneTarget[]): PaneTarget[] {
