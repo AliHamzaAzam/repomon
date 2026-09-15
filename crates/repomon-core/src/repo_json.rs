@@ -123,15 +123,29 @@ pub fn nearest_accent(hex: &str) -> Option<u8> {
 }
 
 fn parse_hex(hex: &str) -> Option<(f64, f64, f64)> {
-    let h = hex.strip_prefix('#')?;
-    let byte = |s: &str| u8::from_str_radix(s, 16).ok().map(f64::from);
-    match h.len() {
-        3 => {
-            let d: Vec<char> = h.chars().collect();
-            let dup = |c: char| byte(&format!("{c}{c}"));
-            Some((dup(d[0])?, dup(d[1])?, dup(d[2])?))
-        }
-        6 => Some((byte(&h[0..2])?, byte(&h[2..4])?, byte(&h[4..6])?)),
+    // Bytes, not `str` slicing: a value like `#1é234` is six bytes after the `#` but slicing at
+    // byte 2 lands inside the `é` and panics. The specification admits ASCII hex only, so anything
+    // that is not an ASCII hex digit is simply not a colour.
+    let digits = hex.strip_prefix('#')?.as_bytes();
+    if !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let value = |b: &[u8]| -> Option<f64> {
+        let hi = (b[0] as char).to_digit(16)?;
+        let lo = (b[1] as char).to_digit(16)?;
+        Some(f64::from(hi * 16 + lo))
+    };
+    match digits.len() {
+        3 => Some((
+            value(&[digits[0], digits[0]])?,
+            value(&[digits[1], digits[1]])?,
+            value(&[digits[2], digits[2]])?,
+        )),
+        6 => Some((
+            value(&digits[0..2])?,
+            value(&digits[2..4])?,
+            value(&digits[4..6])?,
+        )),
         _ => None,
     }
 }
@@ -279,6 +293,30 @@ mod tests {
                 "{hex} should stay on {want}"
             );
         }
+    }
+
+    /// The parser is handed a file someone else wrote, so no input may panic — not a malformed
+    /// colour, not a multi-byte character landing on a slice boundary, not a truncated document.
+    #[test]
+    fn no_generated_input_panics() {
+        let pieces = [
+            "#", "0", "f", "é", "文", "\u{202e}", "ZZ", " ", "", "7", "#0f766e", "ff",
+        ];
+        let mut checked = 0;
+        for a in pieces {
+            for b in pieces {
+                for c in pieces {
+                    let colour = format!("{a}{b}{c}");
+                    // Straight at the colour path, where the byte slicing lives.
+                    let _ = nearest_accent(&colour);
+                    // And through the whole parser, colour and name both.
+                    let doc = serde_json::json!({ "color": colour, "name": format!("{b}{c}") });
+                    let _ = parse(&doc.to_string());
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, pieces.len().pow(3), "{checked} inputs exercised");
     }
 
     #[test]
