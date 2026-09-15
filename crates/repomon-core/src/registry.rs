@@ -63,7 +63,9 @@ impl Registry {
 
         let mut changed = false;
         if repo.label.is_none() {
-            if let Some(name) = declared.name {
+            // A declared name equal to the folder name is not an override: writing it would leave a
+            // stale label behind the moment the folder is renamed, for no visible difference.
+            if let Some(name) = declared.name.filter(|n| *n != repo.name) {
                 self.store.set_repo_label(repo.id, Some(name)).await?;
                 changed = true;
             }
@@ -167,6 +169,71 @@ fn discover_walk(root: &Path, max_depth: usize) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn repo_with(json: Option<&str>) -> (tempfile::TempDir, Registry, Repo) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("acme-platform");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(j) = json {
+            std::fs::write(dir.join("repo.json"), j).unwrap();
+        }
+        let reg = Registry::new(Store::open_in_memory().unwrap());
+        let repo = reg
+            .store
+            .add_repo(dir, "acme-platform".to_string(), None)
+            .await
+            .unwrap();
+        (tmp, reg, repo)
+    }
+
+    #[tokio::test]
+    async fn adopts_a_declared_name_and_colour() {
+        let (_t, reg, repo) =
+            repo_with(Some(r##"{"name":"Acme Platform","color":"#0f766e"}"##)).await;
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.label.as_deref(), Some("Acme Platform"));
+        assert_eq!(out.accent, Some(7));
+        assert_eq!(out.name, "acme-platform", "identity must not move");
+    }
+
+    #[tokio::test]
+    async fn a_local_rename_wins_over_the_file() {
+        let (_t, reg, repo) = repo_with(Some(r##"{"name":"Acme Platform"}"##)).await;
+        reg.store
+            .set_repo_label(repo.id, Some("What I called it".into()))
+            .await
+            .unwrap();
+        let repo = reg.store.get_repo(repo.id).await.unwrap();
+
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.label.as_deref(), Some("What I called it"));
+    }
+
+    #[tokio::test]
+    async fn a_name_equal_to_the_folder_is_not_written_as_an_override() {
+        let (_t, reg, repo) = repo_with(Some(r##"{"name":"acme-platform"}"##)).await;
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.label, None,
+            "a redundant label would go stale on a rename"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repo_without_the_file_is_untouched() {
+        let (_t, reg, repo) = repo_with(None).await;
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.label, None);
+        assert_eq!(out.accent, None);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_file_is_not_an_error() {
+        let (_t, reg, repo) = repo_with(Some("{ this is not json")).await;
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(out.label, None);
+        assert_eq!(out.accent, None);
+    }
 
     #[test]
     fn discover_finds_repos_and_skips_heavy_dirs() {
