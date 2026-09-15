@@ -161,6 +161,11 @@ pub struct Repo {
     /// clients fall back to `name`.
     #[serde(default)]
     pub label: Option<String>,
+    /// Which of the eight `--pane-accent-N` tokens this repo claims, 1-8. Set from the repo's own
+    /// `repo.json`; `None` means clients keep hashing the id as before.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub accent: Option<u8>,
 }
 
 /// Stores a named revocable device token locally, excluding plaintext tokens from device listings

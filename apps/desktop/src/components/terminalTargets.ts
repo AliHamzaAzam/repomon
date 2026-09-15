@@ -2,6 +2,9 @@ export interface PaneTarget {
   laneId: number;
   repoId?: number;
   repoName?: string;
+  /// The repo's own accent token (1-8) when its `repo.json` names one, so a project keeps the same
+  /// colour on every machine that clones it. Absent means fall back to hashing the id.
+  repoAccent?: number | null;
   laneName?: string;
   branch?: string | null;
   window: string;
@@ -20,9 +23,16 @@ export interface PaneTarget {
 /// The eight `--pane-accent-N` tokens in index.css, so the stripes follow the theme's palette.
 const PANE_ACCENTS = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `var(--pane-accent-${n})`);
 
-/// Stable lane color for the fleet-wide workspace. Repo id carries most of the grouping signal;
-/// lane id breaks ties so sibling worktrees remain distinguishable without changing on refresh.
-export function paneAccent(target: Pick<PaneTarget, "repoId" | "laneId">): string {
+/// Stable lane color for the fleet-wide workspace. A repo that declares an accent in its own
+/// `repo.json` keeps it; otherwise repo id carries most of the grouping signal and lane id breaks
+/// ties, so sibling worktrees remain distinguishable without changing on refresh.
+export function paneAccent(
+  target: Pick<PaneTarget, "repoId" | "laneId" | "repoAccent">,
+): string {
+  const declared = target.repoAccent;
+  if (declared != null && Number.isInteger(declared) && declared >= 1 && declared <= PANE_ACCENTS.length) {
+    return PANE_ACCENTS[declared - 1];
+  }
   const seed = (target.repoId ?? 0) * 31 + target.laneId * 17;
   return PANE_ACCENTS[Math.abs(seed) % PANE_ACCENTS.length];
 }

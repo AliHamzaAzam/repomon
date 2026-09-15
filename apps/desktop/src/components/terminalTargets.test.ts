@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   dedupe,
+  paneAccent,
   stableVisibleTargets,
   stabilizeTargets,
   warmTargetWindows,
@@ -127,5 +128,37 @@ describe("stableVisibleTargets", () => {
       "c",
       "d",
     ]);
+  });
+});
+
+describe("paneAccent", () => {
+  it("uses the accent the repo declares in its own repo.json", () => {
+    expect(paneAccent({ repoId: 1, laneId: 1, repoAccent: 7 })).toBe("var(--pane-accent-7)");
+  });
+
+  it("gives the same colour on two machines that disagree about ids", () => {
+    const here = paneAccent({ repoId: 3, laneId: 9, repoAccent: 4 });
+    const there = paneAccent({ repoId: 41, laneId: 2, repoAccent: 4 });
+    expect(here).toBe(there);
+  });
+
+  it("falls back to hashing the id when the repo declares nothing", () => {
+    for (const repoAccent of [undefined, null]) {
+      expect(paneAccent({ repoId: 3, laneId: 9, repoAccent })).toBe(
+        paneAccent({ repoId: 3, laneId: 9 }),
+      );
+    }
+  });
+
+  it("ignores a declared accent outside the palette rather than indexing off the end", () => {
+    for (const repoAccent of [0, 9, -1, 1.5, Number.NaN]) {
+      expect(paneAccent({ repoId: 3, laneId: 9, repoAccent })).toBe(
+        paneAccent({ repoId: 3, laneId: 9 }),
+      );
+    }
+  });
+
+  it("keeps sibling lanes of one repo distinguishable when nothing is declared", () => {
+    expect(paneAccent({ repoId: 5, laneId: 1 })).not.toBe(paneAccent({ repoId: 5, laneId: 2 }));
   });
 });

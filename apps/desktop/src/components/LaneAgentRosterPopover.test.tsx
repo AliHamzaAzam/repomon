@@ -53,6 +53,7 @@ function createLane(sessions: AgentSession[] = []): Lane {
     path: "/code/repomon",
     added_at: "2026-07-20T00:00:00Z",
     worktree_root_template: null,
+      accent: null,
     hidden: false, position: null, label: null };
   return {
     id: 10,

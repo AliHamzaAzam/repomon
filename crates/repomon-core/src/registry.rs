@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::model::{Repo, RepoId};
+use crate::repo_json;
 use crate::store::Store;
 
 fn join_err(e: tokio::task::JoinError) -> Error {
@@ -31,13 +32,51 @@ impl Registry {
             .map_err(join_err)??;
 
         if let Some(existing) = self.store.find_repo_by_path(resolved.clone()).await? {
-            return Ok(existing);
+            return self.apply_repo_json(existing).await;
         }
         let name = resolved
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".to_string());
-        self.store.add_repo(resolved, name, None).await
+        let repo = self.store.add_repo(resolved, name, None).await?;
+        self.apply_repo_json(repo).await
+    }
+
+    /// Adopt what the repository says about itself in its own `repo.json`.
+    ///
+    /// The file is the repository's claim, not this machine's: it fills the label only when nobody
+    /// here has set one, so a local rename always wins. Nothing is written when the file is absent
+    /// or unreadable — a repo without one behaves exactly as before.
+    pub async fn apply_repo_json(&self, repo: Repo) -> Result<Repo> {
+        let path = repo.path.join("repo.json");
+        let Some(declared) = tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&path)
+                .ok()
+                .as_deref()
+                .and_then(repo_json::parse)
+        })
+        .await
+        .map_err(join_err)?
+        else {
+            return Ok(repo);
+        };
+
+        let mut changed = false;
+        if repo.label.is_none() {
+            if let Some(name) = declared.name {
+                self.store.set_repo_label(repo.id, Some(name)).await?;
+                changed = true;
+            }
+        }
+        if declared.accent.is_some() && declared.accent != repo.accent {
+            self.store.set_repo_accent(repo.id, declared.accent).await?;
+            changed = true;
+        }
+        if changed {
+            self.store.get_repo(repo.id).await
+        } else {
+            Ok(repo)
+        }
     }
 
     pub async fn remove(&self, id: RepoId) -> Result<()> {
