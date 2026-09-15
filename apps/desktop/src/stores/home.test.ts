@@ -4,7 +4,7 @@ import type { AgentSession, Lane, Repo } from "../bindings";
 import { formatStripAge, laneTitle, needsInputLanes, recentLanes, slugify, stripMark, stripStatus, uniqueBranchName } from "./home";
 
 function repo(id: number, name: string): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null };
 }
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {

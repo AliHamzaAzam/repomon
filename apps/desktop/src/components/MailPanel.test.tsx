@@ -47,7 +47,7 @@ function message(
 function lane(id: number, repo: string, branch: string): Lane {
   return {
     id,
-    repo: { id, name: repo, label: null, path: `/tmp/${repo}`, added_at: "2026-08-28T00:00:00Z", worktree_root_template: null, hidden: false, position: null },
+    repo: { id, name: repo, label: null, path: `/tmp/${repo}`, added_at: "2026-08-28T00:00:00Z", worktree_root_template: null, hidden: false, position: null, accent: null },
     worktree: { id, repo_id: id, path: `/tmp/${repo}/${branch}`, branch, head: "abc", is_main: false, name: branch },
     state: {
       worktree_id: id,

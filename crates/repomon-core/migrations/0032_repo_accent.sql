@@ -1,0 +1,1 @@
+ALTER TABLE repos ADD COLUMN accent INTEGER CHECK (accent IS NULL OR accent BETWEEN 1 AND 8);
