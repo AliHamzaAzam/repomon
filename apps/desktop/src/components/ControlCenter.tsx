@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { isImeConfirmation } from "./imeComposition";
 import { Portal } from "solid-js/web";
 
 import type { ActionsStore } from "../stores/actions";
@@ -356,7 +357,7 @@ export default function ControlCenter(props: ControlCenterProps) {
       if (list.length > 0) {
         setSelectedIndex((idx) => (idx - 1 + list.length) % list.length);
       }
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !isImeConfirmation(e)) {
       e.preventDefault();
       const list = filteredItems();
       const selected = list[selectedIndex()];

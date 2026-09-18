@@ -7,6 +7,7 @@ import {
   createUniqueId,
 } from "solid-js";
 import { Dynamic } from "solid-js/web";
+import { isImeConfirmation } from "./imeComposition";
 
 import type { EditorStore } from "../stores/editor";
 import { daemonCall } from "../ipc/rpc";
@@ -175,7 +176,7 @@ export default function FileFinder(props: FileFinderProps) {
         scrollIndexIntoView(next);
         return next;
       });
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !isImeConfirmation(e)) {
       e.preventDefault();
       const item = items[selectedIndex()];
       if (item) {
