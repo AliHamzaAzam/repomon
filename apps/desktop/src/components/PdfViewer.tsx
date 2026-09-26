@@ -1,4 +1,5 @@
 import { formatBytes } from "../formatBytes";
+import { isImeConfirmation } from "./imeComposition";
 import {
   For,
   Show,
@@ -735,7 +736,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
                 onInput={(e) => setPageDraft(e.currentTarget.value)}
                 onBlur={commitPageDraft}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  if (e.key === "Enter" && !isImeConfirmation(e)) {
                     e.preventDefault();
                     commitPageDraft();
                   } else if (e.key === "Escape") {
@@ -912,7 +913,7 @@ export default function PdfViewer(props: PdfViewerProps): JSX.Element {
                 value={findQuery()}
                 onInput={(e) => setFindQuery(e.currentTarget.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  if (e.key === "Enter" && !isImeConfirmation(e)) {
                     e.preventDefault();
                     stepMatch(e.shiftKey ? -1 : 1);
                   } else if (e.key === "Escape") {

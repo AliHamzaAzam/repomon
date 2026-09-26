@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
+import { isImeConfirmation } from "./imeComposition";
 
 import type { ModelRateRow, RatesStatus } from "../bindings";
 import { daemonCall, type ConfigView } from "../ipc/rpc";
@@ -327,7 +328,7 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
         value={inputProps.value}
         onInput={(event) => inputProps.onInput(event.currentTarget.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter") void save(editing() ?? "");
+          if (event.key === "Enter" && !isImeConfirmation(event)) void save(editing() ?? "");
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
@@ -576,7 +577,7 @@ export default function UsageSettingsView(props: UsageSettingsViewProps) {
             value={addModel()}
             onInput={(event) => setAddModel(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") addNewModel();
+              if (event.key === "Enter" && !isImeConfirmation(event)) addNewModel();
             }}
             data-add-model
             aria-label="Add a model id or family prefix"

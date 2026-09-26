@@ -1,4 +1,5 @@
 import { formatBytes } from "../formatBytes";
+import { isImeConfirmation } from "./imeComposition";
 import {
   For,
   Match,
@@ -531,7 +532,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setFocusedTreeIndex((prev) => Math.max(0, prev - 1));
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !isImeConfirmation(e)) {
       e.preventDefault();
       const item = items[currentIdx];
       if (item) {

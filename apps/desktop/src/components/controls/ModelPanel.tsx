@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { isImeConfirmation } from "../imeComposition";
 import { Portal } from "solid-js/web";
 import { IconCheck, IconChevronRight } from "../icons";
 import type { CatalogEffort, CatalogModel } from "../../bindings";
@@ -82,7 +83,7 @@ export default function ModelPanel(props: {
     const count = rowCount();
     if (event.key === "ArrowDown") { event.preventDefault(); setHighlighted((i) => (count ? (i + 1) % count : 0)); return; }
     if (event.key === "ArrowUp") { event.preventDefault(); setHighlighted((i) => (count ? (i - 1 + count) % count : 0)); return; }
-    if (event.key === "Enter") { event.preventDefault(); activateHighlighted(); }
+    if (event.key === "Enter" && !isImeConfirmation(event)) { event.preventDefault(); activateHighlighted(); }
   }
 
   onMount(() => {

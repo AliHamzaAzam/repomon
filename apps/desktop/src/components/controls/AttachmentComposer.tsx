@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onMount } from "soli
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { IconArrowUp, IconChevronDown, IconPlus } from "../icons";
+import { isImeConfirmation } from "../imeComposition";
 import AttachmentChip, { attachmentFromPath, isImageAttachment, type ChatAttachment } from "./AttachmentChip";
 import ModelPanel from "./ModelPanel";
 import SlashPalette from "./SlashPalette";
@@ -252,13 +253,13 @@ export default function AttachmentComposer(props: {
             // Nothing to highlight (an empty catalog, or a query that matches nothing): fall
             // through to the normal Enter-send below instead of silently eating the keystroke -
             // resolveCommand there decides one-shot vs. the terminal fallback on its own.
-            if (event.key === "Enter" && !event.isComposing && filteredCommands().length > 0) {
+            if (event.key === "Enter" && !isImeConfirmation(event) && filteredCommands().length > 0) {
               event.preventDefault();
               runPaletteCommand(filteredCommands()[highlightedIndex()]);
               return;
             }
           }
-          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(); return; }
+          if (event.key === "Enter" && !event.shiftKey && !isImeConfirmation(event)) { event.preventDefault(); void send(); return; }
           if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
           if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
           // Never steal the arrows while editing multiline text - a recalled entry that itself
