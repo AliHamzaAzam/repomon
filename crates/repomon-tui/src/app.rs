@@ -367,6 +367,11 @@ pub struct App {
     session_ref_miss_gen: u64,
     /// Bumped by every successful `refresh_lanes` - the anchor miss counter's clock.
     refresh_gen: u64,
+    /// Manual Fleet page offset; absent while the viewport follows the selected lane.
+    /// Deliberate navigation clears it, while background lane refreshes preserve it.
+    pub fleet_scroll: Option<usize>,
+    /// Last rendered Fleet `(offset, height, max_offset)`, used to clamp wheel/page input.
+    pub fleet_viewport: std::cell::Cell<(usize, usize, usize)>,
     /// Remembers selection by identity per lane so returning survives session reorder.
     session_memory: HashMap<LaneId, SessionRef>,
     /// After spawning an agent, the (lane, tmux window) to move the session cursor onto once it
@@ -570,6 +575,8 @@ impl App {
             // Sentinel ≠ refresh_gen, so the very first snapshot's miss is counted too.
             session_ref_miss_gen: u64::MAX,
             refresh_gen: 0,
+            fleet_scroll: None,
+            fleet_viewport: std::cell::Cell::new((0, 0, 0)),
             session_memory: HashMap::new(),
             pending_focus_window: None,
             pending_focus_ticks: 0,
@@ -848,6 +855,7 @@ impl App {
             }
         };
         if let Some(id) = target_id {
+            self.fleet_scroll = None;
             self.select_lane_session(id, None);
         }
         self.status = msg;
@@ -1131,6 +1139,7 @@ impl App {
             self.urgent_only = false;
         }
         if exists(self) {
+            self.fleet_scroll = None;
             self.select_lane_session(id, None);
             self.focus_insert = false;
             self.reset_scroll();
@@ -2198,8 +2207,16 @@ impl App {
                         }
                         _ => {}
                     },
-                    // Grid/Fleet: a left-click focuses the clicked lane (double-click opens its real
-                    // terminal, a click on empty space blurs); the wheel still navigates.
+                    // Fleet's wheel scrolls the whole page, including TODAY below the lanes.
+                    View::Fleet => match me.kind {
+                        MouseEventKind::ScrollUp => self.fleet_scroll_by(true, 3),
+                        MouseEventKind::ScrollDown => self.fleet_scroll_by(false, 3),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.handle_click(me.column, me.row).await
+                        }
+                        _ => {}
+                    },
+                    // Other views keep wheel navigation and click-to-select behavior.
                     _ => match me.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             self.handle_click(me.column, me.row).await
@@ -2252,6 +2269,12 @@ impl App {
                 // `R` renames the selected agent sub-row in the expanded fleet sidebar.
                 if key.code == KeyCode::Char('R') {
                     self.start_rename();
+                } else if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    let (_, height, _) = self.fleet_viewport.get();
+                    self.fleet_scroll_by(
+                        key.code == KeyCode::PageUp,
+                        height.saturating_sub(2).max(1),
+                    );
                 } else if let Some(action) = keybinds::nav(key) {
                     self.apply(action).await;
                 }
@@ -3382,10 +3405,25 @@ impl App {
             .map(|z| z.lane);
     }
 
+    /// Scroll from the current rendered position without changing the selected agent.
+    fn fleet_scroll_by(&mut self, up: bool, step: usize) {
+        // Scrolling can hide the selected repository and its confirmation prompt.
+        // Like other navigation, it must cancel the first X of a two-press removal.
+        self.repo_remove_armed = None;
+        let (applied, _, max) = self.fleet_viewport.get();
+        let current = self.fleet_scroll.unwrap_or(applied).min(max);
+        self.fleet_scroll = Some(if up {
+            current.saturating_sub(step)
+        } else {
+            current.saturating_add(step).min(max)
+        });
+    }
+
     /// A left-click in Grid/Fleet/Split. Hit-test the lane regions recorded during render: a click
     /// inside one focuses that lane (single-click → type in place for interactive zones; another
     /// click within `DOUBLE_CLICK` → open its real terminal). A click on empty space blurs.
     async fn handle_click(&mut self, col: u16, row: u16) {
+        self.fleet_scroll = None;
         // The pinned "repomind" row isn't a lane click-zone; hit-test it first: a click selects it
         // and opens the command-center view.
         if let Some(rect) = self.orch_click.get() {
@@ -3479,6 +3517,7 @@ impl App {
     }
 
     fn filter_key(&mut self, key: KeyEvent) {
+        self.fleet_scroll = None;
         match key.code {
             KeyCode::Char(c) => self.filter.push(c),
             KeyCode::Backspace => {
@@ -4060,6 +4099,7 @@ impl App {
     /// Arm immediate input routing to the new window and enter Split insert mode while its fleet
     /// row is pending.
     fn land_on_spawned(&mut self, lane: LaneId, window: Option<String>) {
+        self.fleet_scroll = None;
         self.select_lane_session(lane, None);
         if let Some(w) = window {
             self.pending_focus_window = Some((lane, w));
@@ -4650,8 +4690,12 @@ impl App {
             self.repo_remove_armed = None;
         }
         match action {
-            Action::MoveUp => self.selected = self.selected.saturating_sub(1),
+            Action::MoveUp => {
+                self.fleet_scroll = None;
+                self.selected = self.selected.saturating_sub(1);
+            }
             Action::MoveDown => {
+                self.fleet_scroll = None;
                 let n = self.rows_len();
                 if n > 0 && self.selected + 1 < n {
                     self.selected += 1;
@@ -4724,6 +4768,7 @@ impl App {
                         }
                     }
                     View::Orchestrator => {
+                        self.fleet_scroll = None;
                         self.selected = 0;
                         self.load_orchestrator().await;
                     }
@@ -4792,6 +4837,7 @@ impl App {
                 }
             }
             Action::StartFilter => {
+                self.fleet_scroll = None;
                 self.filtering = true;
                 self.filter.clear();
             }
@@ -4814,6 +4860,7 @@ impl App {
             Action::PeekPrompt => self.open_peek().await,
             Action::Help => self.help_open = true,
             Action::ToggleUrgent => {
+                self.fleet_scroll = None;
                 self.urgent_only = !self.urgent_only;
                 self.status = if self.urgent_only {
                     "showing only lanes that need you: ! or esc to clear".into()
@@ -6185,6 +6232,222 @@ mod tests {
         app.selected = 1;
         app.sync_session_cursor();
         assert_eq!(app.selected_window().as_deref(), Some("lane-1-2"));
+    }
+
+    async fn fleet_scroll_app() -> App {
+        let mut app = app_with_dummy_client().await;
+        app.settings.notify_enabled = false;
+        app.settings.expand_agents = false;
+        let mut waiting = managed("lane-2", Some("sid-waiting"));
+        waiting.status = AgentStatus::Waiting;
+        app.lanes = vec![
+            fake_lane(1, vec![managed("lane-1", Some("sid-running"))]),
+            fake_lane(2, vec![waiting]),
+        ];
+        app.selected = 1;
+        app.sync_session_cursor();
+        let now = chrono::Utc::now().to_rfc3339();
+        app.commits = (1..=40)
+            .map(|i| {
+                serde_json::from_value(json!({
+                    "oid": "0".repeat(40),
+                    "repo_id": 1,
+                    "author_name": "test",
+                    "author_email": "test@example.com",
+                    "summary": format!("commit-number-{i:02}"),
+                    "time": now,
+                    "parent_count": 1,
+                }))
+                .expect("fake commit")
+            })
+            .collect();
+        app
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_reaches_all_commits_without_retargeting_input() {
+        use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+        let mut app = fleet_scroll_app().await;
+        let selected = app.selected_window();
+        let top = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(!top.contains("commit-number-40"));
+
+        for _ in 0..8 {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+            )))
+            .await;
+            crate::render_to_string(&app, 100, 20).unwrap();
+        }
+        let bottom = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(bottom.contains("commit-number-40"), "{bottom}");
+        assert_eq!(app.selected_window(), selected);
+        let bottom_offset = app.fleet_viewport.get().0;
+        assert_eq!(bottom_offset, app.fleet_viewport.get().2);
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        crate::render_to_string(&app, 100, 20).unwrap();
+        let page_up_offset = app.fleet_viewport.get().0;
+        assert!(page_up_offset < bottom_offset);
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }))
+        .await;
+        crate::render_to_string(&app, 100, 20).unwrap();
+        assert_eq!(app.fleet_viewport.get().0, page_up_offset + 3);
+        assert_eq!(app.selected_window(), selected);
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+            .await;
+        assert_eq!(app.fleet_scroll, None);
+        let restored = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(restored.contains("repomind"), "{restored}");
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_cancels_repository_removal_confirmation() {
+        use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+        for scroll in [
+            Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ] {
+            let mut app = fleet_scroll_app().await;
+            crate::render_to_string(&app, 100, 20).unwrap();
+            let remove = Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+            app.handle_event(remove.clone()).await;
+            assert_eq!(app.repo_remove_armed, Some(1));
+
+            app.handle_event(scroll).await;
+            assert_eq!(app.repo_remove_armed, None);
+            // This X must present a new confirmation without issuing repo.remove.
+            // Bound a regression that attempts an RPC to the unserviced dummy daemon.
+            tokio::time::timeout(std::time::Duration::from_secs(2), app.handle_event(remove))
+                .await
+                .expect("X after scrolling must re-arm confirmation without a removal RPC");
+            assert_eq!(app.repo_remove_armed, Some(1));
+            assert!(app.status.contains("press X again to confirm"));
+            assert_eq!(app.lanes.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_attention_jump_reveals_the_waiting_lane() {
+        let mut app = fleet_scroll_app().await;
+        app.fleet_scroll = Some(usize::MAX);
+        crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(!app.click_zones.borrow().iter().any(|zone| zone.lane == 2));
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+        )))
+        .await;
+        assert_eq!(app.selected_lane().map(|lane| lane.id), Some(2));
+        assert_eq!(app.fleet_scroll, None);
+        crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(app.click_zones.borrow().iter().any(|zone| zone.lane == 2));
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_notification_jump_restores_lane_visibility_on_return() {
+        let mut app = fleet_scroll_app().await;
+        app.fleet_scroll = Some(usize::MAX);
+        app.notifications.push_back(NotifEvent {
+            when: chrono::Local::now(),
+            kind: NotifKind::NeedsYou,
+            lane_id: 2,
+            session_id: Some("sid-waiting".into()),
+            read: false,
+            title: "Agent needs you".into(),
+            body: String::new(),
+        });
+        app.open_selected_notif_at(0, false);
+        assert_eq!(app.view, View::Focus);
+        assert_eq!(app.selected_window().as_deref(), Some("lane-2"));
+        app.apply(Action::ZoomOut).await;
+        app.apply(Action::ZoomOut).await;
+        assert_eq!(app.view, View::Fleet);
+        crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(app.click_zones.borrow().iter().any(|zone| zone.lane == 2));
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_orchestrator_shortcuts_reveal_the_pinned_row_on_return() {
+        use repomon_core::protocol::{self, Request, Response};
+        use repomon_core::transport::{self, Endpoint};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("orchestrator.sock");
+        let mut listener = transport::listen(&Endpoint::from_path(&socket))
+            .await
+            .unwrap();
+        // Both shortcuts fetch orchestrator state. Answer locally without starting a real agent.
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let frame = protocol::read_frame(&mut stream).await.unwrap().unwrap();
+                let request: Request = serde_json::from_slice(&frame).unwrap();
+                assert_eq!(request.method, "orchestrator.start");
+                protocol::write_message(
+                    &mut stream,
+                    &Response::ok(request.id, json!({ "running": false })),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let mut app = fleet_scroll_app().await;
+        app.client = DaemonClient::connect(&socket).await.unwrap();
+        for shortcut in ['O', '6'] {
+            app.selected = 1;
+            app.fleet_scroll = Some(usize::MAX);
+            crate::render_to_string(&app, 100, 20).unwrap();
+            assert!(app.orch_click.get().is_none());
+
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(shortcut),
+                KeyModifiers::NONE,
+            )))
+            .await;
+            assert_eq!(app.view, View::Orchestrator);
+            app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+                .await;
+            assert_eq!(app.view, View::Fleet);
+            assert!(app.orchestrator_selected());
+            crate::render_to_string(&app, 100, 20).unwrap();
+            assert!(app.orch_click.get().is_some());
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fleet_scroll_survives_background_lane_reconciliation() {
+        let mut app = fleet_scroll_app().await;
+        app.fleet_scroll = Some(usize::MAX);
+        let before = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(before.contains("commit-number-40"));
+        // refresh_lanes restores the selected identity after replacing and sorting its snapshot.
+        // That automatic reconciliation must not send the user back to the lane rows.
+        let keep = app.selected_lane().unwrap().id;
+        let keep_ref = app.selected_session_ref();
+        app.lanes.reverse();
+        app.select_lane_session(keep, keep_ref);
+        app.sync_session_cursor();
+        let after = crate::render_to_string(&app, 100, 20).unwrap();
+        assert!(after.contains("commit-number-40"));
+        assert_eq!(app.selected_window().as_deref(), Some("lane-1"));
     }
 
     #[test]

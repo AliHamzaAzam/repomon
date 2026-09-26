@@ -17,7 +17,7 @@ use crate::keybinds::View;
 use crate::notify::NotifKind;
 use crate::theme;
 
-const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · v peek · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · ? help · q";
+const FLEET_KEYS: &str = "↑↓ ↵ open · click select · dbl terminal · wheel/PgUp scroll  ·  n new · e spawn · t term · R rename  ·  a add-repo · A agents · , settings · d del · X rm-repo  ·  / filter · f find · ! urgent · v peek · g/G needs-you · C auto-cont  ·  O repomind · 2 timeline · 3 sessions · 4 search  ·  spc grid · ? help · q";
 const SPLIT_KEYS: &str = "↑↓ lane · tab session  ·  click focus · wheel/PgUp scroll · dbl terminal · ↵ open · → focus · i quick-type  ·  v peek · e spawn · o adopt · R rename · C auto-cont  ·  ←/esc back";
 const SPLIT_INSERT_KEYS: &str =
     "keys → agent (esc · ⇧⇥ · ^C sent) · PgUp/PgDn scroll  ·  ^O / click-out blur";
@@ -1132,13 +1132,18 @@ fn render_fleet(f: &mut Frame, app: &App) {
     let content = rows[0];
     let (lines, selected_line, lane_rows, brain_line) = fleet_lines(app, content);
     // Scroll so the selected lane stays on screen (roughly centered), clamped to the list bounds -
-    // this is what lets the fleet grow past one screenful and still be navigable with ↑/↓.
+    // wheel/page input can override this until the next deliberate selection change.
     let h = content.height as usize;
     let max_scroll = lines.len().saturating_sub(h);
-    let scroll = selected_line
-        .map(|sl| sl.saturating_sub(h / 2))
-        .unwrap_or(0)
+    let scroll = app
+        .fleet_scroll
+        .unwrap_or_else(|| {
+            selected_line
+                .map(|sl| sl.saturating_sub(h / 2))
+                .unwrap_or(0)
+        })
         .min(max_scroll);
+    app.fleet_viewport.set((scroll, h, max_scroll));
     // Register the pinned repomind row's on-screen rect (scroll-adjusted) so a click opens the view.
     if let Some(bli) = brain_line {
         if bli >= scroll && bli < scroll + h {
@@ -2419,7 +2424,8 @@ fn fleet_lines(
     lines.push(section_header(width, "TODAY", "", &tz_offset(), app));
     lines.push(rule(width, false, app));
     lines.push(Line::raw(""));
-    for c in app.commits.iter().take(12) {
+    // All fetched commits remain reachable through the Fleet page's manual scroll offset.
+    for c in &app.commits {
         lines.push(commit_line(c, app));
     }
     if !app.status.is_empty() {
