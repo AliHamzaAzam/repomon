@@ -1,3 +1,5 @@
+import { createMutable } from "solid-js/store";
+
 export interface PaneTarget {
   laneId: number;
   repoId?: number;
@@ -88,7 +90,8 @@ export function warmTargetWindows(
 }
 
 /// Reuses cached per-window object references so Solid’s reference-keyed For retains terminal
-/// mounts across polls and label changes.
+/// mounts across polls and label changes. Mutable store properties keep metadata reactive even
+/// when the workspace retains the same target array after a fleet refresh.
 export function stabilizeTargets(
   cache: Map<string, PaneTarget>,
   fresh: PaneTarget[],
@@ -98,8 +101,9 @@ export function stabilizeTargets(
     live.add(target.window);
     const prev = cache.get(target.window);
     if (!prev) {
-      cache.set(target.window, target);
-      return target;
+      const retained = createMutable(target);
+      cache.set(target.window, retained);
+      return retained;
     }
     prev.laneId = target.laneId;
     prev.repoId = target.repoId;

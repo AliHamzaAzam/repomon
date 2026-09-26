@@ -1,4 +1,4 @@
-import { createRoot, createSignal } from "solid-js";
+import { createRenderEffect, createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PaneTarget } from "../components/terminalTargets";
@@ -250,5 +250,36 @@ describe("lane view persistence", () => {
     expect(ws.viewFor(target("a"))).toBe("terminal");
     expect(ws.viewFor({ ...target("b"), laneId: 8 })).toBe("conversation");
     dispose();
+  });
+});
+
+describe("workspace target metadata refreshes", () => {
+  it("retains target arrays without cascading through selection on unchanged polls or accent updates", () => {
+    createRoot((dispose) => {
+      const original = lane(7, ["a"]);
+      original.repo.accent = 4;
+      const [lanes, setLanes] = createSignal([original]);
+      const ws = createWorkspaceStore(fleetStub({ lanes }));
+      const targets = ws.targets();
+      const selected = ws.selectedLaneTargets();
+      const multitask = ws.multitaskTargets();
+      let selectionUpdates = 0;
+      createRenderEffect(() => {
+        ws.selectedLaneTargets();
+        ws.multitaskTargets();
+        selectionUpdates++;
+      });
+      expect(selectionUpdates).toBe(1);
+
+      for (const accent of [4, 4, 7, null]) {
+        setLanes([{ ...original, repo: { ...original.repo, accent } }]);
+        expect(ws.targets()[0].repoAccent).toBe(accent);
+        expect(ws.targets()).toBe(targets);
+        expect(ws.selectedLaneTargets()).toBe(selected);
+        expect(ws.multitaskTargets()).toBe(multitask);
+        expect(selectionUpdates).toBe(1);
+      }
+      dispose();
+    });
   });
 });
