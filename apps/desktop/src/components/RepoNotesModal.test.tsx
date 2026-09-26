@@ -24,6 +24,7 @@ afterEach(() => {
 
 const repo: Repo = {
   id: 2, path: "/code/r", name: "r", added_at: "2026-07-27T00:00:00Z",
+    accent: null,
   worktree_root_template: null, hidden: false, position: null, label: null };
 
 function open(content = "", exists = true) {

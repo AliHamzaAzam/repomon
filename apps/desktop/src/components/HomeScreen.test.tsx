@@ -25,7 +25,7 @@ vi.mock("../ipc/rpc", () => ({
       state.createCalls.push(p);
       return Promise.resolve({
         id: state.nextLaneId,
-        repo: { id: p.repo_id, name: "repomon", path: "/code/repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
+        repo: { id: p.repo_id, name: "repomon", path: "/code/repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null },
         worktree: { id: state.nextLaneId, repo_id: p.repo_id, path: "/code/repomon-wt", branch: p.branch, head: "abc", is_main: false, name: p.branch },
         state: { worktree_id: state.nextLaneId, head: "abc", branch: p.branch, upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
         agent_sessions: [],
@@ -54,7 +54,7 @@ afterEach(() => {
 });
 
 function repo(id: number, name: string): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null };
 }
 
 async function mountedHomeScreen(lanes: Lane[] = []) {

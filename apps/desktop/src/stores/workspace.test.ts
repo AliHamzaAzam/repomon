@@ -30,7 +30,7 @@ function fleetStub(overrides: Partial<FleetStore> = {}): FleetStore {
 function lane(id: number, windows: string[]): import("../bindings").Lane {
   return {
     id,
-    repo: { id, name: `repo-${id}`, path: `/repo-${id}`, added_at: "", worktree_root_template: null, hidden: false, position: null, label: null },
+    repo: { id, name: `repo-${id}`, path: `/repo-${id}`, added_at: "", worktree_root_template: null, hidden: false, position: null, label: null, accent: null },
     worktree: { id, repo_id: id, name: `lane-${id}`, branch: `lane-${id}`, path: `/repo-${id}/lane`, head: "abc", is_main: false },
     state: { worktree_id: id, head: "abc", branch: `lane-${id}`, upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, last_change_at: null, locked: false, prunable: false },
     agent_sessions: windows.map((window, index) => ({

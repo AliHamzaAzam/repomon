@@ -69,6 +69,7 @@ function lane(sessions: AgentSession[]): Lane {
     hidden: false,
     position: null,
     label: null,
+    accent: null,
   };
   return {
     id: 10,

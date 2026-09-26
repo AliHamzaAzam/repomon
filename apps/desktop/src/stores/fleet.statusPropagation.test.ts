@@ -15,6 +15,7 @@ function repo(): Repo {
     hidden: false,
     position: null,
     label: null,
+    accent: null,
   };
 }
 

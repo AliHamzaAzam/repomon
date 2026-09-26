@@ -827,6 +827,7 @@ mod legacy_auto_approve_tests {
                 hidden: false,
                 position: None,
                 label: None,
+                accent: None,
             },
             worktree: Worktree {
                 id: 1,
@@ -1141,6 +1142,7 @@ mod status_tests {
             hidden: false,
             position: None,
             label: None,
+            accent: None,
         };
         let worktree = repomon_core::model::Worktree {
             id: 1,
