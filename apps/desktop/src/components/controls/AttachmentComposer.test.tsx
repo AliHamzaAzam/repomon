@@ -347,3 +347,55 @@ describe("native model picker (round 10)", () => {
     expect(screen.queryByRole("menu", { name: "Choose model" })).not.toBeInTheDocument();
   });
 });
+
+// Ported from qa/pr94/AttachmentComposer.ime-audit.test.tsx without elapsed-time assumptions.
+describe("IME composer integration", () => {
+  it.each([
+    { isComposing: true, keyCode: 13 },
+    { isComposing: false, keyCode: 229 },
+  ])("preserves the draft for isComposing=$isComposing keyCode=$keyCode", (confirmation) => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.input(field, { target: { value: "日本語" } });
+    fireEvent.compositionStart(field);
+    if (!confirmation.isComposing) fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: "Enter", ...confirmation });
+    expect(send).not.toHaveBeenCalled();
+    expect(field).toHaveValue("日本語");
+    if (confirmation.isComposing) fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 13, isComposing: false });
+    expect(send).toHaveBeenCalledExactlyOnceWith("日本語");
+  });
+
+  it("does not activate the slash palette or fall through to send on WebKit confirmation", () => {
+    const send = vi.fn().mockResolvedValue(true);
+    const catalog: CommandCatalog = {
+      ...emptyCatalog,
+      commands: [{ name: "compact", description: "Summarize", source: "builtin", one_shot: true }],
+    };
+    render(() => <AttachmentComposer {...props({ catalog, onSend: send })} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.input(field, { target: { value: "/" } });
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229, isComposing: false });
+    expect(send).not.toHaveBeenCalled();
+    expect(field).toHaveValue("/");
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 13, isComposing: false });
+    expect(send).toHaveBeenCalledExactlyOnceWith("/compact");
+  });
+
+  it("still sends an ordinary Enter when both compositionend and blur were lost", () => {
+    const send = vi.fn().mockResolvedValue(true);
+    render(() => <AttachmentComposer {...props({ onSend: send })} />);
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.input(field, { target: { value: "ready" } });
+    fireEvent.compositionStart(field);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 13, isComposing: false });
+    expect(send).toHaveBeenCalledExactlyOnceWith("ready");
+  });
+});
