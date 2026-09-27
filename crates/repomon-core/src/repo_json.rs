@@ -101,10 +101,35 @@ fn displayable(s: String) -> Option<String> {
     if t.is_empty() || t.chars().count() > MAX_NAME_CHARS {
         return None;
     }
-    if t.chars().any(|c| c.is_control()) {
+    if t.chars().any(is_deceptive) {
+        return None;
+    }
+    // A name of nothing but invisibles renders as blank space in the sidebar: not a name the
+    // repository can be held to, and indistinguishable from a bug in this program.
+    if !t.chars().any(|c| !c.is_whitespace() && !is_invisible(c)) {
         return None;
     }
     Some(t.to_string())
+}
+
+/// Characters that make rendered text say something other than its code points. Rejected outright
+/// because the name reaches aria-labels, pane titles and macOS notifications, where a cloned
+/// repository must not be able to reorder or fake what the person reads.
+fn is_deceptive(c: char) -> bool {
+    c.is_control()
+        // Bidirectional embedding, override and isolate controls, plus the two marks.
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+        // Line and paragraph separators: a display name is one line.
+        || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Zero-width characters that legitimately shape a word, so they are allowed INSIDE a name but
+/// cannot be the whole of one. The joiners in particular are required by Persian and Indic text.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+    )
 }
 
 /// Map `#rgb` or `#rrggbb` to the nearest accent token, 1-8. Any other syntax yields `None`:
@@ -259,6 +284,86 @@ mod tests {
                 "{bad:?} reaches the sidebar and a terminal title"
             );
         }
+    }
+
+    /// A cloned repository declares the name, so it is untrusted input reaching aria-labels,
+    /// tooltips and macOS notifications. The length cap touches none of these.
+    #[test]
+    fn a_name_that_cannot_be_displayed_honestly_is_refused() {
+        for (label, raw) in [
+            ("bidi override", "a\u{202e}b"),
+            ("bidi embedding", "a\u{202b}b"),
+            ("bidi isolate", "a\u{2066}b\u{2069}"),
+            ("right-to-left mark", "a\u{200f}b"),
+            ("line separator", "a\u{2028}b"),
+            ("paragraph separator", "a\u{2029}b"),
+            ("zero-width only", "\u{200b}"),
+            ("joiners only", "\u{200c}\u{200d}"),
+            ("whitespace and invisibles only", " \u{200b} "),
+        ] {
+            let json = format!(r#"{{"name":{}}}"#, serde_json::to_string(raw).unwrap());
+            assert_eq!(
+                parse(&json).unwrap().name,
+                None,
+                "{label} must not become a display name"
+            );
+        }
+    }
+
+    /// Over-rejecting is its own defect: real scripts use the joiners to shape a word.
+    #[test]
+    fn a_joiner_inside_a_visible_name_is_kept() {
+        for raw in [
+            "\u{0645}\u{06cc}\u{200c}\u{0631}\u{0648}\u{0645}",
+            "\u{0915}\u{094d}\u{200d}\u{0937}",
+        ] {
+            let json = format!(r#"{{"name":{}}}"#, serde_json::to_string(raw).unwrap());
+            assert_eq!(
+                parse(&json).unwrap().name.as_deref(),
+                Some(raw),
+                "a joiner inside a name with visible content must survive"
+            );
+        }
+    }
+
+    /// `three_digit_hex_expands_like_css` compared two inputs that are not equivalent and both
+    /// happened to quantize to the same token. Assert the decode itself.
+    #[test]
+    fn short_hex_expands_each_digit_by_seventeen() {
+        assert_eq!(parse_hex("#076"), Some((0.0, 119.0, 102.0)));
+        assert_eq!(parse_hex("#fff"), parse_hex("#ffffff"));
+        assert_eq!(parse_hex("#000"), Some((0.0, 0.0, 0.0)));
+        assert_eq!(parse_hex("#abc"), Some((170.0, 187.0, 204.0)));
+    }
+
+    /// The Rust palette mirrors `--pane-accent-N` in the desktop stylesheet with nothing keeping
+    /// them in step, so a retuned token would silently move every mapping.
+    #[test]
+    fn the_rust_palette_matches_the_stylesheet() {
+        let css = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/desktop/src/index.css"),
+        )
+        .expect("the desktop stylesheet is the source of these values");
+        let mut found = Vec::new();
+        for n in 1..=8u8 {
+            let needle = format!("--pane-accent-{n}: hsl(");
+            let at = css
+                .find(&needle)
+                .unwrap_or_else(|| panic!("--pane-accent-{n} is not declared"));
+            let rest = &css[at + needle.len()..];
+            let inner = &rest[..rest.find(')').expect("unterminated hsl()")];
+            let parts: Vec<f64> = inner
+                .split_whitespace()
+                .map(|p| p.trim_end_matches('%').parse().expect("numeric hsl part"))
+                .collect();
+            found.push((parts[0], parts[1] / 100.0, parts[2] / 100.0));
+        }
+        assert_eq!(
+            found.as_slice(),
+            ACCENT_HSL.as_slice(),
+            "ACCENT_HSL has drifted from --pane-accent-N in apps/desktop/src/index.css"
+        );
     }
 
     #[test]
