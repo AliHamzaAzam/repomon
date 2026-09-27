@@ -262,3 +262,41 @@ describe("spawn dialog selection follows focus", () => {
     expect(state.spawnCalls[0]).toMatchObject({ agent: "opencode" });
   });
 });
+
+// Ported from qa/pr94/SpawnModal.ime-audit.test.tsx; no clock or module reset is needed.
+describe("IME SpawnModal integration", () => {
+  it.each(["metaKey", "ctrlKey"])("blocks WebKit confirmation with %s in the task field", async (modifier) => {
+    await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229, [modifier]: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(0);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 13, [modifier]: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
+  });
+
+  it("allows an ordinary chord on another runtime button after focus transfer", async () => {
+    const { radios } = await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    radios[2].focus();
+    fireEvent.keyDown(radios[2], { key: "Enter", keyCode: 13, metaKey: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
+    expect(state.spawnCalls[0]).toMatchObject({ agent: "codex" });
+  });
+
+  it("preserves ordinary grid Enter after composing in another field", async () => {
+    const { radios } = await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    radios[2].focus();
+    fireEvent.keyDown(radios[2], { key: "Enter", keyCode: 13, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
+  });
+});

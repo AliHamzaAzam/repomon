@@ -1,77 +1,79 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SAFARI_IME_RACE_WINDOW_MS, __ime, isImeConfirmation } from "./imeComposition";
+import { isImeConfirmation } from "./imeComposition";
 
-let clock = 1000;
-const ev = (isComposing = false) => ({ isComposing });
-
+// Ported from qa/pr94/ime-audit.test.ts: exercise event identity and missing lifecycle events.
+let input: HTMLInputElement;
 beforeEach(() => {
-  __ime.reset();
-  clock = 1000;
-  __ime.setNow(() => clock);
+  input = document.createElement("input");
+  document.body.append(input);
 });
+afterEach(() => { input.remove(); vi.restoreAllMocks(); });
 
-describe("isImeConfirmation", () => {
-  it("is false when nothing is being composed", () => {
-    expect(isImeConfirmation(ev())).toBe(false);
+const start = () => input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+const end = () => input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+const enter = (keyCode = 13, isComposing = false) =>
+  new KeyboardEvent("keydown", { key: "Enter", keyCode, isComposing, bubbles: true });
+
+describe("IME event-local detection", () => {
+  it.each([
+    { isComposing: false, keyCode: 13, expected: false },
+    { isComposing: true, keyCode: 13, expected: true },
+    { isComposing: false, keyCode: 229, expected: true },
+    { isComposing: true, keyCode: 229, expected: true },
+  ])("classifies isComposing=$isComposing keyCode=$keyCode", ({ isComposing, keyCode, expected }) => {
+    expect(isImeConfirmation(enter(keyCode, isComposing))).toBe(expected);
   });
 
-  it("is false in the page's first milliseconds, before anything has been composed", async () => {
-    // `performance.now()` counts from the page's time origin, so a module that starts its
-    // "last composition ended" at 0 is inside the window until the page is 30ms old. This has
-    // to read a FRESHLY LOADED module: beforeEach's reset would otherwise supply the value
-    // being tested, and the assertion would hold whatever the module was born with.
-    vi.resetModules();
-    const fresh = await import("./imeComposition");
-    fresh.__ime.setNow(() => 16);
-
-    expect(fresh.isImeConfirmation({ isComposing: false })).toBe(false);
+  it("guards the WebKit confirmation repeatedly and permits the next ordinary Enter", () => {
+    start();
+    end();
+    const confirmation = enter(229);
+    expect(isImeConfirmation(confirmation)).toBe(true);
+    // The composer asks the same predicate for both slash selection and ordinary send.
+    expect(isImeConfirmation(confirmation)).toBe(true);
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    expect(isImeConfirmation(enter())).toBe(false);
   });
 
-  it("is true while a composition is open, which is Chrome and Firefox", () => {
-    expect(isImeConfirmation(ev(true))).toBe(true);
+  it("does not stick closed when compositionend and blur are both missing", () => {
+    start();
+    expect(isImeConfirmation(enter(13, true))).toBe(true);
+    expect(isImeConfirmation(enter())).toBe(false);
   });
 
-  it("is true just after compositionend, which is Safari and WKWebView", () => {
-    // Safari fires compositionend BEFORE the confirming Enter, so isComposing is already false.
-    __ime.start();
-    __ime.end();
-    clock += 3; // the 3ms the maintainer measured
-    expect(isImeConfirmation(ev(false))).toBe(true);
+  it("keeps an IME key guarded after blur even if compositionend is missing", () => {
+    start();
+    input.dispatchEvent(new FocusEvent("blur", { bubbles: false }));
+    expect(isImeConfirmation(enter(229))).toBe(true);
+    expect(isImeConfirmation(enter())).toBe(false);
   });
 
-  it("stops guarding once a human could plausibly have pressed Enter themselves", () => {
-    __ime.start();
-    __ime.end();
-    clock += SAFARI_IME_RACE_WINDOW_MS;
-    expect(isImeConfirmation(ev(false))).toBe(false);
-  });
-
-  it("covers the whole window and not just its edges", () => {
-    for (const delay of [0, 1, 5, 15, 29]) {
-      __ime.reset();
-      __ime.setNow(() => clock);
-      __ime.start();
-      __ime.end();
-      clock += delay;
-      expect(isImeConfirmation(ev(false)), `${delay}ms after compositionend`).toBe(true);
-      clock += 1000;
+  it.each([false, true])("does not transfer composition state to a button, ended=%s", (ended) => {
+    start();
+    if (ended) end();
+    const button = document.createElement("button");
+    document.body.append(button);
+    try {
+      let confirmation: boolean | undefined;
+      button.addEventListener("keydown", (event) => { confirmation = isImeConfirmation(event); });
+      button.dispatchEvent(enter());
+      expect(confirmation).toBe(false);
+    } finally {
+      button.remove();
     }
   });
 
-  it("closes an abandoned composition on blur rather than leaving it open forever", () => {
-    __ime.start();
-    expect(isImeConfirmation(ev(false))).toBe(true);
-
-    __ime.blur();
-    clock += SAFARI_IME_RACE_WINDOW_MS;
-    expect(isImeConfirmation(ev(false))).toBe(false);
-  });
-
-  it("is safe on an element that can never hold a composition", () => {
-    // A button or a row: no composition ever starts, so the guard is inert there.
-    expect(isImeConfirmation(ev(false))).toBe(false);
-    clock += 10_000;
-    expect(isImeConfirmation(ev(false))).toBe(false);
+  it("adds no global composition or blur listeners when the module is reevaluated", async () => {
+    const added = vi.spyOn(window, "addEventListener");
+    const types = ["compositionstart", "compositionend", "blur"];
+    vi.resetModules();
+    const first = await import("./imeComposition");
+    vi.resetModules();
+    const second = await import("./imeComposition");
+    start();
+    expect(first.isImeConfirmation(enter())).toBe(false);
+    expect(second.isImeConfirmation(enter())).toBe(false);
+    expect(added.mock.calls.filter(([type]) => types.includes(type))).toHaveLength(0);
   });
 });

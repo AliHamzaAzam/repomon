@@ -6,7 +6,6 @@ import type { FileEntry, Lane, Repo } from "../bindings";
 import type { FleetStore } from "../stores/fleet";
 import { createEditorStore, EDITOR_STORAGE_KEY } from "../stores/editor";
 import EditorWorkspace from "./EditorWorkspace";
-import { __ime } from "./imeComposition";
 
 function getView(container: HTMLElement): EditorView {
   const content = container.querySelector<HTMLElement>(".cm-content");
@@ -85,7 +84,6 @@ function mockRpc(handlers: Record<string, (params: unknown) => unknown>) {
 let capturedSvgBlobs: Blob[] = [];
 
 beforeEach(() => {
-  __ime.reset();
   capturedSvgBlobs = [];
   URL.createObjectURL = vi.fn((blob: Blob) => {
     capturedSvgBlobs.push(blob);
@@ -96,7 +94,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  __ime.reset();
   localStorage.clear();
   calls.list = [];
   subscribers.list = [];
@@ -535,8 +532,6 @@ describe("EditorWorkspace component", () => {
   });
 
   it.each(["root", "nested"])("keeps %s file creation open through IME confirmation and commits on the next Enter", async (location) => {
-    let clock = 1000;
-    __ime.setNow(() => clock);
     mockRpc({
       "file.list": (params) => ({
         entries: (params as { path: string }).path === ""
@@ -564,14 +559,12 @@ describe("EditorWorkspace component", () => {
     fireEvent.compositionStart(input);
     // Safari/WKWebView sends compositionend before the confirming keydown, whose flag is false.
     fireEvent.compositionEnd(input);
-    clock += 3;
-    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: false });
     expect(calls.list.filter((c) => c.method === "file.create")).toHaveLength(0);
     expect(input).toBeInTheDocument();
     expect(input).toHaveValue("日本語.txt");
 
-    clock += 100;
-    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13, isComposing: false });
     await waitFor(() => expect(screen.queryByPlaceholderText("File name...")).not.toBeInTheDocument());
     expect(calls.list.filter((c) => c.method === "file.create")).toEqual([{
       method: "file.create",
@@ -580,8 +573,6 @@ describe("EditorWorkspace component", () => {
   });
 
   it("keeps renaming open through IME confirmation and commits on the next Enter", async () => {
-    let clock = 1000;
-    __ime.setNow(() => clock);
     mockRpc({
       "file.list": () => ({
         entries: [entry({ name: "old.txt", path: "old.txt", is_dir: false })],
@@ -600,14 +591,12 @@ describe("EditorWorkspace component", () => {
 
     fireEvent.compositionStart(input);
     fireEvent.compositionEnd(input);
-    clock += 3;
-    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: false });
     expect(calls.list.filter((c) => c.method === "file.rename")).toHaveLength(0);
     expect(input).toBeInTheDocument();
     expect(input).toHaveValue("日本語.txt");
 
-    clock += 100;
-    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13, isComposing: false });
     await waitFor(() => expect(screen.queryByDisplayValue("日本語.txt")).not.toBeInTheDocument());
     expect(calls.list.filter((c) => c.method === "file.rename")).toEqual([{
       method: "file.rename",
