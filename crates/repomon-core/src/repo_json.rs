@@ -375,21 +375,26 @@ mod tests {
 
     #[test]
     fn three_digit_hex_expands_like_css() {
-        assert_eq!(nearest_accent("#0f766e"), nearest_accent("#076"));
+        // `#076` is `#007766`, NOT `#0f766e`: the two are different colours that happen to
+        // quantize to the same token, so comparing them proves nothing about the expansion.
+        // `short_hex_expands_each_digit_by_seventeen` asserts the decode itself.
+        assert_eq!(parse_hex("#076"), parse_hex("#007766"));
     }
 
     #[test]
     fn every_token_maps_to_itself() {
-        // The token colours as hex, so a file that already uses the palette is not moved.
+        // The token colours as hex, derived from ACCENT_HSL rather than eyeballed: near-misses
+        // pass here anyway because the mapping is nearest-neighbour, so an approximate list
+        // would pin nothing.
         let tokens = [
-            ("#f0793d", 1),
-            ("#25a0d0", 2),
-            ("#9a63dd", 3),
-            ("#e8496e", 4),
-            ("#f2a70d", 5),
-            ("#6aae32", 6),
-            ("#2bab9f", 7),
-            ("#5578e6", 8),
+            ("#ef7a48", 1),
+            ("#25a2d0", 2),
+            ("#9a64d8", 3),
+            ("#e65678", 4),
+            ("#f2ad0d", 5),
+            ("#64ae32", 6),
+            ("#2baba3", 7),
+            ("#5273e0", 8),
         ];
         for (hex, want) in tokens {
             assert_eq!(
