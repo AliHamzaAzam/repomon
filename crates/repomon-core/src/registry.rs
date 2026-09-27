@@ -45,15 +45,17 @@ impl Registry {
     /// Adopt what the repository says about itself in its own `repo.json`.
     ///
     /// The file is the repository's claim, not this machine's: it fills the label only when nobody
-    /// here has set one, so a local rename always wins. The accent has no local source, so it
-    /// mirrors the file exactly — including being cleared when the file stops declaring a colour.
+    /// here has set one, so a local rename always wins, and so does a deliberate reset back to the
+    /// folder name. The accent has no local source, so it mirrors the file exactly, including
+    /// being cleared when the file stops declaring a colour.
     ///
-    /// **The two halves therefore converge differently, and deliberately.** A declared colour keeps
-    /// following the file. A declared name is a SEED: once adopted it is an ordinary label, and
-    /// `Repo` has no record of where a label came from, so a later change or removal in `repo.json`
-    /// does not move it. Making the name follow the file too would need that provenance — a second
-    /// stored value, and a decision about what a local rename then means — which is a product call
-    /// rather than a detail of reading the file.
+    /// **The two halves therefore converge differently, and deliberately.** A declared colour
+    /// keeps following the file. A declared name is a SEED: once adopted it is an ordinary label,
+    /// and a later change or removal in `repo.json` does not move it.
+    ///
+    /// `repo` is only a snapshot: it says which registration to read the file for, and nothing
+    /// else. Every decision is taken from the row inside the write, so a rename or a removal that
+    /// landed during the read is honoured rather than overwritten.
     pub async fn apply_repo_json(&self, repo: Repo) -> Result<Repo> {
         let path = repo.path.join("repo.json");
         let declaration = tokio::task::spawn_blocking(move || read_declaration(&path))
@@ -61,37 +63,23 @@ impl Registry {
             .map_err(join_err)?;
 
         let declared = match declaration {
-            // Nothing is known about this repository, so nothing already stored is disturbed.
-            repo_json::Declaration::Unusable => return Ok(repo),
+            // A file exists but says nothing usable, so nothing stored is disturbed. Say so: a
+            // malformed `repo.json` and no `repo.json` are different states and a person debugging
+            // one should not have to tell them apart by their absence of effect.
+            repo_json::Declaration::Unusable => {
+                tracing::warn!(
+                    path = %repo.path.join("repo.json").display(),
+                    "repo.json could not be used; nothing declared was applied"
+                );
+                return self.store.get_repo_at(repo.id, repo.path).await;
+            }
             repo_json::Declaration::None => repo_json::RepoJson::default(),
             repo_json::Declaration::Declared(d) => d,
         };
 
-        // `repo` is a snapshot taken before the file was read off-thread, so it is only used to
-        // decide what to ATTEMPT. Whether a write is allowed is decided by the write itself.
-        let mut wrote = false;
-
-        // A declared name equal to the folder name is not an override: writing it would leave a
-        // stale label behind the moment the folder is renamed, for no visible difference.
-        //
-        // The emptiness check belongs to the write, not to the snapshot: a rename landing during
-        // the read would otherwise be overwritten by a seed that believed there was no label.
-        if let Some(name) = declared.name.filter(|n| *n != repo.name) {
-            self.store.seed_repo_label(repo.id, name).await?;
-            wrote = true;
-        }
-        if declared.accent != repo.accent {
-            self.store.set_repo_accent(repo.id, declared.accent).await?;
-            wrote = true;
-        }
-
-        // Re-read after ATTEMPTING anything, not after landing it: a refused seed means something
-        // else changed the row, and returning the snapshot would hand back the value it replaced.
-        if wrote {
-            self.store.get_repo(repo.id).await
-        } else {
-            Ok(repo)
-        }
+        self.store
+            .apply_repo_declaration(repo.id, repo.path, declared.name, declared.accent)
+            .await
     }
 
     pub async fn remove(&self, id: RepoId) -> Result<()> {
@@ -485,6 +473,105 @@ mod tests {
         let out = reg.apply_repo_json(repo).await.unwrap();
         assert_eq!(out.label, None);
         assert_eq!(out.accent, None);
+    }
+
+    /// `repos.id` is `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite reuses the id of a
+    /// deleted row. A declaration read for one registration must never land on another that
+    /// happens to inherit its id.
+    #[tokio::test]
+    async fn a_declaration_cannot_land_on_a_different_repository_that_reused_the_id() {
+        // SQLite recycles only the LARGEST rowid, so the registration whose declaration goes stale
+        // has to be the most recent one.
+        let (tmp, reg, _first) = repo_with(None).await;
+
+        let declaring = tmp.path().join("declaring-repo");
+        std::fs::create_dir_all(&declaring).unwrap();
+        std::fs::write(
+            declaring.join("repo.json"),
+            r##"{"name":"Declared One","color":"#0f766e"}"##,
+        )
+        .unwrap();
+        let stale = reg
+            .store
+            .add_repo(declaring, "declaring-repo".to_string(), None)
+            .await
+            .unwrap();
+
+        reg.store.remove_repo(stale.id).await.unwrap();
+
+        let replacement = tmp.path().join("replacement");
+        std::fs::create_dir_all(&replacement).unwrap();
+        let taken = reg
+            .store
+            .add_repo(replacement, "replacement".to_string(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            taken.id, stale.id,
+            "this test is only meaningful when SQLite reuses the id"
+        );
+
+        assert!(
+            reg.apply_repo_json(stale).await.is_err(),
+            "applying a removed registration's declaration must fail, not write onto the row that inherited its id"
+        );
+        let after = reg.store.get_repo(taken.id).await.unwrap();
+        assert_eq!(
+            after.label, None,
+            "the replacement must not inherit a label"
+        );
+        assert_eq!(
+            after.accent, None,
+            "the replacement must not inherit an accent"
+        );
+    }
+
+    /// `repo.rename` with an empty label clears back to the folder name. That is a local choice,
+    /// and a later re-add must not undo it by seeding the declared name again.
+    #[tokio::test]
+    async fn an_explicit_local_reset_is_not_reseeded_by_the_file() {
+        let (_tmp, reg, repo) = repo_with(Some(r#"{"name":"Declared One"}"#)).await;
+
+        let seeded = reg.apply_repo_json(repo.clone()).await.unwrap();
+        assert_eq!(seeded.label.as_deref(), Some("Declared One"));
+
+        reg.set_label(repo.id, None).await.unwrap();
+        assert_eq!(reg.store.get_repo(repo.id).await.unwrap().label, None);
+
+        let current = reg.store.get_repo(repo.id).await.unwrap();
+        let again = reg.apply_repo_json(current).await.unwrap();
+        assert_eq!(
+            again.label, None,
+            "a deliberate reset must survive the next re-add"
+        );
+    }
+
+    /// Every path returns the row as the database has it, so a caller never acts on a value the
+    /// database already replaced, and never on a registration that is gone.
+    #[tokio::test]
+    async fn a_row_removed_after_the_snapshot_is_reported_as_gone() {
+        let (_tmp, reg, repo) = repo_with(None).await;
+        reg.store.remove_repo(repo.id).await.unwrap();
+        assert!(
+            reg.apply_repo_json(repo).await.is_err(),
+            "a registration deleted after the snapshot must not be reported as successfully added"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rename_landing_during_the_read_is_reflected_in_what_is_returned() {
+        let (_tmp, reg, repo) = repo_with(Some(r#"{"name":"acme-platform"}"#)).await;
+        // The declared name equals the folder name, so nothing is written: the old code took the
+        // no-write path and returned its pre-read snapshot.
+        reg.set_label(repo.id, Some("Renamed Here".to_string()))
+            .await
+            .unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        assert_eq!(
+            out.label.as_deref(),
+            Some("Renamed Here"),
+            "the returned row must come from the database, not from the caller's snapshot"
+        );
     }
 
     #[test]
