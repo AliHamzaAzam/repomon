@@ -6014,6 +6014,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_repo_header_never_exceeds_the_width_it_was_given() {
+        // `width` is a u16 the caller chooses and nothing here promises the pane is wide. A header
+        // that overruns its area wraps, and a wrapped group separator is worse than a truncated
+        // one. The dot is the part that makes a narrow header overflow, so both cases are walked.
+        let mut app = app_with_dummy_client().await;
+        app.theme = crate::theme::Theme::from_accent(None);
+
+        for accent in [None, Some(6u8)] {
+            let mut lane = labelled_lane(1, "\u{9577}\u{3044}\u{540d}\u{524d}");
+            lane.repo.accent = accent;
+            for width in 0u16..=8 {
+                let line = crate::view::repo_header(width, &lane.repo, &app);
+                assert_eq!(
+                    line.width(),
+                    width as usize,
+                    "width {width} with accent {accent:?} does not fill exactly one row"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn the_repo_header_rule_is_measured_in_columns_not_characters() {
         // A label is the one part of this header a person chooses freely, so it is where CJK and
         // emoji turn up - and those are two terminal columns per char. Counting characters makes

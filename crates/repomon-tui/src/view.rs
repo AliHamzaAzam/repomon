@@ -2899,12 +2899,19 @@ fn fit_columns(s: &str, columns: usize) -> String {
 /// The eight `--pane-accent-N` tokens as named ANSI colours, in the desktop's order.
 ///
 /// Named rather than RGB on purpose: every colour in this TUI is named so it lands in the
-/// terminal's own palette, and a repository's brand colour has no more claim to override that
-/// than the theme does. The mapping follows hue - 1 is the orange end, 8 the blue - so a
-/// repository that reads as teal in the desktop does not read as red here.
+/// terminal's own palette, as `theme.rs` says of the semantic colours, and a repository's brand
+/// colour has no more claim to override that than the theme does. The mapping follows hue - 1 is
+/// the orange end, 8 the blue - so a repository that reads as teal in the desktop does not read
+/// as red here.
+///
+/// The cost of that choice is that ANSI has no orange, so token 1 becomes the warmest red the
+/// palette has rather than the desktop's HSL(18, 84%, 61%). It is an approximation, and the
+/// alternative is a `Color::Rgb` that ignores the terminal's palette in the one place a
+/// repository is allowed to ask for a colour. Yellow is not available for it: `theme.rs` already
+/// spends yellow on needs-you.
 fn accent_color(accent: u8) -> Option<Color> {
     Some(match accent {
-        1 => Color::Red,
+        1 => Color::LightRed,
         2 => Color::Cyan,
         3 => Color::Magenta,
         4 => Color::LightMagenta,
@@ -2934,28 +2941,36 @@ pub(crate) fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
     // rate-limited on the rows below; a whole header in a repository's colour would compete with
     // that reading, and a repository declaring green would look like a status. A glyph in a
     // colour reads as identity. The desktop sidebar carries the same dot for the same reason.
-    let dot = header_dot(repo, app.theme.colored());
-    // Leave room for the two leading spaces, the dot, the space after the name, and at least one
-    // dash, then fit the name into what is left. A label is capped at 200 characters upstream and
-    // is chosen by a person, so it can be longer than the terminal is wide; without this the spans
-    // alone exceed `width` and the line wraps, which breaks the group it is supposed to delimit.
-    let budget = (width as usize).saturating_sub(2 + usize::from(dot.is_some()) * 2 + 2);
+    let width = width as usize;
+    // Built in priority order so the line never exceeds `width`, whatever `width` is. The caller
+    // passes a u16 and nothing here promises the fleet pane is wide; a header that overruns its
+    // area wraps, and a wrapped group separator is worse than a truncated one.
+    //
+    //   "  " + "* " + name + " " + dashes
+    //    2      2      >=1     1      >=1     = 7 columns before a dot is affordable
+    //    2             >=1     1      >=1     = 5 without one
+    const PAD: usize = 2;
+    let dot = header_dot(repo, app.theme.colored()).filter(|_| width >= 7);
+    let fixed = PAD + usize::from(dot.is_some()) * 2 + 2; // dot, the space after the name, one dash
+    let budget = width.saturating_sub(fixed);
     let name = fit_columns(repo_display(repo), budget);
-    let mut spans = vec![Span::raw("  ")];
+    let mut spans = vec![Span::raw(" ".repeat(PAD.min(width)))];
     if let Some(c) = dot {
         spans.push(Span::styled(
             "\u{25cf} ".to_string(),
             Style::default().fg(c),
         ));
     }
-    spans.push(Span::styled(name, app.theme.header_style()));
-    spans.push(Span::raw(" "));
+    if !name.is_empty() {
+        spans.push(Span::styled(name, app.theme.header_style()));
+        spans.push(Span::raw(" "));
+    }
     // Measure what is on the line rather than counting characters. A label is the one part of
     // this header a person chooses freely, so it is where CJK and emoji actually turn up, and
     // those are two terminal columns per char. ratatui's Span::width is display width, so this
     // needs no counting of its own and no new dependency.
     let used: usize = spans.iter().map(Span::width).sum();
-    let dashes = (width as usize).saturating_sub(used);
+    let dashes = width.saturating_sub(used);
     spans.push(Span::styled(
         theme::LIGHT.to_string().repeat(dashes),
         app.theme.muted(),
