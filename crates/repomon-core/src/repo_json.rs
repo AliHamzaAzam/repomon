@@ -117,8 +117,8 @@ fn displayable(s: String) -> Option<String> {
 /// repository must not be able to reorder or fake what the person reads.
 fn is_deceptive(c: char) -> bool {
     c.is_control()
-        // Bidirectional embedding, override and isolate controls, plus the two marks.
-        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+        // Unicode's Bidi_Control set: embeddings, overrides, isolates and the three marks.
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}')
         // Line and paragraph separators: a display name is one line.
         || matches!(c, '\u{2028}' | '\u{2029}')
 }
@@ -295,6 +295,7 @@ mod tests {
             ("bidi embedding", "a\u{202b}b"),
             ("bidi isolate", "a\u{2066}b\u{2069}"),
             ("right-to-left mark", "a\u{200f}b"),
+            ("arabic letter mark", "a\u{061c}b"),
             ("line separator", "a\u{2028}b"),
             ("paragraph separator", "a\u{2029}b"),
             ("zero-width only", "\u{200b}"),
