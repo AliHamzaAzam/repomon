@@ -2868,6 +2868,34 @@ pub fn repo_display(repo: &Repo) -> &str {
     }
 }
 
+/// Cut a string down to `columns` terminal columns, ending in an ellipsis when anything was
+/// dropped.
+///
+/// Distinct from `trunc`, which counts characters: a CJK label is two columns per character, so a
+/// character budget lets the result be twice as wide as the space it was measured against. The
+/// ellipsis costs one column, so a budget of 0 or 1 yields nothing rather than an ellipsis alone --
+/// a lone `...` says less than an empty gap does.
+fn fit_columns(s: &str, columns: usize) -> String {
+    if Span::raw(s).width() <= columns {
+        return s.to_string();
+    }
+    if columns < 2 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = Span::raw(c.to_string()).width();
+        if used + w > columns - 1 {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 /// The eight `--pane-accent-N` tokens as named ANSI colours, in the desktop's order.
 ///
 /// Named rather than RGB on purpose: every colour in this TUI is named so it lands in the
@@ -2906,8 +2934,13 @@ pub(crate) fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
     // rate-limited on the rows below; a whole header in a repository's colour would compete with
     // that reading, and a repository declaring green would look like a status. A glyph in a
     // colour reads as identity. The desktop sidebar carries the same dot for the same reason.
-    let name = repo_display(repo);
     let dot = header_dot(repo, app.theme.colored());
+    // Leave room for the two leading spaces, the dot, the space after the name, and at least one
+    // dash, then fit the name into what is left. A label is capped at 200 characters upstream and
+    // is chosen by a person, so it can be longer than the terminal is wide; without this the spans
+    // alone exceed `width` and the line wraps, which breaks the group it is supposed to delimit.
+    let budget = (width as usize).saturating_sub(2 + usize::from(dot.is_some()) * 2 + 2);
+    let name = fit_columns(repo_display(repo), budget);
     let mut spans = vec![Span::raw("  ")];
     if let Some(c) = dot {
         spans.push(Span::styled(
@@ -2915,7 +2948,7 @@ pub(crate) fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
             Style::default().fg(c),
         ));
     }
-    spans.push(Span::styled(name.to_string(), app.theme.header_style()));
+    spans.push(Span::styled(name, app.theme.header_style()));
     spans.push(Span::raw(" "));
     // Measure what is on the line rather than counting characters. A label is the one part of
     // this header a person chooses freely, so it is where CJK and emoji actually turn up, and

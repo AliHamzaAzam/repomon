@@ -1250,10 +1250,13 @@ impl App {
                 .iter()
                 .filter_map(|((id, _), kind)| {
                     let l = self.lanes.iter().find(|l| l.id == *id)?;
-                    Some((
-                        format!("{}/{}", view::repo_display(&l.repo), l.worktree.name),
-                        *kind,
-                    ))
+                    // Deliberately the folder name, NOT repo_display. The single-notification
+                    // path goes through notify::compose in repomon-core, which formats
+                    // repo.name, and one surface showing the label while the other shows the
+                    // folder name is worse than both showing the same thing. Labelling
+                    // notifications is a core change serving two clients, so it belongs in its
+                    // own PR rather than half-done here.
+                    Some((format!("{}/{}", l.repo.name, l.worktree.name), *kind))
                 })
                 .collect();
             let (title, body) = notify::compose_burst(&labels);
@@ -6018,10 +6021,14 @@ mod tests {
         let mut app = app_with_dummy_client().await;
         let width = 60u16;
 
+        // The last one is far wider than the terminal, which is reachable: a declared label is
+        // capped at 200 characters and a person picks it, so nothing bounds it by the width here.
+        let long = "\u{9577}".repeat(200);
         for label in [
             "ascii-name",
             "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{540d}\u{524d}",
             "mix \u{6f22}\u{5b57} ab",
+            long.as_str(),
         ] {
             let lane = labelled_lane(1, label);
             let line = crate::view::repo_header(width, &lane.repo, &app);
