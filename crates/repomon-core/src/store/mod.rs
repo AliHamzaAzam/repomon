@@ -83,6 +83,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0030_message_push_attempts.sql"),
     ),
     (31, include_str!("../../migrations/0031_lane_view.sql")),
+    (32, include_str!("../../migrations/0032_repo_accent.sql")),
+    (
+        33,
+        include_str!("../../migrations/0033_repo_label_locked.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
@@ -253,6 +258,7 @@ impl Store {
                 hidden: false,
                 position: None,
                 label: None,
+                accent: None,
             })
         })
         .await
@@ -339,15 +345,101 @@ impl Store {
         .await
     }
 
+    /// Apply what a repository declared about itself, and return the row as the database has it.
+    ///
+    /// Bound to `id` AND `path`. `repos.id` is `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so
+    /// SQLite hands a deleted row's id to the next insert: a declaration read for one registration
+    /// could otherwise be written onto whatever inherited its id. Matching the path too means the
+    /// write lands on the registration the file was read from, or on nothing.
+    ///
+    /// Every decision is taken from the row inside the transaction rather than from a snapshot the
+    /// caller read before the file, so a rename or a removal that landed in between is honoured
+    /// rather than overwritten, and the returned row is never one the database has already
+    /// replaced.
+    ///
+    /// What it does NOT close: two applies whose file reads complete out of order can still write
+    /// oldest-last. Ordering independent reads is the caller's job, not the database's.
+    pub async fn apply_repo_declaration(
+        &self,
+        id: RepoId,
+        path: PathBuf,
+        declared_name: Option<String>,
+        accent: Option<u8>,
+    ) -> Result<Repo> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let gone = || Error::NotFound(format!("repo {id}"));
+
+            let (name, label, locked): (String, Option<String>, i64) = tx
+                .query_row(
+                    "SELECT name, label, label_locked FROM repos WHERE id = ?1 AND path = ?2",
+                    params![id, path.to_string_lossy()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => gone(),
+                    other => Error::from(other),
+                })?;
+
+            // A declared name equal to the folder name is not an override: writing it would leave
+            // a stale label behind the moment the folder is renamed, for no visible difference.
+            let seed = declared_name
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty() && *n != name);
+            if let Some(seed) = seed {
+                if label.is_none() && locked == 0 {
+                    tx.execute(
+                        "UPDATE repos SET label = ?2 WHERE id = ?1",
+                        params![id, seed],
+                    )?;
+                }
+            }
+
+            let accent = accent.filter(|a| (1..=8).contains(a));
+            tx.execute(
+                "UPDATE repos SET accent = ?2 WHERE id = ?1",
+                params![id, accent],
+            )?;
+
+            let sql = format!("SELECT {REPO_COLUMNS} FROM repos WHERE id = ?1");
+            let repo = tx
+                .query_row(&sql, params![id], repo_from_row)
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => gone(),
+                    other => Error::from(other),
+                })?;
+            tx.commit()?;
+            Ok(repo)
+        })
+        .await
+    }
+
+    /// Re-read a registration, failing when it is no longer the one at `path`.
+    pub async fn get_repo_at(&self, id: RepoId, path: PathBuf) -> Result<Repo> {
+        self.call(move |c| {
+            let sql = format!("SELECT {REPO_COLUMNS} FROM repos WHERE id = ?1 AND path = ?2");
+            c.query_row(&sql, params![id, path.to_string_lossy()], repo_from_row)
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!("repo {id}")),
+                    other => other.into(),
+                })
+        })
+        .await
+    }
+
     /// Set a repo's display label. `None`, empty, or whitespace-only clears the override,
     /// falling back to the folder name.
+    ///
+    /// Either way this is a choice made HERE, so it locks the label against being reseeded from
+    /// the repository's own `repo.json`. `label IS NULL` alone cannot tell a deliberate clear from
+    /// a label nobody ever set, and the next add would undo the clear.
     pub async fn set_repo_label(&self, id: RepoId, label: Option<String>) -> Result<()> {
         self.call(move |c| {
             let label = label
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty());
             let n = c.execute(
-                "UPDATE repos SET label = ?2 WHERE id = ?1",
+                "UPDATE repos SET label = ?2, label_locked = 1 WHERE id = ?1",
                 params![id, label],
             )?;
             if n == 0 {
@@ -2818,12 +2910,13 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         hidden: r.get(5)?,
         position: r.get(6)?,
         label: r.get(7)?,
+        accent: r.get(8)?,
     })
 }
 
 /// The repo column list shared by every repo SELECT, matching `repo_from_row`'s indices.
 const REPO_COLUMNS: &str =
-    "id, path, name, added_at, worktree_root_template, hidden, position, label";
+    "id, path, name, added_at, worktree_root_template, hidden, position, label, accent";
 
 /// Orders explicitly positioned repositories first by position, then the rest by name.
 const REPO_ORDER: &str = "ORDER BY (position IS NULL), position, name";

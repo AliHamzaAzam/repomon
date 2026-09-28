@@ -101,7 +101,7 @@ afterEach(() => {
 });
 
 function repo(): Repo {
-  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
+  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null };
 }
 
 function lane(overrides: Partial<Lane> = {}): Lane {
@@ -529,6 +529,79 @@ describe("EditorWorkspace component", () => {
     });
 
     expect(calls.list.filter((c) => c.method === "file.rename")).toHaveLength(1);
+  });
+
+  it.each(["root", "nested"])("keeps %s file creation open through IME confirmation and commits on the next Enter", async (location) => {
+    mockRpc({
+      "file.list": (params) => ({
+        entries: (params as { path: string }).path === ""
+          ? [entry({ name: "src", path: "src", is_dir: true })]
+          : [],
+        truncated: false,
+      }),
+      "file.create": () => ({}),
+      "file.read": () => ({ content: "", mtime_ms: 1000, size: 0, truncated: false, kind: "text" }),
+    });
+    const fleet = fleetWith(lane());
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    await screen.findByTitle("src");
+    if (location === "root") {
+      fireEvent.click(screen.getByTitle("New file in root"));
+    } else {
+      fireEvent.contextMenu(screen.getByTitle("src"));
+      fireEvent.click(await screen.findByText("New File"));
+    }
+    const input = await screen.findByPlaceholderText("File name...");
+    fireEvent.input(input, { target: { value: "日本語.txt" } });
+
+    fireEvent.compositionStart(input);
+    // Safari/WKWebView sends compositionend before the confirming keydown, whose flag is false.
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: false });
+    expect(calls.list.filter((c) => c.method === "file.create")).toHaveLength(0);
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveValue("日本語.txt");
+
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13, isComposing: false });
+    await waitFor(() => expect(screen.queryByPlaceholderText("File name...")).not.toBeInTheDocument());
+    expect(calls.list.filter((c) => c.method === "file.create")).toEqual([{
+      method: "file.create",
+      params: { lane_id: 7, path: location === "root" ? "日本語.txt" : "src/日本語.txt", is_dir: false },
+    }]);
+  });
+
+  it("keeps renaming open through IME confirmation and commits on the next Enter", async () => {
+    mockRpc({
+      "file.list": () => ({
+        entries: [entry({ name: "old.txt", path: "old.txt", is_dir: false })],
+        truncated: false,
+      }),
+      "file.rename": () => ({}),
+    });
+    const fleet = fleetWith(lane());
+    const editor = createEditorStore(fleet);
+    render(() => <EditorWorkspace fleet={fleet} editor={editor} />);
+
+    fireEvent.contextMenu(await screen.findByTitle("old.txt"));
+    fireEvent.click(await screen.findByText("Rename"));
+    const input = await screen.findByDisplayValue("old.txt");
+    fireEvent.input(input, { target: { value: "日本語.txt" } });
+
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, isComposing: false });
+    expect(calls.list.filter((c) => c.method === "file.rename")).toHaveLength(0);
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveValue("日本語.txt");
+
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13, isComposing: false });
+    await waitFor(() => expect(screen.queryByDisplayValue("日本語.txt")).not.toBeInTheDocument());
+    expect(calls.list.filter((c) => c.method === "file.rename")).toEqual([{
+      method: "file.rename",
+      params: { lane_id: 7, from: "old.txt", to: "日本語.txt" },
+    }]);
   });
 
   it("toggles markdown preview split for markdown files (item F5)", async () => {

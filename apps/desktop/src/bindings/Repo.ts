@@ -19,4 +19,9 @@ position: number | null,
  * Optional display-name override shown instead of the folder name. `None` (or empty) means
  * clients fall back to `name`.
  */
-label: string | null, };
+label: string | null, 
+/**
+ * Which of the eight `--pane-accent-N` tokens this repo claims, 1-8. Set from the repo's own
+ * `repo.json`; `None` means clients keep hashing the id as before.
+ */
+accent: number | null, };

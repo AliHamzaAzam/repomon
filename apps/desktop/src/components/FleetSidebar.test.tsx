@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(id: number, name: string, hidden = false): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null, accent: null };
 }
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {

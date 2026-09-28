@@ -38,7 +38,7 @@ const lane: Lane = {
   pinned: false,
   role: null,
   last_activity_at: "2026-09-01T00:00:00Z",
-  repo: { id: 1, name: "repomon", path: "/tmp/repo", added_at: "2026-09-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null },
+  repo: { id: 1, name: "repomon", path: "/tmp/repo", added_at: "2026-09-01T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null },
   worktree: { id: 1, repo_id: 1, name: "main", branch: "main", path: "/tmp/repo", head: "abc", is_main: true },
   state: { worktree_id: 1, head: "abc", branch: "main", upstream: null, ahead: 0, behind: 0, dirty: { staged: 0, unstaged: 0, untracked: 0 }, last_commit_at: null, locked: false, prunable: false, last_change_at: null },
   agent_sessions: [],
@@ -260,5 +260,43 @@ describe("spawn dialog selection follows focus", () => {
     fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     await waitFor(() => expect(state.spawnCalls).toHaveLength(1));
     expect(state.spawnCalls[0]).toMatchObject({ agent: "opencode" });
+  });
+});
+
+// Ported from qa/pr94/SpawnModal.ime-audit.test.tsx; no clock or module reset is needed.
+describe("IME SpawnModal integration", () => {
+  it.each(["metaKey", "ctrlKey"])("blocks WebKit confirmation with %s in the task field", async (modifier) => {
+    await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 229, [modifier]: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(0);
+    fireEvent.keyDown(field, { key: "Enter", keyCode: 13, [modifier]: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
+  });
+
+  it("allows an ordinary chord on another runtime button after focus transfer", async () => {
+    const { radios } = await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    radios[2].focus();
+    fireEvent.keyDown(radios[2], { key: "Enter", keyCode: 13, metaKey: true, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
+    expect(state.spawnCalls[0]).toMatchObject({ agent: "codex" });
+  });
+
+  it("preserves ordinary grid Enter after composing in another field", async () => {
+    const { radios } = await openDialog();
+    const field = screen.getByRole("textbox");
+    field.focus();
+    fireEvent.compositionStart(field);
+    fireEvent.compositionEnd(field);
+    radios[2].focus();
+    fireEvent.keyDown(radios[2], { key: "Enter", keyCode: 13, isComposing: false });
+    expect(state.spawnCalls).toHaveLength(1);
   });
 });

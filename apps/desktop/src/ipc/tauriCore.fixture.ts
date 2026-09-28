@@ -25,6 +25,7 @@ function repo(id: number, name: string, label: string | null = null): Repo {
     hidden: false,
     position: null,
     label,
+    accent: null,
   };
 }
 

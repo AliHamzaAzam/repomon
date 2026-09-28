@@ -6,6 +6,7 @@ import type { AgentSession, Lane, Repo } from "../bindings";
 import { createFleetStore, type FleetSource } from "../stores/fleet";
 import { createWorkspaceStore } from "../stores/workspace";
 import TerminalWorkspace from "./TerminalWorkspace";
+import { paneAccent } from "./terminalTargets";
 
 const daemonCallMock = vi.hoisted(() => vi.fn().mockResolvedValue(null));
 vi.mock("../ipc/rpc", async () => {
@@ -73,6 +74,7 @@ function mkLane(id: number, sessions: AgentSession[]): Lane {
     hidden: false,
     position: null,
     label: null,
+    accent: null,
   };
   return {
     id,
@@ -386,5 +388,33 @@ describe("TerminalWorkspace multitasking: simulated pane geometry (bug 2 + bug 3
     const layout = document.querySelector<HTMLElement>(".terminal-layout.is-multitasking");
     expect(layout?.style.gridTemplateColumns).toBe("repeat(3, minmax(0, 1fr))");
     dispose();
+  });
+});
+
+describe("TerminalWorkspace declared repo accents", () => {
+  it.each([7, null])("updates a mounted stripe when the declared accent becomes %s", async (accent) => {
+    const original = mkLane(10, [session({ tmux_window: "lane-10-1" })]);
+    original.repo.accent = 4;
+    const lanes = [original];
+    const { fleet, workspace, dispose } = await mountFleet(lanes, { multitasking: true });
+    try {
+      await settle(() => expect(visiblePaneWrapperDivs()[0]?.style.getPropertyValue("--pane-accent")).toBe("var(--pane-accent-4)"));
+      const pane = visiblePaneWrapperDivs()[0];
+      const targets = workspace.targets();
+      await settle(() => expect(pane.querySelector(".terminal-host")).not.toBeNull());
+      const terminal = pane.querySelector(".terminal-host");
+
+      lanes[0] = { ...original, repo: { ...original.repo, accent } };
+      await fleet.refresh();
+
+      expect(fleet.lanes()[0].repo.accent).toBe(accent);
+      const expectedAccent = paneAccent({ repoId: 10, laneId: 10, repoAccent: accent });
+      expect(pane.style.getPropertyValue("--pane-accent")).toBe(expectedAccent);
+      expect(workspace.targets()).toBe(targets);
+      expect(visiblePaneWrapperDivs()[0]).toBe(pane);
+      expect(pane.querySelector(".terminal-host")).toBe(terminal);
+    } finally {
+      dispose();
+    }
   });
 });

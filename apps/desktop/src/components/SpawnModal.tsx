@@ -1,4 +1,5 @@
 import { For, Show, batch, createEffect, createSignal, createUniqueId, onMount } from "solid-js";
+import { isImeConfirmation } from "./imeComposition";
 
 import type { AgentChoice, Lane } from "../bindings";
 import { pickDefaultAgent } from "../ipc/agentChoices";
@@ -173,6 +174,8 @@ export default function SpawnModal(props: {
   /// on any other button, so those keep it.
   function onContentKeyDown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.key !== "Enter") return;
+    // An Enter that confirms an IME candidate is not a commit, wherever it was pressed.
+    if (isImeConfirmation(event)) return;
     const target = event.target as HTMLElement | null;
     const chord = event.metaKey || event.ctrlKey;
     if (!chord && (target?.tagName === "TEXTAREA" || target?.tagName === "BUTTON")) return;

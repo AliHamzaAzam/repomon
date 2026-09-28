@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { isImeConfirmation } from "./imeComposition";
 
 import type { Commit, CommitShow, Lane } from "../bindings";
 import DiffView, { findFileFirstChangedLine, parseDiff } from "./DiffView";
@@ -122,7 +123,7 @@ function StatFileRowView(props: {
         class="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left"
         onClick={() => props.onSelect(props.file.path)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !isImeConfirmation(e)) {
             e.preventDefault();
             e.stopPropagation();
             props.onOpenInEditor?.(props.file.path);

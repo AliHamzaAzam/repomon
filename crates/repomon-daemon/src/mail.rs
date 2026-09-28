@@ -494,6 +494,7 @@ mod tests {
                 hidden: false,
                 position: None,
                 label: None,
+                accent: None,
             },
             worktree: Worktree {
                 id: 2,

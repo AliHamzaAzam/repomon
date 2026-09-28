@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 function repo(): Repo {
-  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null };
+  return { id: 2, path: "/code/repomon", name: "repomon", added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden: false, position: null, label: null, accent: null };
 }
 
 function lane(overrides: Partial<Lane> = {}): Lane {
@@ -904,5 +904,31 @@ describe("GitExplorerPanel open in editor (F4)", () => {
 
     expect(onEnsureEditorOpen).toHaveBeenCalled();
     expect(openAt).toHaveBeenCalledWith("App.tsx", 11, 1);
+  });
+});
+
+// Ported from qa/pr94/GitExplorerPanel.ime-audit.test.tsx without a global fake clock.
+describe("IME Git row integration", () => {
+  it.each([false, true])("opens a file row after composition in another input, ended=%s", async (ended) => {
+    responses.diff = {
+      base: "main", merge_base: "abc", commits: "", committed_stat: "",
+      uncommitted_stat: " src/main.ts | 1 +\n", untracked: 0,
+    };
+    const openAt = vi.fn().mockResolvedValue(undefined);
+    const editor = { openAt } as unknown as EditorStore;
+    render(() => <GitExplorerPanel fleet={fleetWith(lane())} editor={editor} />);
+    const row = (await screen.findByTitle("src/main.ts")).closest("button")!;
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      fireEvent.compositionStart(input);
+      if (ended) fireEvent.compositionEnd(input);
+      row.focus();
+      fireEvent.keyDown(row, { key: "Enter", keyCode: 13, isComposing: false });
+      await waitFor(() => expect(openAt).toHaveBeenCalledWith("src/main.ts", 1, 1));
+    } finally {
+      input.remove();
+    }
   });
 });

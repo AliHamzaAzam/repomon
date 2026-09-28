@@ -34,6 +34,7 @@ function lane(id: number): Lane {
       hidden: false,
       position: null,
       label: null,
+      accent: null,
     },
     worktree: {
       id,

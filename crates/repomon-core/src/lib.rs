@@ -23,6 +23,7 @@ pub mod pricing;
 pub mod process;
 pub mod protocol;
 pub mod registry;
+pub mod repo_json;
 pub mod schedule;
 pub mod service;
 pub mod session;

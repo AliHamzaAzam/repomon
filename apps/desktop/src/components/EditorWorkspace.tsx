@@ -1,4 +1,5 @@
 import { formatBytes } from "../formatBytes";
+import { isImeConfirmation } from "./imeComposition";
 import {
   For,
   Match,
@@ -531,7 +532,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setFocusedTreeIndex((prev) => Math.max(0, prev - 1));
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !isImeConfirmation(e)) {
       e.preventDefault();
       const item = items[currentIdx];
       if (item) {
@@ -719,7 +720,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                   class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                   placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    if (e.key === "Enter" && !isImeConfirmation(e)) {
                       e.preventDefault();
                       void commitInlineCreate(e.currentTarget.value);
                     } else if (e.key === "Escape") {
@@ -761,7 +762,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                             class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                             value={item.name}
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") {
+                              if (e.key === "Enter" && !isImeConfirmation(e)) {
                                 e.preventDefault();
                                 void commitInlineRename(e.currentTarget.value);
                               } else if (e.key === "Escape") {
@@ -872,7 +873,7 @@ export default function EditorWorkspace(props: EditorWorkspaceProps) {
                   class="focus-ring flex-1 rounded border border-signal bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground disabled:opacity-50"
                   placeholder={inlineCreate()?.isDir ? "Folder name..." : "File name..."}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    if (e.key === "Enter" && !isImeConfirmation(e)) {
                       e.preventDefault();
                       void commitInlineCreate(e.currentTarget.value);
                     } else if (e.key === "Escape") {
