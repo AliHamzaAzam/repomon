@@ -2846,9 +2846,24 @@ fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {
 /// `name` is identity - notes directories, MCP lookups and worktree paths all derive from it - so
 /// it stays wherever a path is being built and only the presentation moves. A label that is
 /// present but empty is not a label.
+///
+/// A label carrying a control character is not a label either. `repo_json` refuses them on the way
+/// in, but a label set by a local rename takes a different route into the same column, so the
+/// check is repeated here at the point of use - including for `sync_title`, which writes what it
+/// is given straight into an OSC 2 terminal-title sequence.
+///
+/// This is the only door every LABEL goes through; it is not the only door every repository name
+/// goes through. The timeline and sessions views render `repo_name` / `repo_names` supplied by the
+/// daemon, which never carry a label. Those are folder names chosen by whoever runs repomon, not
+/// text from a cloned repository, so they are outside what this guard is for - but they are also
+/// why those two views still show the folder name where the rest of the TUI now shows the label.
+///
+/// The whole label is dropped rather than stripped. A label that needed stripping was not written
+/// by someone describing their repository, and a half-erased one is a worse thing to show than
+/// the folder name.
 pub fn repo_display(repo: &Repo) -> &str {
     match repo.label.as_deref() {
-        Some(l) if !l.trim().is_empty() => l,
+        Some(l) if !l.trim().is_empty() && !l.chars().any(char::is_control) => l,
         _ => &repo.name,
     }
 }
@@ -2883,7 +2898,7 @@ fn header_dot(repo: &Repo, colored: bool) -> Option<Color> {
     repo.accent.filter(|_| colored).and_then(accent_color)
 }
 
-fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
+pub(crate) fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
     // "  * NAME -----..." - the dot carries the repository's declared colour, the name the theme
     // accent, the rule muted, so each group is delineated.
     //
@@ -2893,8 +2908,6 @@ fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
     // colour reads as identity. The desktop sidebar carries the same dot for the same reason.
     let name = repo_display(repo);
     let dot = header_dot(repo, app.theme.colored());
-    let used = 2 + usize::from(dot.is_some()) * 2 + name.chars().count() + 1;
-    let dashes = (width as usize).saturating_sub(used);
     let mut spans = vec![Span::raw("  ")];
     if let Some(c) = dot {
         spans.push(Span::styled(
@@ -2904,6 +2917,12 @@ fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
     }
     spans.push(Span::styled(name.to_string(), app.theme.header_style()));
     spans.push(Span::raw(" "));
+    // Measure what is on the line rather than counting characters. A label is the one part of
+    // this header a person chooses freely, so it is where CJK and emoji actually turn up, and
+    // those are two terminal columns per char. ratatui's Span::width is display width, so this
+    // needs no counting of its own and no new dependency.
+    let used: usize = spans.iter().map(Span::width).sum();
+    let dashes = (width as usize).saturating_sub(used);
     spans.push(Span::styled(
         theme::LIGHT.to_string().repeat(dashes),
         app.theme.muted(),
@@ -3228,6 +3247,29 @@ mod tests {
             repo_display(&repo_with("repomon", Some("   "), None)),
             "repomon"
         );
+    }
+
+    #[test]
+    fn a_label_carrying_a_control_character_is_not_used() {
+        // repo_json refuses these on the way in, but a local rename does not go through it, and
+        // sync_title feeds whatever this returns into an OSC 2 sequence.
+        for bad in ["a\u{1b}[31mred", "two\nlines", "bell\u{7}", "csi\u{9b}31m"] {
+            assert_eq!(
+                repo_display(&repo_with("folder", Some(bad), None)),
+                "folder",
+                "control character reached the renderer: {bad:?}"
+            );
+        }
+        // The near-miss half: ordinary text, including non-ASCII, must still be used, or this
+        // guard would pass by rejecting everything.
+        for good in [
+            "MulmoTerminal",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "a b",
+            "emoji \u{1f680}",
+        ] {
+            assert_eq!(repo_display(&repo_with("folder", Some(good), None)), good);
+        }
     }
 
     #[test]
