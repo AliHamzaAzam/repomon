@@ -5,12 +5,12 @@
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use repomon_core::agent::attention::{Attention, agent_attention};
-use repomon_core::model::{AgentStatus, Commit, DirtyState, Lane, LaneId, RepoId};
+use repomon_core::model::{AgentStatus, Commit, DirtyState, Lane, LaneId, Repo, RepoId};
 
 use crate::app::{AgField, App, ClickZone};
 use crate::keybinds::View;
@@ -944,7 +944,7 @@ fn render_spawn_pick(f: &mut Frame, app: &App) {
     let lane_label = app
         .spawn_pick_lane
         .and_then(|id| app.lanes.iter().find(|l| l.id == id))
-        .map(|l| format!("{} / {}", l.repo.name, lane_branch(l)))
+        .map(|l| format!("{} / {}", repo_display(&l.repo), lane_branch(l)))
         .unwrap_or_default();
     f.render_widget(
         Paragraph::new(vec![
@@ -1046,7 +1046,7 @@ fn render_lane_jump(f: &mut Frame, app: &App) {
     let budget = (rows[1].height as usize).saturating_sub(lines.len()).max(1);
     for (i, lane) in matches.iter().take(budget).enumerate() {
         let cursor = if i == app.jump_idx { "‣" } else { " " };
-        let name = format!("{}/{}", lane.repo.name, lane.worktree.name);
+        let name = format!("{}/{}", repo_display(&lane.repo), lane.worktree.name);
         let (badge, style) = agent_badge(lane, app);
         if i == app.jump_idx {
             lines.push(Line::from(Span::styled(
@@ -1407,7 +1407,7 @@ fn orch_summary_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<(usize,
         let cap = (width as usize).saturating_sub(5).max(8);
         for l in needs {
             hits.push((lines.len(), l.id));
-            let name = format!("{}/{}", l.repo.name, lane_name(l));
+            let name = format!("{}/{}", repo_display(&l.repo), lane_name(l));
             lines.push(Line::from(vec![
                 Span::styled("  ⏸ ".to_string(), app.theme.needs_you()),
                 Span::raw(trunc(&name, cap)),
@@ -1573,7 +1573,7 @@ fn render_focus(f: &mut Frame, app: &App) {
     let title = match lane {
         Some(l) => format!(
             "REPOMON · {}/{}{}",
-            l.repo.name,
+            repo_display(&l.repo),
             lane_name(l),
             if emu_active { " · pty" } else { "" }
         ),
@@ -1771,8 +1771,8 @@ fn render_grid(f: &mut Frame, app: &App) {
         .iter()
         .find(|l| l.id == tiles[active].lane_id)
         .map(|l| match &tiles[active].window {
-            Some(w) => format!("{}/{} · {w}", l.repo.name, lane_name(l)),
-            None => format!("{}/{}", l.repo.name, lane_name(l)),
+            Some(w) => format!("{}/{} · {w}", repo_display(&l.repo), lane_name(l)),
+            None => format!("{}/{}", repo_display(&l.repo), lane_name(l)),
         })
         .unwrap_or_default();
     let mut spans = vec![Span::raw("  ")];
@@ -1822,8 +1822,8 @@ fn tile_lines(
         _ => (String::new(), Style::default()),
     };
     let label = match (lane, &tile.window) {
-        (Some(l), Some(w)) => format!("{marker}{}/{} · {w}  ", l.repo.name, lane_name(l)),
-        (Some(l), None) => format!("{marker}{}/{}  ", l.repo.name, lane_name(l)),
+        (Some(l), Some(w)) => format!("{marker}{}/{} · {w}  ", repo_display(&l.repo), lane_name(l)),
+        (Some(l), None) => format!("{marker}{}/{}  ", repo_display(&l.repo), lane_name(l)),
         (None, _) => format!("{marker}lane {id}"),
     };
     let base = if focused {
@@ -2267,18 +2267,20 @@ fn render_new_lane(f: &mut Frame, app: &App) {
         rule(area.width, true, app),
         Line::raw(""),
     ];
-    let repo_name = app
-        .repos
-        .get(app.nl_repo_idx)
-        .map(|r| r.name.clone())
+    let repo = app.repos.get(app.nl_repo_idx);
+    // Two different strings on purpose. The row shows what a person calls the repository; the path
+    // preview must show the path that will actually be used, and worktree paths derive from `name`.
+    let repo_shown = repo
+        .map(|r| repo_display(r).to_string())
         .unwrap_or_else(|| "(no repos: add one first)".into());
+    let repo_ident = repo.map(|r| r.name.clone()).unwrap_or_default();
     let safe_branch = app.nl_branch.replace('/', "-");
     let preview_path = if app.nl_branch.is_empty() {
         "(enter a branch name)".to_string()
     } else {
-        format!("~/code/{repo_name}-wt/{safe_branch}")
+        format!("~/code/{repo_ident}-wt/{safe_branch}")
     };
-    lines.push(Line::raw(format!("  repo      {repo_name}")));
+    lines.push(Line::raw(format!("  repo      {repo_shown}")));
     match app.nl_agents.get(app.nl_agent_idx) {
         Some(a) => {
             let mark = if a.detected { "✓" } else { "✗ not on PATH" };
@@ -2395,7 +2397,7 @@ fn fleet_lines(
                 lines.push(Line::raw("")); // a gap between repo groups
             }
             current = Some(lane.repo.id);
-            lines.push(repo_header(width, &lane.repo.name, app));
+            lines.push(repo_header(width, &lane.repo, app));
         }
         let mut line = match row.session {
             None => lane_row(lane, now, app, selected),
@@ -2465,7 +2467,7 @@ fn sidebar_lines(app: &App, content: Rect) -> Vec<Line<'static>> {
         if row.session.is_none() && current != Some(lane.repo.id) {
             current = Some(lane.repo.id);
             lines.push(Line::from(Span::styled(
-                lane.repo.name.clone(),
+                repo_display(&lane.repo).to_string(),
                 app.theme.muted(),
             )));
         }
@@ -2538,7 +2540,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     let upstream = s.upstream.clone().unwrap_or_else(|| "-".into());
     let mut lines = vec![
         Line::from(Span::styled(
-            format!("{} · {}", lane.repo.name, lane_name(lane)),
+            format!("{} · {}", repo_display(&lane.repo), lane_name(lane)),
             app.theme.header_style(),
         )),
         Line::raw(""),
@@ -2838,16 +2840,94 @@ fn rule(width: u16, heavy: bool, app: &App) -> Line<'static> {
     Line::from(Span::styled(c.to_string().repeat(width as usize), style))
 }
 
-fn repo_header(width: u16, name: &str, app: &App) -> Line<'static> {
-    // "  NAME ─────…" - the repo name in the accent, the rule muted, so each group is delineated.
-    let used = 2 + name.chars().count() + 1;
+/// What to show a person for this repository: the declared or user-set `label` when there is one,
+/// otherwise `name`.
+///
+/// `name` is identity - notes directories, MCP lookups and worktree paths all derive from it - so
+/// it stays wherever a path is being built and only the presentation moves. A label that is
+/// present but empty is not a label.
+///
+/// A label carrying a control character is not a label either. `repo_json` refuses them on the way
+/// in, but a label set by a local rename takes a different route into the same column, so the
+/// check is repeated here at the point of use - including for `sync_title`, which writes what it
+/// is given straight into an OSC 2 terminal-title sequence.
+///
+/// This is the only door every LABEL goes through; it is not the only door every repository name
+/// goes through. The timeline and sessions views render `repo_name` / `repo_names` supplied by the
+/// daemon, which never carry a label. Those are folder names chosen by whoever runs repomon, not
+/// text from a cloned repository, so they are outside what this guard is for - but they are also
+/// why those two views still show the folder name where the rest of the TUI now shows the label.
+///
+/// The whole label is dropped rather than stripped. A label that needed stripping was not written
+/// by someone describing their repository, and a half-erased one is a worse thing to show than
+/// the folder name.
+pub fn repo_display(repo: &Repo) -> &str {
+    match repo.label.as_deref() {
+        Some(l) if !l.trim().is_empty() && !l.chars().any(char::is_control) => l,
+        _ => &repo.name,
+    }
+}
+
+/// The eight `--pane-accent-N` tokens as named ANSI colours, in the desktop's order.
+///
+/// Named rather than RGB on purpose: every colour in this TUI is named so it lands in the
+/// terminal's own palette, and a repository's brand colour has no more claim to override that
+/// than the theme does. The mapping follows hue - 1 is the orange end, 8 the blue - so a
+/// repository that reads as teal in the desktop does not read as red here.
+fn accent_color(accent: u8) -> Option<Color> {
+    Some(match accent {
+        1 => Color::Red,
+        2 => Color::Cyan,
+        3 => Color::Magenta,
+        4 => Color::LightMagenta,
+        5 => Color::Yellow,
+        6 => Color::Green,
+        7 => Color::LightCyan,
+        8 => Color::Blue,
+        _ => return None,
+    })
+}
+
+/// The colour of a repository's header dot, or `None` for no dot.
+///
+/// Separate from `repo_header` so the rule can be tested without building an `App`: a dot appears
+/// only when the repository declared an accent *and* colour is on. `accent = "mono"` is the
+/// escape hatch for terminals and people that do not want colour, and a dot that survived it
+/// would be a lone coloured glyph in an otherwise monochrome screen.
+fn header_dot(repo: &Repo, colored: bool) -> Option<Color> {
+    repo.accent.filter(|_| colored).and_then(accent_color)
+}
+
+pub(crate) fn repo_header(width: u16, repo: &Repo, app: &App) -> Line<'static> {
+    // "  * NAME -----..." - the dot carries the repository's declared colour, the name the theme
+    // accent, the rule muted, so each group is delineated.
+    //
+    // Only the dot is tinted. Green, yellow and cyan already mean running, needs-you and
+    // rate-limited on the rows below; a whole header in a repository's colour would compete with
+    // that reading, and a repository declaring green would look like a status. A glyph in a
+    // colour reads as identity. The desktop sidebar carries the same dot for the same reason.
+    let name = repo_display(repo);
+    let dot = header_dot(repo, app.theme.colored());
+    let mut spans = vec![Span::raw("  ")];
+    if let Some(c) = dot {
+        spans.push(Span::styled(
+            "\u{25cf} ".to_string(),
+            Style::default().fg(c),
+        ));
+    }
+    spans.push(Span::styled(name.to_string(), app.theme.header_style()));
+    spans.push(Span::raw(" "));
+    // Measure what is on the line rather than counting characters. A label is the one part of
+    // this header a person chooses freely, so it is where CJK and emoji actually turn up, and
+    // those are two terminal columns per char. ratatui's Span::width is display width, so this
+    // needs no counting of its own and no new dependency.
+    let used: usize = spans.iter().map(Span::width).sum();
     let dashes = (width as usize).saturating_sub(used);
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(name.to_string(), app.theme.header_style()),
-        Span::raw(" "),
-        Span::styled(theme::LIGHT.to_string().repeat(dashes), app.theme.muted()),
-    ])
+    spans.push(Span::styled(
+        theme::LIGHT.to_string().repeat(dashes),
+        app.theme.muted(),
+    ));
+    Line::from(spans)
 }
 
 /// `Some("×N")` when several agents share one lane - the compact multi-agent marker shown in the
@@ -3007,7 +3087,7 @@ fn commit_line(c: &Commit, app: &App) -> Line<'static> {
         .lanes
         .iter()
         .find(|l| l.repo.id == c.repo_id)
-        .map(|l| l.repo.name.clone())
+        .map(|l| repo_display(&l.repo).to_string())
         .unwrap_or_else(|| format!("repo{}", c.repo_id));
     Line::from(vec![
         Span::styled(format!("  {time}  "), app.theme.muted()),
@@ -3128,6 +3208,100 @@ pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo_with(name: &str, label: Option<&str>, accent: Option<u8>) -> Repo {
+        Repo {
+            id: 1,
+            path: std::path::PathBuf::from("/tmp/x"),
+            name: name.to_string(),
+            added_at: chrono::Utc::now(),
+            worktree_root_template: None,
+            hidden: false,
+            position: None,
+            label: label.map(str::to_string),
+            accent,
+        }
+    }
+
+    #[test]
+    fn repo_display_prefers_a_label_and_falls_back_to_the_name() {
+        assert_eq!(
+            repo_display(&repo_with("mulmoterminal", None, None)),
+            "mulmoterminal"
+        );
+        assert_eq!(
+            repo_display(&repo_with("mulmoterminal", Some("MulmoTerminal"), None)),
+            "MulmoTerminal"
+        );
+    }
+
+    #[test]
+    fn a_label_that_is_present_but_empty_is_not_a_label() {
+        // The daemon stores `Option<String>`, and a row cleared through the UI can arrive as an
+        // empty or blank string rather than NULL. Rendering that would show a nameless group.
+        assert_eq!(
+            repo_display(&repo_with("repomon", Some(""), None)),
+            "repomon"
+        );
+        assert_eq!(
+            repo_display(&repo_with("repomon", Some("   "), None)),
+            "repomon"
+        );
+    }
+
+    #[test]
+    fn a_label_carrying_a_control_character_is_not_used() {
+        // repo_json refuses these on the way in, but a local rename does not go through it, and
+        // sync_title feeds whatever this returns into an OSC 2 sequence.
+        for bad in ["a\u{1b}[31mred", "two\nlines", "bell\u{7}", "csi\u{9b}31m"] {
+            assert_eq!(
+                repo_display(&repo_with("folder", Some(bad), None)),
+                "folder",
+                "control character reached the renderer: {bad:?}"
+            );
+        }
+        // The near-miss half: ordinary text, including non-ASCII, must still be used, or this
+        // guard would pass by rejecting everything.
+        for good in [
+            "MulmoTerminal",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "a b",
+            "emoji \u{1f680}",
+        ] {
+            assert_eq!(repo_display(&repo_with("folder", Some(good), None)), good);
+        }
+    }
+
+    #[test]
+    fn the_dot_appears_only_when_a_colour_is_declared_and_colour_is_on() {
+        let declared = repo_with("a", None, Some(6));
+        let silent = repo_with("b", None, None);
+
+        assert_eq!(header_dot(&declared, true), Some(Color::Green));
+        // `accent = "mono"` is a deliberate escape hatch. A declared colour must not reach through
+        // it, or a monochrome screen grows one coloured glyph.
+        assert_eq!(header_dot(&declared, false), None);
+        // Declaring nothing is a statement: the header looks exactly as it did before this change.
+        assert_eq!(header_dot(&silent, true), None);
+        assert_eq!(header_dot(&silent, false), None);
+    }
+
+    #[test]
+    fn every_declared_accent_maps_to_a_distinct_colour_and_nothing_else_maps_at_all() {
+        let mapped: Vec<Color> = (1..=8).filter_map(accent_color).collect();
+        assert_eq!(mapped.len(), 8, "all eight tokens must map");
+        for (i, c) in mapped.iter().enumerate() {
+            assert!(
+                !mapped[i + 1..].contains(c),
+                "two tokens share a colour, so two repositories would look the same"
+            );
+        }
+        // The store constrains this to 1-8, but the wire type is u8 and a client is not the place
+        // to panic over a value a future daemon might send.
+        assert_eq!(accent_color(0), None);
+        assert_eq!(accent_color(9), None);
+        assert_eq!(accent_color(u8::MAX), None);
+    }
 
     #[test]
     fn parse_pane_keeps_osc8_hyperlink_text() {

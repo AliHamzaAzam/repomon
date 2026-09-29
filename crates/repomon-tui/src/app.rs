@@ -832,7 +832,13 @@ impl App {
             let banner_idx = banner_lane
                 .and_then(|id| lanes.iter().position(|l| l.id == id))
                 .filter(|&i| i != cur);
-            let label = |i: usize| format!("{}/{}", lanes[i].repo.name, lanes[i].worktree.name);
+            let label = |i: usize| {
+                format!(
+                    "{}/{}",
+                    view::repo_display(&lanes[i].repo),
+                    lanes[i].worktree.name
+                )
+            };
 
             if let Some(i) = banner_idx {
                 (Some(lanes[i].id), format!("→ {} (just alerted)", label(i)))
@@ -917,7 +923,7 @@ impl App {
         let Some(lane) = self.lanes.iter().find(|l| l.id == lane_id) else {
             return;
         };
-        let repo = lane.repo.name.clone();
+        let repo = view::repo_display(&lane.repo).to_string();
         let (window, dialog) = match primary_agent(lane) {
             Some(s) => (s.tmux_window.clone(), s.pending_dialog.clone()),
             None => (None, None),
@@ -1074,12 +1080,22 @@ impl App {
             .lanes
             .iter()
             .filter_map(|l| {
-                let name = format!("{}/{}", l.repo.name, l.worktree.name);
+                // Searchable by BOTH what the repository is called on screen and what its folder
+                // is called. A label REPLACES the folder name in the display, so converting this
+                // to the label alone would silently remove the folder name as a search key - and
+                // the folder name is what someone who has not looked at the sidebar will type.
+                let shown = format!("{}/{}", view::repo_display(&l.repo), l.worktree.name);
+                let ident = format!("{}/{}", l.repo.name, l.worktree.name);
                 let branch = l.state.branch.as_deref().unwrap_or("");
-                let score = match (
-                    fuzzy_score(&name, &self.jump_query),
-                    fuzzy_score(branch, &self.jump_query),
+                // Lower is better here, so the best of the three wins.
+                let name_score = match (
+                    fuzzy_score(&shown, &self.jump_query),
+                    fuzzy_score(&ident, &self.jump_query),
                 ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                let score = match (name_score, fuzzy_score(branch, &self.jump_query)) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 }?;
@@ -1234,7 +1250,10 @@ impl App {
                 .iter()
                 .filter_map(|((id, _), kind)| {
                     let l = self.lanes.iter().find(|l| l.id == *id)?;
-                    Some((format!("{}/{}", l.repo.name, l.worktree.name), *kind))
+                    Some((
+                        format!("{}/{}", view::repo_display(&l.repo), l.worktree.name),
+                        *kind,
+                    ))
                 })
                 .collect();
             let (title, body) = notify::compose_burst(&labels);
@@ -1323,6 +1342,7 @@ impl App {
             .filter(|l| {
                 f.is_empty()
                     || l.repo.name.to_lowercase().contains(&f)
+                    || view::repo_display(&l.repo).to_lowercase().contains(&f)
                     || l.worktree.name.to_lowercase().contains(&f)
                     || l.state
                         .branch
@@ -1668,7 +1688,11 @@ impl App {
     /// on exit as usual.
     fn sync_title(&mut self) {
         let title = match self.selected_lane() {
-            Some(l) => format!("repomon · {}/{}", l.repo.name, l.worktree.name),
+            Some(l) => format!(
+                "repomon · {}/{}",
+                view::repo_display(&l.repo),
+                l.worktree.name
+            ),
             None => "repomon".to_string(),
         };
         if title != self.last_title {
@@ -2484,7 +2508,7 @@ impl App {
             self.repo_remove_pending = None;
             return;
         };
-        let (id, name) = (repo.id, repo.name.clone());
+        let (id, name) = (repo.id, view::repo_display(repo).to_string());
         if self.repo_remove_pending != Some(id) {
             self.repo_remove_pending = Some(id);
             self.status = format!("press x again to remove {name} (files on disk stay)");
@@ -4762,7 +4786,7 @@ impl App {
                 // the tree, but worktree files and running agents are left untouched.
                 let Some((repo_id, name)) = self
                     .selected_lane()
-                    .map(|l| (l.repo.id, l.repo.name.clone()))
+                    .map(|l| (l.repo.id, view::repo_display(&l.repo).to_string()))
                 else {
                     return;
                 };
@@ -5977,6 +6001,95 @@ mod tests {
         let mut b = managed("lane-1-2", Some("sid-b"));
         b.config_dir = Some(PathBuf::from("/Users/x/.claude-work"));
         (a, b)
+    }
+
+    /// A lane whose repository declares a label, over the same wire shape as `fake_lane`.
+    fn labelled_lane(id: repomon_core::model::LaneId, label: &str) -> Lane {
+        let mut lane = fake_lane(id, vec![]);
+        lane.repo.label = Some(label.to_string());
+        lane
+    }
+
+    #[tokio::test]
+    async fn the_repo_header_rule_is_measured_in_columns_not_characters() {
+        // A label is the one part of this header a person chooses freely, so it is where CJK and
+        // emoji turn up - and those are two terminal columns per char. Counting characters makes
+        // the rule that many columns too long, which wraps the line and breaks the group.
+        let mut app = app_with_dummy_client().await;
+        let width = 60u16;
+
+        for label in [
+            "ascii-name",
+            "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{540d}\u{524d}",
+            "mix \u{6f22}\u{5b57} ab",
+        ] {
+            let lane = labelled_lane(1, label);
+            let line = crate::view::repo_header(width, &lane.repo, &app);
+            assert_eq!(
+                line.width(),
+                width as usize,
+                "header for {label:?} does not fill exactly one row"
+            );
+        }
+
+        // And with a colour declared, since the dot adds two columns of its own.
+        let mut lane = labelled_lane(1, "\u{65e5}\u{672c}\u{8a9e}");
+        lane.repo.accent = Some(6);
+        app.theme = crate::theme::Theme::from_accent(None);
+        let line = crate::view::repo_header(width, &lane.repo, &app);
+        assert_eq!(line.width(), width as usize, "the dot is not counted");
+    }
+
+    #[tokio::test]
+    async fn a_labelled_repo_is_findable_by_both_its_label_and_its_folder_name() {
+        // Both directions are the point. A label REPLACES the folder name on screen, so a site
+        // converted to the label alone drops the folder name as a search key - and a site left on
+        // the folder name makes the thing the sidebar actually shows unsearchable. Either
+        // regression turns one of these two assertions red.
+        let mut app = app_with_dummy_client().await;
+        app.lanes = vec![labelled_lane(1, "MulmoTerminal")];
+
+        app.jump_query = "mulmoterminal".into();
+        assert_eq!(
+            app.lane_jump_matches().len(),
+            1,
+            "not findable by its label"
+        );
+
+        app.jump_query = "repo".into();
+        assert_eq!(
+            app.lane_jump_matches().len(),
+            1,
+            "not findable by its folder name"
+        );
+
+        app.jump_query = "zzzz".into();
+        assert!(
+            app.lane_jump_matches().is_empty(),
+            "matches a query present in neither, so the two assertions above prove nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_filter_matches_both_the_label_and_the_folder_name() {
+        let mut app = app_with_dummy_client().await;
+        app.lanes = vec![labelled_lane(1, "MulmoTerminal")];
+
+        app.filter = "mulmoterminal".into();
+        assert_eq!(app.visible_lanes().len(), 1, "label is not a filter key");
+
+        app.filter = "repo".into();
+        assert_eq!(
+            app.visible_lanes().len(),
+            1,
+            "folder name is not a filter key"
+        );
+
+        app.filter = "zzzz".into();
+        assert!(
+            app.visible_lanes().is_empty(),
+            "the filter matches everything, so the two assertions above prove nothing"
+        );
     }
 
     #[tokio::test]
