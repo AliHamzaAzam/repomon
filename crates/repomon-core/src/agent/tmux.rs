@@ -2273,21 +2273,33 @@ while True:
                         .arg(expected.len().to_string())
                         .arg(if bracketed { "h" } else { "l" });
                     SessionBackend::spawn_named(&rt, &window, &spec).unwrap();
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    // A budget PER wait, not one shared between them: a slow reader start used to
+                    // eat the paste's whole allowance and fail the next loop immediately.
+                    let ready_by = std::time::Instant::now() + std::time::Duration::from_secs(20);
                     while !rt.capture_named(&window, None).unwrap().contains("READY") {
                         assert!(
-                            std::time::Instant::now() < deadline,
+                            std::time::Instant::now() < ready_by,
                             "reader did not start: {window}"
                         );
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     rt.send_text_named(&window, &task).unwrap();
-                    while !received.exists() {
+                    // Wait for the file to be COMPLETE, not to exist. The reader opens it before
+                    // it writes, so `exists()` is true while the file is still empty, and the
+                    // comparison below then reads zero bytes and reports it as a paste that lost
+                    // its content.
+                    let written_by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    loop {
+                        let len = std::fs::metadata(&received).map(|m| m.len()).unwrap_or(0);
+                        if len as usize >= expected.len() {
+                            break;
+                        }
                         assert!(
-                            std::time::Instant::now() < deadline,
-                            "paste did not finish: {window}"
+                            std::time::Instant::now() < written_by,
+                            "paste did not finish: {window}, {len} of {} bytes",
+                            expected.len()
                         );
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(std::time::Duration::from_millis(25));
                     }
                     assert_eq!(
                         std::fs::read(received).unwrap(),
