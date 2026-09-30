@@ -2005,6 +2005,24 @@ mod tests {
         assert_eq!(TmuxRuntime::parse_term_window("orchestrator"), None);
     }
 
+    /// A pid that exists but has been reaped into a zombie is not alive for this test's purpose:
+    /// `kill -0` cannot tell the two apart, so ask for the state instead.
+    #[cfg(unix)]
+    fn proc_state(pid: u32) -> String {
+        Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    fn is_alive(pid: u32) -> bool {
+        let state = proc_state(pid);
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
     #[cfg(unix)]
     #[test]
     fn kill_named_terminates_pane_process_tree() {
@@ -2026,20 +2044,32 @@ mod tests {
         );
 
         rt.kill_named("orchestrator").unwrap();
-        for _ in 0..200 {
-            if tree.iter().all(|pid| {
-                Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|status| !status.success())
-                    .unwrap_or(true)
-            }) {
+
+        // A DEADLINE, not an iteration count: this runs beside every other test in the workspace,
+        // and the budget has to be what we are willing to wait rather than what 200 sleeps happened
+        // to add up to. The cost is only paid when the kill genuinely did not work.
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        loop {
+            let alive: Vec<u32> = tree.iter().copied().filter(|pid| is_alive(*pid)).collect();
+            if alive.is_empty() {
                 return;
+            }
+            if started.elapsed() >= budget {
+                // Say WHY, so a failure here does not cost an investigation to find out whether
+                // the process is running, unreaped, or stopped.
+                let states: Vec<String> = alive
+                    .iter()
+                    .map(|pid| format!("{pid}={}", proc_state(*pid)))
+                    .collect();
+                panic!(
+                    "pane process tree survived kill_named after {:?}: {}",
+                    started.elapsed(),
+                    states.join(" ")
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        panic!("pane process tree survived kill_named: {tree:?}");
     }
 
     #[test]
