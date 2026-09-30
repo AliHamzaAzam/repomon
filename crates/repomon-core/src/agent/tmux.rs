@@ -2007,6 +2007,31 @@ mod tests {
 
     /// A pid that exists but has been reaped into a zombie is not alive for this test's purpose:
     /// `kill -0` cannot tell the two apart, so ask for the state instead.
+    /// Poll until a live pane shows what we are waiting for, or give up after a budget.
+    ///
+    /// A fixed sleep asserts a guess about how fast the machine is. These tests drive a real shell
+    /// through a real tmux, beside every other test in the workspace, so the guess is wrong exactly
+    /// when the machine is busiest: the capture comes back blank and reads as a product failure.
+    /// Waiting for the condition costs nothing when it is already true.
+    fn capture_eventually(rt: &TmuxRuntime, window: &str, needle: &str) -> String {
+        let budget = std::time::Duration::from_secs(20);
+        let started = std::time::Instant::now();
+        let mut last = String::new();
+        loop {
+            last = rt.capture_named(window, None).unwrap_or(last);
+            if last.contains(needle) {
+                return last;
+            }
+            if started.elapsed() >= budget {
+                panic!(
+                    "{window} never showed {needle:?} in {:?}; capture was: {last:?}",
+                    started.elapsed()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     #[cfg(unix)]
     fn proc_state(pid: u32) -> String {
         Command::new("ps")
@@ -2331,25 +2356,19 @@ while True:
         assert!(started >= before && started <= chrono::Utc::now());
         assert!(rt.has_window(lane));
 
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let out = rt.capture(lane, None).unwrap();
-        assert!(out.contains("HELLO_REPOMON"), "capture was: {out:?}");
+        capture_eventually(&rt, "lane-1", "HELLO_REPOMON");
 
         rt.send_text(lane, "echo SECOND_LINE").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let out2 = rt.capture(lane, None).unwrap();
-        assert!(out2.contains("SECOND_LINE"), "after send: {out2:?}");
+        capture_eventually(&rt, "lane-1", "SECOND_LINE");
 
         // A second spawn runs side by side in the next slot (the first agent survives), and
         // per-window ops hit the right pane even after the first slot goes away.
         rt.spawn(lane, &cwd, "sh -c 'echo SLOT_TWO; sleep 30'")
             .unwrap();
         assert_eq!(rt.windows_for(lane).unwrap(), vec!["lane-1", "lane-1-2"]);
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let one = rt.capture(lane, None).unwrap();
-        assert!(one.contains("HELLO_REPOMON"), "slot 1 was: {one:?}");
-        let two = rt.capture_named("lane-1-2", None).unwrap();
-        assert!(two.contains("SLOT_TWO"), "slot 2 was: {two:?}");
+        capture_eventually(&rt, "lane-1-2", "SLOT_TWO");
+        // The first slot must still hold its own output, not the second's.
+        capture_eventually(&rt, "lane-1", "HELLO_REPOMON");
 
         rt.kill(lane).unwrap();
         assert_eq!(rt.windows_for(lane).unwrap(), vec!["lane-1-2"]);
