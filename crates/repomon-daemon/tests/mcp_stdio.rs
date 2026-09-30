@@ -33,7 +33,12 @@ async fn connect_retry(sock: &std::path::Path) -> IpcStream {
 
 /// Every read (daemon socket or MCP child) is guarded by this - a hang must fail the test, not
 /// wedge CI.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// This turns a HUNG daemon into a failure; it must not turn a SLOW one into a failure too. Each
+/// test in this file does about twelve seconds of real work, spawning an MCP bridge and driving git,
+/// and `cargo test` runs them all at once, so a single call can sit behind the others for far longer
+/// than the work itself takes. Ten seconds put every one of them over the line together on CI and
+/// read as eleven failures rather than one busy machine.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = StdCommand::new("git")
