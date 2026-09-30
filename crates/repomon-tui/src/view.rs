@@ -2259,6 +2259,22 @@ fn focus_status_line(lane: &Lane, idx: usize) -> String {
     }
 }
 
+/// The template the new-lane preview renders, resolved by the daemon's own precedence.
+///
+/// It carries no rule of its own — that lives in `repomon_core::config` so the path a lane is
+/// created at and the path a preview shows cannot disagree. It exists apart from
+/// `render_new_lane` so this wiring is pinned by a test: a preview that quietly stopped reading
+/// the repository's own template is the defect it is here to prevent, and nothing else would go
+/// red. One case it cannot see either way: a per-repository `worktree_template` in the config
+/// file, which the daemon resolves but never sends to a client, so the preview falls back to the
+/// global default there — narrower than before, not closed.
+fn preview_template<'a>(repo: Option<&'a Repo>, configured: &'a str) -> &'a str {
+    repomon_core::config::worktree_template_for_repo(
+        repo.and_then(|r| r.worktree_root_template.as_deref()),
+        configured,
+    )
+}
+
 fn render_new_lane(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
@@ -2274,11 +2290,11 @@ fn render_new_lane(f: &mut Frame, app: &App) {
         .map(|r| repo_display(r).to_string())
         .unwrap_or_else(|| "(no repos: add one first)".into());
     let repo_ident = repo.map(|r| r.name.clone()).unwrap_or_default();
-    let safe_branch = app.nl_branch.replace('/', "-");
+    let template = preview_template(repo, &app.settings.worktree_template);
     let preview_path = if app.nl_branch.is_empty() {
         "(enter a branch name)".to_string()
     } else {
-        format!("~/code/{repo_ident}-wt/{safe_branch}")
+        repomon_core::config::render_worktree_template(template, &repo_ident, &app.nl_branch)
     };
     lines.push(Line::raw(format!("  repo      {repo_shown}")));
     match app.nl_agents.get(app.nl_agent_idx) {
@@ -3221,6 +3237,29 @@ mod tests {
             label: label.map(str::to_string),
             accent,
         }
+    }
+
+    #[test]
+    fn the_preview_reads_the_repositorys_own_template() {
+        let mut r = repo_with("repomon", None, None);
+        r.worktree_root_template = Some("~/wt/{repo}/{branch}".into());
+        assert_eq!(
+            preview_template(Some(&r), "~/code/{repo}-wt/{branch}"),
+            "~/wt/{repo}/{branch}"
+        );
+    }
+
+    #[test]
+    fn the_preview_falls_back_to_what_the_daemon_configured() {
+        let r = repo_with("repomon", None, None);
+        assert_eq!(
+            preview_template(Some(&r), "~/elsewhere/{branch}"),
+            "~/elsewhere/{branch}"
+        );
+        assert_eq!(
+            preview_template(None, "~/elsewhere/{branch}"),
+            "~/elsewhere/{branch}"
+        );
     }
 
     #[test]

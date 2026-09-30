@@ -11,6 +11,31 @@ use crate::error::{Error, Result};
 pub const DEFAULT_WORKTREE_TEMPLATE: &str = "~/code/{repo}-wt/{branch}";
 pub const DEFAULT_TMUX_SESSION: &str = "repomon";
 
+/// Which worktree template applies to a repository: the one it declares, else the configured
+/// default. The one place this precedence lives, so the path a lane is created at and the path a
+/// preview shows cannot disagree about which template they are rendering.
+///
+/// A declared-but-empty template still wins, which is what the daemon has always done and would
+/// resolve to an empty path. Left alone deliberately: treating it as absent would move where an
+/// existing lane resolves to, and that is a change to path construction rather than to this
+/// precedence.
+pub fn worktree_template_for_repo<'a>(declared: Option<&'a str>, configured: &'a str) -> &'a str {
+    declared.unwrap_or(configured)
+}
+
+/// Substitutes `{repo}` and `{branch}` in a worktree template, still as a template string.
+///
+/// The one place the rule lives, so the path a lane is created at and the path a preview shows
+/// cannot drift apart. A branch name carries `/` and a directory name cannot, so slashes become
+/// dashes — `feat/x` and `feat-x` therefore share a worktree, which is the existing behaviour and
+/// what the daemon has always done. Nothing is expanded here: a caller that needs a real path
+/// calls `expand_tilde`, and a caller showing the path to a person keeps the `~` the person wrote.
+pub fn render_worktree_template(template: &str, repo_name: &str, branch: &str) -> String {
+    template
+        .replace("{repo}", repo_name)
+        .replace("{branch}", &branch.replace('/', "-"))
+}
+
 /// Accepts only a nonempty alphanumeric, underscore, or dash tmux session name so socket labels and
 /// target syntax remain unambiguous.
 pub fn valid_tmux_session(s: &str) -> bool {
@@ -679,6 +704,135 @@ pub fn resolve_agent_view<'a>(config: &'a Config, kind: &str, lane: Option<&'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_that_declares_a_template_uses_it() {
+        assert_eq!(
+            worktree_template_for_repo(Some("~/wt/{branch}"), DEFAULT_WORKTREE_TEMPLATE),
+            "~/wt/{branch}"
+        );
+    }
+
+    #[test]
+    fn a_repository_declaring_nothing_takes_the_configured_template() {
+        assert_eq!(
+            worktree_template_for_repo(None, "~/elsewhere/{branch}"),
+            "~/elsewhere/{branch}"
+        );
+    }
+
+    #[test]
+    fn a_declared_but_empty_template_still_wins() {
+        // Pinned rather than fixed: it resolves to an empty path, but treating it as absent would
+        // move where an existing lane resolves to. Reported, not changed here.
+        assert_eq!(
+            worktree_template_for_repo(Some(""), DEFAULT_WORKTREE_TEMPLATE),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_worktree_template_substitutes_both_placeholders() {
+        assert_eq!(
+            render_worktree_template(DEFAULT_WORKTREE_TEMPLATE, "repomon", "main"),
+            "~/code/repomon-wt/main"
+        );
+    }
+
+    #[test]
+    fn a_branch_with_slashes_becomes_one_directory() {
+        assert_eq!(
+            render_worktree_template("~/wt/{branch}", "r", "feat/a/b"),
+            "~/wt/feat-a-b"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_used_twice_is_substituted_twice() {
+        assert_eq!(
+            render_worktree_template("~/{repo}/{repo}-{branch}", "r", "x"),
+            "~/r/r-x"
+        );
+    }
+
+    #[test]
+    fn a_template_naming_no_placeholder_is_returned_unchanged() {
+        assert_eq!(
+            render_worktree_template("/fixed/path", "r", "b"),
+            "/fixed/path"
+        );
+    }
+
+    #[test]
+    fn an_empty_branch_leaves_the_placeholder_empty_rather_than_literal() {
+        assert_eq!(render_worktree_template("~/wt/{branch}", "r", ""), "~/wt/");
+    }
+
+    #[test]
+    fn substitution_is_two_passes_and_the_repo_name_goes_in_first() {
+        // A repository literally named `{branch}` has its name substituted, and the second pass
+        // then replaces what the first pass wrote. Surprising, and deliberately left alone: this
+        // is the order the daemon has always used, and changing it would move the directory an
+        // existing lane lives in. Pinned so the oddity is a decision rather than a discovery.
+        assert_eq!(
+            render_worktree_template("~/{repo}/{branch}", "{branch}", "b"),
+            "~/b/b"
+        );
+    }
+
+    /// Differential against the expression this replaced, over generated inputs. The old code
+    /// lived in `Lanes::template_path`; it is copied verbatim here because the point is to compare
+    /// against what was deleted, not against a description of it.
+    #[test]
+    fn the_extracted_renderer_matches_the_expression_it_replaced() {
+        fn previously(template: &str, repo_name: &str, branch: &str) -> String {
+            let safe_branch = branch.replace('/', "-");
+            template
+                .replace("{repo}", repo_name)
+                .replace("{branch}", &safe_branch)
+        }
+        let templates = [
+            DEFAULT_WORKTREE_TEMPLATE,
+            "~/wt/{branch}",
+            "~/{repo}/{repo}-{branch}",
+            "/fixed/path",
+            "",
+            "{branch}/{repo}",
+            "~/code/{repo}-wt/{branch}/{branch}",
+        ];
+        let names = [
+            "repomon",
+            "r",
+            "",
+            "{branch}",
+            "with space",
+            "dash-name",
+            "夢",
+        ];
+        let branches = [
+            "main",
+            "feat/a/b",
+            "",
+            "/",
+            "a/",
+            "{repo}",
+            "release/1.0/rc",
+        ];
+        let mut checked = 0usize;
+        for t in templates {
+            for n in names {
+                for b in branches {
+                    assert_eq!(
+                        render_worktree_template(t, n, b),
+                        previously(t, n, b),
+                        "diverged for template={t:?} name={n:?} branch={b:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, templates.len() * names.len() * branches.len());
+    }
 
     #[test]
     fn runtime_paths_are_stable_and_honor_xdg() {

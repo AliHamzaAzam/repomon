@@ -518,14 +518,12 @@ impl Lanes {
     }
 
     fn template_path(&self, repo: &Repo, branch: &str) -> PathBuf {
-        let template = repo
-            .worktree_root_template
-            .clone()
-            .unwrap_or_else(|| self.config.worktree_template_for(&repo.name).to_string());
-        let safe_branch = branch.replace('/', "-");
-        let rendered = template
-            .replace("{repo}", &repo.name)
-            .replace("{branch}", &safe_branch);
+        let configured = self.config.worktree_template_for(&repo.name);
+        let template = crate::config::worktree_template_for_repo(
+            repo.worktree_root_template.as_deref(),
+            configured,
+        );
+        let rendered = crate::config::render_worktree_template(template, &repo.name, branch);
         crate::config::expand_tilde(&rendered)
     }
 }
@@ -695,6 +693,44 @@ mod tests {
         git(p, &["commit", "-m", "init"]);
         let store = Store::open_in_memory().unwrap();
         (dir, store, Config::default())
+    }
+
+    fn repo_named(name: &str, template: Option<&str>) -> Repo {
+        Repo {
+            id: 1,
+            path: PathBuf::from("/tmp/x"),
+            name: name.to_string(),
+            added_at: chrono::Utc::now(),
+            worktree_root_template: template.map(str::to_string),
+            hidden: false,
+            position: None,
+            label: None,
+            accent: None,
+        }
+    }
+
+    /// The daemon's path must come from the shared template rule, not from a second copy of it.
+    /// Without this, `template_path` could stop calling `render_worktree_template` and every other
+    /// test would stay green.
+    #[test]
+    fn template_path_resolves_through_the_shared_template_rule() {
+        let lanes = Lanes::new(Store::open_in_memory().unwrap(), Config::default());
+
+        let declared = repo_named("repomon", Some("~/wt/{repo}/{branch}"));
+        assert_eq!(
+            lanes.template_path(&declared, "feat/a/b"),
+            crate::config::expand_tilde("~/wt/repomon/feat-a-b")
+        );
+
+        let falls_back = repo_named("repomon", None);
+        assert_eq!(
+            lanes.template_path(&falls_back, "main"),
+            crate::config::expand_tilde(&crate::config::render_worktree_template(
+                crate::config::DEFAULT_WORKTREE_TEMPLATE,
+                "repomon",
+                "main"
+            ))
+        );
     }
 
     #[tokio::test]
