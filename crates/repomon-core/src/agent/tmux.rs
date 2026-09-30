@@ -1316,6 +1316,50 @@ pub(super) fn process_fingerprint(pid: u32) -> Option<String> {
     }
 }
 
+/// The scheduler state of `pid` (`R`, `S`, `Z`, …), or `None` when there is no such process.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(super) fn process_state(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `/proc/<pid>/stat` field 3 is the state, the first field after the parenthesised comm.
+        let after_comm = stat.rsplit_once(") ")?.1;
+        after_comm.split_whitespace().next().map(str::to_string)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// Is `pid` a running process, as opposed to absent or a zombie waiting to be reaped?
+///
+/// `kill -0` and [`process_fingerprint`] both answer yes for a zombie: the pid is still in the
+/// table, and on Linux `/proc/<pid>/stat` survives the exit with its starttime unchanged.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(super) fn process_is_alive(pid: u32) -> bool {
+    process_state(pid).is_some_and(|state| !state.starts_with('Z'))
+}
+
+/// Has the process fingerprinted as `(pid, start)` finished?
+///
+/// There are two ways to finish, and a fixture that waits on only the first waits forever. The
+/// pid may be gone, or reused by something else, which the fingerprint catches. Or the process
+/// exited and nothing reaped it: only PID 1 reaps an orphaned daemon such as a tmux server, so
+/// under an init-less container it keeps its pid and its starttime for the rest of the run.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(super) fn process_finished(pid: u32, start: &str) -> bool {
+    process_fingerprint(pid).as_deref() != Some(start) || !process_is_alive(pid)
+}
+
 /// Return the OS process start time used as a conservative lower bound for window age.
 /// A pane replacement produces a new PID and therefore a new boundary.
 pub(super) fn process_start_time(pid: u32) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -2005,8 +2049,6 @@ mod tests {
         assert_eq!(TmuxRuntime::parse_term_window("orchestrator"), None);
     }
 
-    /// A pid that exists but has been reaped into a zombie is not alive for this test's purpose:
-    /// `kill -0` cannot tell the two apart, so ask for the state instead.
     /// Poll until a live pane shows what we are waiting for, or give up after a budget.
     ///
     /// A fixed sleep asserts a guess about how fast the machine is. These tests drive a real shell
@@ -2033,19 +2075,42 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn proc_state(pid: u32) -> String {
-        Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
-    }
+    #[test]
+    fn an_unreaped_corpse_reads_as_finished_though_its_pid_and_starttime_survive() {
+        // The fixtures that wait for a tmux server to go used to compare fingerprints only. On
+        // Linux that never ends for a process nobody reaps: `/proc/<pid>/stat` outlives the exit
+        // with field 22 unchanged, so the corpse keeps answering with the fingerprint of the
+        // process it used to be. `Child` does not wait on drop, so this child is exactly that
+        // case, and only PID 1 reaps the orphaned tmux servers the real fixtures leave behind.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a child to outlive its own exit");
+        let pid = child.id();
+        let start = super::process_fingerprint(pid).expect("a running child has a fingerprint");
+        assert!(
+            super::process_is_alive(pid),
+            "the child has not been killed yet"
+        );
+        assert!(
+            !super::process_finished(pid, &start),
+            "a running child must not read as finished"
+        );
 
-    #[cfg(unix)]
-    fn is_alive(pid: u32) -> bool {
-        let state = proc_state(pid);
-        !state.is_empty() && !state.starts_with('Z')
+        child.kill().expect("kill the child");
+        // Wait for the exit rather than guessing how long it takes on a loaded machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while super::process_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            super::process_finished(pid, &start),
+            "an unreaped corpse must read as finished, not as the process it used to be: \
+             state {:?}, fingerprint {:?} against {start:?}",
+            super::process_state(pid),
+            super::process_fingerprint(pid)
+        );
+        child.wait().expect("reap the child");
     }
 
     #[cfg(unix)]
@@ -2076,7 +2141,11 @@ mod tests {
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
         loop {
-            let alive: Vec<u32> = tree.iter().copied().filter(|pid| is_alive(*pid)).collect();
+            let alive: Vec<u32> = tree
+                .iter()
+                .copied()
+                .filter(|pid| super::process_is_alive(*pid))
+                .collect();
             if alive.is_empty() {
                 return;
             }
@@ -2085,7 +2154,7 @@ mod tests {
                 // the process is running, unreaped, or stopped.
                 let states: Vec<String> = alive
                     .iter()
-                    .map(|pid| format!("{pid}={}", proc_state(*pid)))
+                    .map(|pid| format!("{pid}={:?}", super::process_state(*pid)))
                     .collect();
                 panic!(
                     "pane process tree survived kill_named after {:?}: {}",

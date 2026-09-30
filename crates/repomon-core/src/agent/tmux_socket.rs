@@ -539,6 +539,21 @@ impl SocketState {
     }
 }
 
+/// SIGTERM a tmux server this fixture owns, then wait for it to finish.
+///
+/// Waiting on the fingerprint alone never ends when nothing reaps the server: see
+/// [`super::tmux::process_finished`]. The budget is a ceiling, not a sleep.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+fn terminate_fixture_server(pid: u32, start: &str) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !super::tmux::process_finished(pid, start) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(all(unix, any(test, feature = "test-support")))]
 impl Drop for SocketState {
     fn drop(&mut self) {
@@ -549,26 +564,39 @@ impl Drop for SocketState {
             root.path().join("managed.sock"),
             root.path().join("legacy.sock"),
         ] {
-            let Ok(pids) = discover(&path) else {
-                continue;
+            // A discovery failure used to be indistinguishable from "nothing to clean up here",
+            // so a fixture that leaked a tmux server looked exactly like one that owned none.
+            // Drop runs during unwinding, so this reports and carries on rather than panicking.
+            let pids = match discover(&path) {
+                Ok(pids) => pids,
+                Err(error) => {
+                    eprintln!(
+                        "tmux fixture cleanup cannot discover the owners of {}: {error}",
+                        path.display()
+                    );
+                    Vec::new()
+                }
             };
             for pid in pids {
                 let Some(start) = super::tmux::process_fingerprint(pid) else {
                     continue;
                 };
+                // Re-probe between discovery and the signal: a pid recycled in that window
+                // belongs to a stranger and must not be signalled.
                 if discover(&path).is_ok_and(|owners| owners.contains(&pid))
                     && super::tmux::process_fingerprint(pid).as_ref() == Some(&start)
                 {
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                    }
-                    for _ in 0..100 {
-                        if super::tmux::process_fingerprint(pid).as_ref() != Some(&start) {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
+                    terminate_fixture_server(pid, &start);
                 }
+            }
+        }
+        // A fixture may unlink the socket before the handle drops, and an unlinked socket hides
+        // its server from discovery on some platforms. The server this handle adopted is still
+        // ours to terminate, and the fingerprint recorded with it is the same recycled-pid guard
+        // discovery gives us above.
+        if let Some((pid, start)) = self.server.clone() {
+            if super::tmux::process_fingerprint(pid).as_ref() == Some(&start) {
+                terminate_fixture_server(pid, &start);
             }
         }
     }
@@ -744,6 +772,12 @@ mod tests {
         assert!(ops.signals.borrow().is_empty());
     }
 
+    /// Is this server still the running process we started, rather than gone, reaped, or a
+    /// zombie that kept its pid and its starttime because nothing reaped it?
+    fn still_running(server: &(u32, String)) -> bool {
+        !super::super::tmux::process_finished(server.0, &server.1)
+    }
+
     fn start_test_server(path: &Path, session: &str, window: &str) -> (u32, String) {
         let program = super::super::tmux::tmux_program();
         let out = Command::new(&program)
@@ -775,9 +809,9 @@ mod tests {
         let active = start_test_server(&path, "repomon", "active");
         assert_ne!(old.0, active.0);
         assert_eq!(runtime.list_windows().unwrap(), ["active"]);
-        assert_eq!(
-            super::super::tmux::process_fingerprint(old.0),
-            Some(old.1.clone())
+        assert!(
+            still_running(&old),
+            "adoption must not disturb the older server"
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(runtime.list_windows().unwrap(), ["active"]);
@@ -785,16 +819,19 @@ mod tests {
             query(&super::super::tmux::tmux_program(), &path),
             Some(active.0)
         );
-        assert_eq!(
-            super::super::tmux::process_fingerprint(old.0),
-            Some(old.1.clone())
+        assert!(
+            still_running(&old),
+            "an unlinked socket must not make us signal the older server early"
         );
         drop(runtime);
         assert!(!root.exists());
-        assert_ne!(super::super::tmux::process_fingerprint(old.0), Some(old.1));
-        assert_ne!(
-            super::super::tmux::process_fingerprint(active.0),
-            Some(active.1)
+        assert!(
+            !still_running(&old),
+            "cleanup must terminate the older server"
+        );
+        assert!(
+            !still_running(&active),
+            "cleanup must terminate the adopted server"
         );
     }
 
@@ -815,9 +852,9 @@ mod tests {
         });
         assert!(caught.is_err());
         assert!(!root.exists());
-        assert_ne!(
-            super::super::tmux::process_fingerprint(server.0),
-            Some(server.1)
+        assert!(
+            !still_running(&server),
+            "unwinding must terminate the owned server even with its socket unlinked"
         );
     }
 
