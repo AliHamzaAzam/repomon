@@ -1,0 +1,61 @@
+# Codex CLI v0.160.0, Pro 100 plan, visible 200x60 pane; no redactions.
+
+  >_ [1mOpenAI Codex[0;2m (v0.160.0)[0m
+     [2m~/code/repomon-wt/fix-codex-usage-duplicates[0m
+
+  What’s the latest from your side of the keyboard?
+
+/status
+
+  >_ [1mOpenAI Codex[0;2m (v0.160.0)[0m
+
+  Visit [4m]8;;https://chatgpt.com/codex/settings/usage\https://chatgpt.com/codex/settings/usage[0m]8;;\ for up-to-date
+  information on rate limits and credits
+
+[2m  Server:                     [0mLocal background server
+
+[2m  Model:                      [0mGPT-6-Astra[2m (reasoning max)[0m
+[2m  Model provider:             [0mopenai
+[2m  Directory:                  [0m~/code/repomon-wt/fix-codex-usage-duplicates
+[2m  Permissions:                [0mWorkspace (Approve for me)
+[2m  Agents.md:                  [0m~/.codex/AGENTS.md
+[2m  Account:                    [0mPro 100
+[2m  Collaboration mode:         [0mDefault
+[2m  Session:                    [0m01a0fd9b-7fb9-7d82-8a0e-53b216c8d84a
+
+[2m  Weekly limit:               [0m[██████░░░░░░░░░░░░░░] 32% left[2m (resets 11:01 PM on 3 Oct)[0m
+[2m  Luna Reserve Weekly limit:  [0m[████░░░░░░░░░░░░░░░░] 18% left[2m (resets 6:14 PM on 3 Oct)[0m
+
+/status
+
+  >_ [1mOpenAI Codex[0;2m (v0.160.0)[0m
+
+  Visit [4m]8;;https://chatgpt.com/codex/settings/usage\https://chatgpt.com/codex/settings/usage[0m]8;;\ for up-to-date
+  information on rate limits and credits
+
+[2m  Server:                     [0mLocal background server
+
+[2m  Model:                      [0mGPT-6-Astra[2m (reasoning max)[0m
+[2m  Model provider:             [0mopenai
+[2m  Directory:                  [0m~/code/repomon-wt/fix-codex-usage-duplicates
+[2m  Permissions:                [0mWorkspace (Approve for me)
+[2m  Agents.md:                  [0m~/.codex/AGENTS.md
+[2m  Account:                    [0mPro 100
+[2m  Collaboration mode:         [0mDefault
+[2m  Session:                    [0m01a0fd9b-7fb9-7d82-8a0e-53b216c8d84a
+
+[2m  Weekly limit:               [0m[██████░░░░░░░░░░░░░░] 30% left[2m (resets 11:01 PM on 3 Oct)[0m
+[2m  Luna Reserve Weekly limit:  [0m[████░░░░░░░░░░░░░░░░] 18% left[2m (resets 6:14 PM on 3 Oct)[0m
+
+
+
+
+
+
+
+
+
+[1m›[0m [2mAsk Codex to do anything[0m
+
+  GPT-6-Astra max fast · ~/code/repomon-wt/fix-codex-usage-duplicates
+  [1m←[0m for agents · [1m?[0m for shortcuts                                                                                                                                              ⚠ 2 warnings · [1mf2[0m to view
