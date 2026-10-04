@@ -916,9 +916,10 @@ export default function FleetSidebar(props: FleetSidebarProps) {
                         <span
                           class="truncate font-mono text-[11px] font-semibold uppercase tracking-[0.02em] text-muted transition-colors hover:text-foreground cursor-default"
                           title={
-                            repo.label
+                            (repo.label
                               ? `${repoDisplayName(repo)}. Repository: ${repo.name} (${repo.path})`
-                              : `Repository: ${repo.name} (${repo.path})`
+                              : `Repository: ${repo.name} (${repo.path})`)
+                            + (repo.description ? `\n${repo.description}` : "")
                           }
                         >
                           {repoDisplayName(repo)}

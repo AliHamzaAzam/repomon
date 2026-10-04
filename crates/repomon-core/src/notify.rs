@@ -649,6 +649,7 @@ mod tests {
                 position: None,
                 label: None,
                 accent: None,
+                description: None,
             },
             worktree: Worktree {
                 id: 1,

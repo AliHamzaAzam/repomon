@@ -24,4 +24,4 @@ label: string | null,
  * Which of the eight `--pane-accent-N` tokens this repo claims, 1-8. Set from the repo's own
  * `repo.json`; `None` means clients keep hashing the id as before.
  */
-accent: number | null, };
+accent: number | null, description: string | null, };

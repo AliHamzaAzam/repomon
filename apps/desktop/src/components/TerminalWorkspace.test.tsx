@@ -70,6 +70,7 @@ function lane(sessions: AgentSession[]): Lane {
     position: null,
     label: null,
     accent: null,
+    description: null,
   };
   return {
     id: 10,

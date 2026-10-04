@@ -3236,6 +3236,7 @@ mod tests {
             position: None,
             label: label.map(str::to_string),
             accent,
+            description: None,
         }
     }
 

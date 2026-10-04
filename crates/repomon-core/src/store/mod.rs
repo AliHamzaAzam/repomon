@@ -88,6 +88,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         33,
         include_str!("../../migrations/0033_repo_label_locked.sql"),
     ),
+    (
+        35,
+        include_str!("../../migrations/0035_repo_description.sql"),
+    ),
 ];
 
 /// Unreviewed playbook drafts older than this are swept (opportunistically, on save/list) -
@@ -259,6 +263,7 @@ impl Store {
                 position: None,
                 label: None,
                 accent: None,
+                description: None,
             })
         })
         .await
@@ -365,6 +370,7 @@ impl Store {
         path: PathBuf,
         declared_name: Option<String>,
         accent: Option<u8>,
+        description: Option<String>,
     ) -> Result<Repo> {
         self.call(move |c| {
             let tx = c.transaction()?;
@@ -397,8 +403,8 @@ impl Store {
 
             let accent = accent.filter(|a| (1..=8).contains(a));
             tx.execute(
-                "UPDATE repos SET accent = ?2 WHERE id = ?1",
-                params![id, accent],
+                "UPDATE repos SET accent = ?2, description = ?3 WHERE id = ?1",
+                params![id, accent, description],
             )?;
 
             let sql = format!("SELECT {REPO_COLUMNS} FROM repos WHERE id = ?1");
@@ -2911,12 +2917,12 @@ fn repo_from_row(r: &Row) -> rusqlite::Result<Repo> {
         position: r.get(6)?,
         label: r.get(7)?,
         accent: r.get(8)?,
+        description: r.get(9)?,
     })
 }
 
 /// The repo column list shared by every repo SELECT, matching `repo_from_row`'s indices.
-const REPO_COLUMNS: &str =
-    "id, path, name, added_at, worktree_root_template, hidden, position, label, accent";
+const REPO_COLUMNS: &str = "id, path, name, added_at, worktree_root_template, hidden, position, label, accent, description";
 
 /// Orders explicitly positioned repositories first by position, then the rest by name.
 const REPO_ORDER: &str = "ORDER BY (position IS NULL), position, name";
@@ -3601,6 +3607,58 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, newest);
+    }
+
+    #[test]
+    fn description_migration_preserves_existing_rows_and_old_column_reads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 33) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn.execute("INSERT INTO repos (path, name, added_at, label, label_locked, accent) VALUES ('/code/a', 'a', '2026-10-04T00:00:00Z', 'Mine', 1, 7)", []).unwrap();
+        run_migrations(&mut conn).unwrap();
+        run_migrations(&mut conn).unwrap();
+        let description: Option<String> = conn
+            .query_row("SELECT description FROM repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(description, None);
+        let old: (String, i64, u8) = conn
+            .query_row("SELECT label, label_locked, accent FROM repos", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(old, ("Mine".into(), 1, 7));
+    }
+
+    #[tokio::test]
+    async fn description_and_label_roll_back_when_declaration_write_fails() {
+        let s = store().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("repo.json"),
+            r##"{"name":"Declared","description":"Sentence","color":"#0f766e"}"##,
+        )
+        .unwrap();
+        let repo = s
+            .add_repo(tmp.path().to_path_buf(), "folder".into(), None)
+            .await
+            .unwrap();
+        s.call(|c| {
+            c.execute_batch("CREATE TRIGGER refuse_accent BEFORE UPDATE OF accent ON repos BEGIN SELECT RAISE(ABORT, 'test failure'); END;")?;
+            Ok(())
+        }).await.unwrap();
+        let result = crate::registry::Registry::new(s.clone())
+            .apply_repo_json(repo.clone())
+            .await;
+        assert!(result.is_err());
+        let after = s.get_repo(repo.id).await.unwrap();
+        assert_eq!(after.label, None);
+        assert_eq!(after.accent, None);
+        assert_eq!(
+            serde_json::to_value(after).unwrap().get("description"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]

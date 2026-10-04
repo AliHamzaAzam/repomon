@@ -156,6 +156,7 @@ describe("ControlCenter component UI", () => {
     added_at: "2026-07-20T00:00:00Z",
     worktree_root_template: null,
       accent: null,
+      description: null,
     hidden: false, position: null, label: null };
   const mockLane: Lane = {
     id: 10,

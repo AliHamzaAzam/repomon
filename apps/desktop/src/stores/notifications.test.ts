@@ -38,6 +38,7 @@ vi.mock("../ipc/rpc", () => ({
 const config = (): ConfigView => ({
   ...DEFAULT_SOUND_PREFERENCES,
   accent: null,
+  description: null,
   usage_enabled: true,
   usage_refresh_prices: true,
   worktree_template: "{repo}-{branch}",

@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function repo(id: number, name: string, hidden = false): Repo {
-  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null, accent: null };
+  return { id, path: `/code/${name}`, name, added_at: "2026-07-20T00:00:00Z", worktree_root_template: null, hidden, position: null, label: null, accent: null, description: null };
 }
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {
@@ -581,6 +581,29 @@ describe("fleet sidebar hiding", () => {
     await Promise.resolve();
 
     expect(button).not.toBeDisabled();
+  });
+});
+
+describe("repository description tooltips", () => {
+  it.each([null, "Client Portal"])("preserves the exact tooltip without a description (label %s)", (label) => {
+    const alpha = { ...repo(1, "alpha"), label };
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText(label ?? "alpha").getAttribute("title")).toBe(
+      label ? "Client Portal. Repository: alpha (/code/alpha)" : "Repository: alpha (/code/alpha)",
+    );
+  });
+
+  it.each([null, "Client Portal"])("appends the description to the existing tooltip (label %s)", (label) => {
+    const alpha = { ...repo(1, "alpha"), label, description: "Tools for the whole team." };
+    const { fleet, actions } = stubs([alpha], [lane(10, alpha)]);
+    render(() => <FleetSidebar fleet={fleet} actions={actions} />);
+
+    expect(screen.getByText(label ?? "alpha").getAttribute("title")).toBe(
+      (label ? "Client Portal. Repository: alpha (/code/alpha)" : "Repository: alpha (/code/alpha)")
+        + "\nTools for the whole team.",
+    );
   });
 });
 

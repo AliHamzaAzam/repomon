@@ -206,6 +206,7 @@ mod tests {
                 position: None,
                 label: None,
                 accent: None,
+                description: None,
             },
             worktree: crate::model::Worktree {
                 id: 1,

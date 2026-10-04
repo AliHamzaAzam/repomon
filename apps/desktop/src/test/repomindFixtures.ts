@@ -12,6 +12,7 @@ export const home: Repo = {
   position: null,
   label: null,
   accent: null,
+  description: null,
 };
 
 export function session(overrides: Partial<AgentSession> = {}): AgentSession {

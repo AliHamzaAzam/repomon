@@ -75,6 +75,7 @@ function mkLane(id: number, sessions: AgentSession[]): Lane {
     position: null,
     label: null,
     accent: null,
+    description: null,
   };
   return {
     id,
