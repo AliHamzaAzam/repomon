@@ -53,11 +53,11 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 }
 
 /// Write an executable shell script standing in for a real agent CLI: it dumps
-/// `$REPOMON_MCP_IDENTITY_TOKEN` verbatim (no trailing newline) to `token_file` and exits,
+/// `$REPOMON_MCP_IDENTITY_TOKEN` verbatim (no trailing newline) to `token_file` and stays ready,
 /// ignoring whatever flags it was launched with (`--mcp-config …`, `--continue`, …).
 fn write_token_dumper(bin_path: &std::path::Path, token_file: &std::path::Path) {
     let script = format!(
-        "#!/bin/sh\nprintf '%s' \"$REPOMON_MCP_IDENTITY_TOKEN\" > '{}'\n",
+        "#!/bin/sh\nprintf '%s' \"$REPOMON_MCP_IDENTITY_TOKEN\" > '{}'\nprintf '\\033[999;1H> '\nexec sleep 600\n",
         token_file.display()
     );
     std::fs::write(bin_path, script).unwrap();

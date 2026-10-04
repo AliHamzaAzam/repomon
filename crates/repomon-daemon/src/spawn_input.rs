@@ -1,5 +1,6 @@
 //! Bounded startup input delivery. A missing ready composer never permits a write.
 
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use repomon_core::agent::backend::{CaptureOpts, SessionBackend, SpawnSpec};
@@ -47,6 +48,7 @@ fn ready(pane: &str) -> bool {
 }
 
 trait Input {
+    fn check_alive(&self) -> Result<(), String>;
     fn capture(&self, visible: bool) -> Result<String, String>;
     fn paste(&self, text: &str) -> Result<(), String>;
     fn enter(&self) -> Result<(), String>;
@@ -55,11 +57,37 @@ trait Input {
 struct Pane<'a> {
     backend: &'a dyn SessionBackend,
     window: &'a str,
+    last_output: RefCell<String>,
 }
 
 impl Input for Pane<'_> {
+    fn check_alive(&self) -> Result<(), String> {
+        match self.backend.window_is_alive(self.window) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let _ = self.capture(false);
+                let output = self.last_output.borrow();
+                let output = strip_ansi(&output);
+                let output = output.trim();
+                Err(format!(
+                    "Agent launch failed in {}: process exited or window disappeared. {}",
+                    self.window,
+                    if output.is_empty() {
+                        "No pane output was available."
+                    } else {
+                        output
+                    }
+                ))
+            }
+            Err(error) => Err(format!(
+                "Unable to verify agent launch in {}: {error}",
+                self.window
+            )),
+        }
+    }
     fn capture(&self, visible: bool) -> Result<String, String> {
-        self.backend
+        let output = self
+            .backend
             .capture_named(
                 self.window,
                 if visible {
@@ -68,7 +96,11 @@ impl Input for Pane<'_> {
                     CaptureOpts::last(2000)
                 },
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if !output.trim().is_empty() {
+            self.last_output.replace(output.clone());
+        }
+        Ok(output)
     }
     fn paste(&self, text: &str) -> Result<(), String> {
         self.backend
@@ -89,10 +121,13 @@ fn wait_for(
     predicate: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     loop {
+        input.check_alive()?;
         if Instant::now() >= deadline {
             return Err("timed out waiting for the composer or task confirmation".into());
         }
-        if predicate(&input.capture(visible)?) {
+        let pane = input.capture(visible)?;
+        input.check_alive()?;
+        if predicate(&pane) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -140,15 +175,23 @@ pub(crate) fn finish(
     kind: &AgentKind,
     task: Option<&str>,
     effort: Option<&str>,
-) -> Vec<String> {
-    let input = Pane { backend, window };
-    finish_input(
+) -> repomon_core::Result<Vec<String>> {
+    let input = Pane {
+        backend,
+        window,
+        last_output: RefCell::new(String::new()),
+    };
+    let warnings = finish_input(
         &input,
         kind,
         task,
         effort,
         Instant::now() + Duration::from_secs(8),
     )
+    .map_err(repomon_core::Error::Agent)?;
+    backend.finish_launch(window)?;
+    input.check_alive().map_err(repomon_core::Error::Agent)?;
+    Ok(warnings)
 }
 
 fn finish_input(
@@ -157,8 +200,17 @@ fn finish_input(
     task: Option<&str>,
     effort: Option<&str>,
     deadline: Instant,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
+    input.check_alive()?;
+    if task.is_none() && effort.is_none() {
+        if let Err(error) = wait_for(input, deadline, true, ready) {
+            input.check_alive()?;
+            warnings.push(format!(
+                "Agent started, but composer readiness could not be verified: {error}."
+            ));
+        }
+    }
     if let Some(task) = task {
         let result = if matches!(kind, AgentKind::Hermes) {
             deliver(input, task, deadline, 2)
@@ -173,6 +225,7 @@ fn finish_input(
             })
         };
         if let Err(error) = result {
+            input.check_alive()?;
             warnings.push(format!("Agent started, but initial task delivery could not be verified: {error}. Inspect the agent before resending the task."));
         }
     }
@@ -181,19 +234,87 @@ fn finish_input(
             warnings.push(format!(
                 "{effort} was not sent because task delivery is uncertain."
             ));
-            return warnings;
+            input.check_alive()?;
+            return Ok(warnings);
         }
         if let Err(error) = deliver(input, effort, deadline, 2) {
+            input.check_alive()?;
             warnings.push(format!("Agent started, but {effort} was not confirmed: {error}. The initial task uses the launch effort; apply this setting when the agent is idle."));
         }
     }
-    warnings
+    input.check_alive()?;
+    Ok(warnings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    #[cfg(unix)]
+    fn vanished_window_is_a_launch_error_even_without_a_task() {
+        let backend = repomon_core::TmuxRuntime::isolated("missing-launch");
+        let error = finish(&backend, "lane-1", &AgentKind::Codex, None, None).unwrap_err();
+        assert!(error.to_string().contains("window disappeared"));
+        assert!(error.to_string().contains("No pane output was available"));
+    }
+
+    #[test]
+    fn live_slow_launch_without_task_returns_a_warning() {
+        let input = Scripted::new(Duration::from_secs(60), 0);
+        let warnings = finish_input(
+            &input,
+            &AgentKind::Codex,
+            None,
+            None,
+            Instant::now() + Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("composer readiness could not be verified"));
+        assert_eq!(input.pastes.get(), 0);
+    }
+
+    #[test]
+    fn process_death_during_confirmation_prevents_submission() {
+        struct Exiting {
+            alive: Cell<bool>,
+        }
+        impl Input for Exiting {
+            fn check_alive(&self) -> Result<(), String> {
+                if self.alive.get() {
+                    Ok(())
+                } else {
+                    Err("process exited: startup error".into())
+                }
+            }
+            fn capture(&self, _: bool) -> Result<String, String> {
+                self.alive.set(false);
+                Ok("❯".into())
+            }
+            fn paste(&self, _: &str) -> Result<(), String> {
+                panic!("must not paste into a dead process")
+            }
+            fn enter(&self) -> Result<(), String> {
+                panic!("must not submit to a dead process")
+            }
+        }
+        for (task, effort) in [(Some("task"), None), (None, Some("/effort high"))] {
+            let input = Exiting {
+                alive: Cell::new(true),
+            };
+            let error = finish_input(
+                &input,
+                &AgentKind::Codex,
+                task,
+                effort,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap_err();
+            assert!(error.contains("startup error"));
+        }
+    }
 
     struct Scripted {
         ready_at: Instant,
@@ -214,6 +335,9 @@ mod tests {
         }
     }
     impl Input for Scripted {
+        fn check_alive(&self) -> Result<(), String> {
+            Ok(())
+        }
         fn capture(&self, _: bool) -> Result<String, String> {
             if Instant::now() < self.ready_at {
                 return Ok("Loading tools".into());
@@ -301,7 +425,8 @@ mod tests {
             Some(&task()),
             Some("/effort ultracode"),
             Instant::now() + Duration::from_millis(10),
-        );
+        )
+        .unwrap();
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("initial task delivery could not be verified"));
         assert!(warnings[1].contains("was not sent"));
@@ -320,6 +445,7 @@ mod tests {
                 None,
                 Instant::now() + Duration::from_secs(1)
             )
+            .unwrap()
             .is_empty()
         );
         assert_eq!(input.pastes.get(), 0);

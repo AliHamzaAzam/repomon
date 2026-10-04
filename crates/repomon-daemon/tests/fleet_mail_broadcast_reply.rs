@@ -56,7 +56,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 /// test instead of exiting the instant it's spawned.
 fn write_token_dumper(bin_path: &std::path::Path, token_file: &std::path::Path) {
     let script = format!(
-        "#!/bin/sh\nprintf '%s' \"$REPOMON_MCP_IDENTITY_TOKEN\" > '{}'\nsleep 600\n",
+        "#!/bin/sh\nprintf '%s' \"$REPOMON_MCP_IDENTITY_TOKEN\" > '{}'\nprintf '\\033[999;1H> '\nexec sleep 600\n",
         token_file.display()
     );
     std::fs::write(bin_path, script).unwrap();

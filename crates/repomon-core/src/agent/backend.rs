@@ -206,6 +206,25 @@ pub trait SessionBackend: Send + Sync {
     /// side by side.
     fn spawn(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String>;
 
+    /// Preserve early exit output until the caller finishes its startup checks.
+    fn spawn_for_launch(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String> {
+        self.spawn(lane, spec)
+    }
+
+    /// Release startup-only output retention after a successful launch check.
+    fn finish_launch(&self, _window: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// A retained terminal can outlive its process, so backends should check the process too.
+    fn window_is_alive(&self, window: &str) -> Result<bool> {
+        Ok(self.list_windows()?.iter().any(|name| {
+            name == window
+                || self.exact_target_named(name) == window
+                || self.target_named(name) == window
+        }))
+    }
+
     /// Launch a command as an arbitrary named window (usage probe, orchestrator); returns the
     /// window's exact attach target.
     fn spawn_named(&self, window: &str, spec: &SpawnSpec) -> Result<String>;
