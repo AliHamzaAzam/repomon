@@ -3774,15 +3774,24 @@ pub async fn dispatch(
             let delivery_kind = kind.clone();
             let spawned = tokio::task::spawn_blocking(
                 move || -> repomon_core::Result<(String, Vec<String>)> {
-                    let window = tmux.spawn(lane, &spec)?;
+                    let window = tmux.spawn_for_launch(lane, &spec)?;
                     let _ = tmux.set_window_agent_kind(&window, &kind_str);
-                    let warnings = crate::spawn_input::finish(
+                    let result = crate::spawn_input::finish(
                         tmux.as_ref(),
                         &window,
                         &delivery_kind,
                         task.as_deref(),
                         inject.as_deref(),
                     );
+                    let warnings = match result {
+                        Ok(warnings) => warnings,
+                        Err(error) => {
+                            if let Err(cleanup) = tmux.kill_named(&window) {
+                                tracing::warn!(%window, %cleanup, "failed launch cleanup failed");
+                            }
+                            return Err(error);
+                        }
+                    };
                     Ok((window, warnings))
                 },
             )
@@ -3800,6 +3809,7 @@ pub async fn dispatch(
                     )));
                 }
                 Err(error) => {
+                    tracing::error!(lane_id = p.lane_id, agent = %p.agent, window = %expected_window, %error, "agent.spawn failed");
                     let _ = ctx
                         .store
                         .revoke_mcp_identity_for_window(expected_window.clone())
@@ -8306,7 +8316,7 @@ fn apply_launch_options(
                 suffix.push_str(&format!(" --model {}", shell_quote(m)));
             }
             match mode {
-                Some("auto") => suffix.push_str(" --full-auto"),
+                Some("auto") => suffix.push_str(" --approve-for-me"),
                 Some("plan") => {
                     tracing::warn!("spawn: codex has no plan mode; ignoring --mode plan")
                 }
@@ -11980,7 +11990,7 @@ mod tests {
         );
         assert_eq!(
             plan.command,
-            "codex --model 'gpt-5' --full-auto -c model_reasoning_effort='high'"
+            "codex --model 'gpt-5' --approve-for-me -c model_reasoning_effort='high'"
         );
         assert_eq!(plan.effort_inject, None);
 

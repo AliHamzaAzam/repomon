@@ -796,9 +796,11 @@ async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
         tmux_session: session.clone(),
         ..Default::default()
     };
-    // A harmless custom "agent" instead of real `claude`: `true` ignores its arguments and
-    // exits 0, exercising the real spawn path without launching an autonomous session.
-    config.agents.insert("noop".to_string(), "true".to_string());
+    // Echo the initial task and stay alive so the launch can be verified without a real agent.
+    config.agents.insert(
+        "noop".to_string(),
+        "sh -c 'printf \"%s\\n\" \"$@\"; exec sleep 600' agent".to_string(),
+    );
 
     let (sock, mut control, _state_dir) = boot_daemon_cfg("spawn-embed", config).await;
     let (repo_dir, lane_id) = seed_repo_lane(&mut control).await;

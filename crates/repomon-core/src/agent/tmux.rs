@@ -1317,7 +1317,7 @@ pub(super) fn process_fingerprint(pid: u32) -> Option<String> {
 }
 
 /// The scheduler state of `pid` (`R`, `S`, `Z`, …), or `None` when there is no such process.
-#[cfg(all(unix, any(test, feature = "test-support")))]
+#[cfg(unix)]
 pub(super) fn process_state(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
@@ -1344,7 +1344,7 @@ pub(super) fn process_state(pid: u32) -> Option<String> {
 ///
 /// `kill -0` and [`process_fingerprint`] both answer yes for a zombie: the pid is still in the
 /// table, and on Linux `/proc/<pid>/stat` survives the exit with its starttime unchanged.
-#[cfg(all(unix, any(test, feature = "test-support")))]
+#[cfg(unix)]
 pub(super) fn process_is_alive(pid: u32) -> bool {
     process_state(pid).is_some_and(|state| !state.starts_with('Z'))
 }
@@ -1504,6 +1504,62 @@ impl SessionBackend for TmuxRuntime {
 
     fn spawn(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String> {
         TmuxRuntime::spawn(self, lane, &spec.cwd, &render_spawn_command(spec))
+    }
+
+    fn spawn_for_launch(&self, lane: LaneId, spec: &SpawnSpec) -> Result<String> {
+        // Hold the pane until output retention is enabled, before the agent can exit.
+        let window = TmuxRuntime::spawn(self, lane, &spec.cwd, "exec sleep 86400")?;
+        let target = self.exact_target(&window);
+        let result = self
+            .run(&["set-option", "-p", "-t", &target, "remain-on-exit", "on"])
+            .and_then(|_| {
+                self.run(&[
+                    "respawn-pane",
+                    "-k",
+                    "-t",
+                    &target,
+                    "-c",
+                    &spec.cwd.to_string_lossy(),
+                    &render_spawn_command(spec),
+                ])
+            });
+        if let Err(error) = result {
+            let _ = self.kill_named(&window);
+            return Err(error);
+        }
+        Ok(window)
+    }
+
+    fn finish_launch(&self, window: &str) -> Result<()> {
+        self.run(&[
+            "set-option",
+            "-pu",
+            "-t",
+            &self.exact_target(window),
+            "remain-on-exit",
+        ])?;
+        Ok(())
+    }
+
+    fn window_is_alive(&self, window: &str) -> Result<bool> {
+        let out = self.run_allow_absent(&[
+            "display-message",
+            "-p",
+            "-t",
+            &self.exact_target(window),
+            "#{pane_dead} #{pane_pid}",
+        ])?;
+        let mut fields = out.split_whitespace();
+        if fields.next() != Some("0") {
+            return Ok(false);
+        }
+        let Some(pid) = fields.next().and_then(|pid| pid.parse::<u32>().ok()) else {
+            return Ok(false);
+        };
+        #[cfg(unix)]
+        return Ok(process_is_alive(pid));
+        #[cfg(not(unix))]
+        Ok(pid > 0)
     }
 
     fn spawn_named(&self, window: &str, spec: &SpawnSpec) -> Result<String> {
@@ -2378,6 +2434,31 @@ while True:
                 }
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn successful_launch_releases_exit_retention() {
+        assert!(TmuxRuntime::available(), "this regression requires tmux");
+        let rt = TmuxRuntime::isolated("launch-retention");
+        let dir = tempfile::tempdir().unwrap();
+        let window = SessionBackend::spawn_for_launch(
+            &rt,
+            1,
+            &SpawnSpec::new("sh -c 'read line'", dir.path()),
+        )
+        .unwrap();
+        assert!(SessionBackend::window_is_alive(&rt, &window).unwrap());
+        SessionBackend::finish_launch(&rt, &window).unwrap();
+        rt.send_key_named(&window, "Enter").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rt.has_named(&window) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            !rt.has_named(&window),
+            "successful launches must not retain dead panes"
+        );
     }
 
     #[test]
