@@ -9795,6 +9795,7 @@ mod tests {
             position: None,
             label: None,
             accent: None,
+            description: None,
         };
         let worktree = repomon_core::model::Worktree {
             id,
@@ -9879,6 +9880,7 @@ mod tests {
             position: None,
             label: None,
             accent: None,
+            description: None,
         };
         let worktree = repomon_core::model::Worktree {
             id,

@@ -860,6 +860,7 @@ mod tests {
                 position: None,
                 label: None,
                 accent: None,
+                description: None,
             },
             worktree: repomon_core::model::Worktree {
                 id: 1,

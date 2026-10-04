@@ -46,6 +46,9 @@ const ACCENT_HSL: [(f64, f64, f64); 8] = [
 /// cloned repository is not the person running repomon.
 pub const MAX_NAME_CHARS: usize = 200;
 
+/// Allow a useful sentence while keeping a repository-controlled tooltip bounded.
+pub const MAX_DESCRIPTION_CHARS: usize = 500;
+
 /// A `repo.json` larger than this is not a `repo.json`. The specification's own "every field at
 /// once" example is under 2 KiB; the cap exists so a cloned repository cannot make `repo.add` read
 /// an arbitrary amount into memory.
@@ -79,8 +82,8 @@ pub fn parse(text: &str) -> Option<RepoJson> {
         _ => None,
     };
     Some(RepoJson {
-        name: string("name").and_then(displayable),
-        description: string("description").and_then(non_empty),
+        name: string("name").and_then(|s| displayable(s, MAX_NAME_CHARS)),
+        description: string("description").and_then(|s| displayable(s, MAX_DESCRIPTION_CHARS)),
         accent: object
             .get("color")
             .and_then(primary_colour)
@@ -88,17 +91,12 @@ pub fn parse(text: &str) -> Option<RepoJson> {
     })
 }
 
-fn non_empty(s: String) -> Option<String> {
-    let t = s.trim();
-    (!t.is_empty()).then(|| t.to_string())
-}
-
 /// A display string this machine is willing to show. Rejects rather than truncates: a name cut in
 /// half is a name the repository did not choose, and silently showing one is worse than showing the
 /// folder name.
-fn displayable(s: String) -> Option<String> {
+fn displayable(s: String, max_chars: usize) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() || t.chars().count() > MAX_NAME_CHARS {
+    if t.is_empty() || t.chars().count() > max_chars {
         return None;
     }
     if t.chars().any(is_deceptive) {
@@ -210,6 +208,59 @@ mod tests {
         assert_eq!(j.name.as_deref(), Some("Acme Platform"));
         assert_eq!(j.description.as_deref(), Some("The thing"));
         assert_eq!(j.accent, Some(7)); // teal
+    }
+
+    #[test]
+    fn description_rejects_deceptive_and_invisible_text() {
+        for raw in [
+            "a\u{0000}b",
+            "a\nb",
+            "a\u{001b}b",
+            "a\u{202a}b",
+            "a\u{202b}b",
+            "a\u{202c}b",
+            "a\u{202d}b",
+            "a\u{202e}b",
+            "a\u{2066}b",
+            "a\u{2067}b",
+            "a\u{2068}b",
+            "a\u{2069}b",
+            "a\u{200e}b",
+            "a\u{200f}b",
+            "a\u{061c}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "\u{200b}",
+            "\u{200c}\u{200d}",
+            " \u{2060}\u{feff} ",
+        ] {
+            let parsed = parse(
+                &serde_json::json!({
+                    "name": "Kept", "description": raw
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(parsed.description, None, "{raw:?} must be dropped outright");
+            assert_eq!(parsed.name.as_deref(), Some("Kept"));
+        }
+    }
+
+    #[test]
+    fn description_accepts_500_unicode_characters_but_rejects_501() {
+        for (count, accepted) in [(500, true), (501, false)] {
+            let raw = "文".repeat(count);
+            let parsed = parse(&serde_json::json!({ "description": raw }).to_string()).unwrap();
+            assert_eq!(parsed.description, accepted.then_some(raw));
+        }
+    }
+
+    #[test]
+    fn description_trims_whitespace_and_preserves_visible_joiners() {
+        let raw = "می\u{200c}روم";
+        let parsed =
+            parse(&serde_json::json!({ "description": format!("  {raw}  ") }).to_string()).unwrap();
+        assert_eq!(parsed.description.as_deref(), Some(raw));
     }
 
     #[test]

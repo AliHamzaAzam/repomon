@@ -166,6 +166,8 @@ pub struct Repo {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub accent: Option<u8>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Stores a named revocable device token locally, excluding plaintext tokens from device listings

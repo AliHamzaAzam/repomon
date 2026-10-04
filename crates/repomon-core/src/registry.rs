@@ -46,11 +46,11 @@ impl Registry {
     ///
     /// The file is the repository's claim, not this machine's: it fills the label only when nobody
     /// here has set one, so a local rename always wins, and so does a deliberate reset back to the
-    /// folder name. The accent has no local source, so it mirrors the file exactly, including
-    /// being cleared when the file stops declaring a colour.
+    /// folder name. The accent and description have no local source, so they mirror the file,
+    /// including being cleared when it stops declaring them.
     ///
-    /// **The two halves therefore converge differently, and deliberately.** A declared colour
-    /// keeps following the file. A declared name is a SEED: once adopted it is an ordinary label,
+    /// **The two halves therefore converge differently, and deliberately.** The accent and description
+    /// keep following the file. A declared name is a SEED: once adopted it is an ordinary label,
     /// and a later change or removal in `repo.json` does not move it.
     ///
     /// `repo` is only a snapshot: it says which registration to read the file for, and nothing
@@ -78,7 +78,13 @@ impl Registry {
         };
 
         self.store
-            .apply_repo_declaration(repo.id, repo.path, declared.name, declared.accent)
+            .apply_repo_declaration(
+                repo.id,
+                repo.path,
+                declared.name,
+                declared.accent,
+                declared.description,
+            )
             .await
     }
 
@@ -269,6 +275,87 @@ mod tests {
             .await
             .unwrap();
         (tmp, reg, repo)
+    }
+
+    #[tokio::test]
+    async fn description_follows_file_on_readd_and_preserves_a_locked_label() {
+        let (_tmp, reg, repo) = repo_with(Some(r#"{"description":"First sentence"}"#)).await;
+        gix::init(&repo.path).unwrap();
+        reg.store.remove_repo(repo.id).await.unwrap();
+        let repo = reg.add(&repo.path).await.unwrap();
+        reg.set_label(repo.id, Some("My label".into()))
+            .await
+            .unwrap();
+        let path = repo.path.clone();
+        for text in ["First sentence", "Changed sentence"] {
+            std::fs::write(
+                path.join("repo.json"),
+                serde_json::json!({
+                    "name": "Declared name", "description": text
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let added = reg.add(&path).await.unwrap();
+            assert_eq!(added.label.as_deref(), Some("My label"));
+            for found in [
+                added,
+                reg.store.get_repo(repo.id).await.unwrap(),
+                reg.store
+                    .find_repo_by_path(path.canonicalize().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                reg.list().await.unwrap().remove(0),
+            ] {
+                assert_eq!(
+                    serde_json::to_value(found).unwrap().get("description"),
+                    Some(&serde_json::json!(text))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn description_bidi_override_is_not_stored() {
+        let (_tmp, reg, repo) = repo_with(Some(r#"{"description":"Trusted sentence"}"#)).await;
+        let repo = reg.apply_repo_json(repo).await.unwrap();
+        std::fs::write(
+            repo.path.join("repo.json"),
+            r#"{"description":"safe\u202eevil","name":"Kept"}"#,
+        )
+        .unwrap();
+        let out = reg.apply_repo_json(repo).await.unwrap();
+        let stored = reg.store.get_repo(out.id).await.unwrap();
+        assert_eq!(stored.label.as_deref(), Some("Kept"));
+        assert_eq!(
+            serde_json::to_value(stored).unwrap().get("description"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn description_clears_on_absence_but_survives_an_unusable_file() {
+        let (_tmp, reg, repo) = repo_with(None).await;
+        for removal in [Some("{}"), None] {
+            std::fs::write(repo.path.join("repo.json"), r#"{"description":"Kept"}"#).unwrap();
+            let seeded = reg.apply_repo_json(repo.clone()).await.unwrap();
+            std::fs::write(repo.path.join("repo.json"), "{").unwrap();
+            let unchanged = reg.apply_repo_json(seeded).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(unchanged).unwrap().get("description"),
+                Some(&serde_json::json!("Kept"))
+            );
+            match removal {
+                Some(json) => std::fs::write(repo.path.join("repo.json"), json).unwrap(),
+                None => std::fs::remove_file(repo.path.join("repo.json")).unwrap(),
+            }
+            let cleared = reg.apply_repo_json(repo.clone()).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(cleared).unwrap().get("description"),
+                Some(&serde_json::Value::Null)
+            );
+        }
     }
 
     #[tokio::test]
@@ -488,7 +575,7 @@ mod tests {
         std::fs::create_dir_all(&declaring).unwrap();
         std::fs::write(
             declaring.join("repo.json"),
-            r##"{"name":"Declared One","color":"#0f766e"}"##,
+            r##"{"name":"Declared One","color":"#0f766e","description":"Original repository"}"##,
         )
         .unwrap();
         let stale = reg
@@ -524,6 +611,7 @@ mod tests {
             after.accent, None,
             "the replacement must not inherit an accent"
         );
+        assert_eq!(after.description, None);
     }
 
     /// `repo.rename` with an empty label clears back to the folder name. That is a local choice,

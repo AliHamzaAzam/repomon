@@ -136,6 +136,7 @@ mod tests {
             position: None,
             label: None,
             accent: None,
+            description: None,
         }
     }
 
