@@ -43,8 +43,7 @@ async fn call(
 
 #[tokio::test]
 async fn concurrent_starts_spawn_exactly_one_orchestrator() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping concurrent orchestrator start test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-orch-concurrent-it-{}", std::process::id());

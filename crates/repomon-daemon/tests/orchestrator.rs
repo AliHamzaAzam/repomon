@@ -44,8 +44,7 @@ async fn call(
 
 #[tokio::test]
 async fn orchestrator_adopts_a_surviving_window() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping orchestrator lifecycle test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     // A distinct session name for diagnostics; TestCtx owns private temporary socket paths.

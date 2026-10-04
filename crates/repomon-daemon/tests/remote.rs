@@ -911,8 +911,7 @@ async fn close_session_releases_only_this_connections_watches() {
 /// A fresh competing focus claim must deny fit, while an uncontested window can resize.
 #[tokio::test]
 async fn fit_arbitrates_between_two_remote_sessions() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping fit arbitration test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-fit-it-{}", std::process::id());
@@ -1054,8 +1053,7 @@ async fn fit_arbitrates_between_two_remote_sessions() {
 /// reuse cannot deliver unrequested bytes.
 #[tokio::test]
 async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping watch_bytes handler test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-bytes-it-{}", std::process::id());
@@ -1190,8 +1188,7 @@ async fn watch_bytes_off_without_window_releases_only_that_lanes_watches() {
 /// control client alive.
 #[tokio::test]
 async fn watched_window_death_closes_stream_while_sibling_survives() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping watch close test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-bytes-close-it-{}", std::process::id());

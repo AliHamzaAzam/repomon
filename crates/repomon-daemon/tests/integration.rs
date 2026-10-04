@@ -461,8 +461,7 @@ async fn daemon_serves_repo_and_lane_methods() {
 
 #[tokio::test]
 async fn daemon_spawns_and_drives_an_agent() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping agent spawn test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     // A unique tmux session so we never touch the user's real `repomon` session.
@@ -605,8 +604,7 @@ async fn daemon_spawns_and_drives_an_agent() {
 
 #[tokio::test]
 async fn streams_agent_output_for_visible_lanes() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping streaming test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-stream-it-{}", std::process::id());
@@ -1006,8 +1004,7 @@ async fn system_doctor_reports_machine_health_and_agents() {
 
 #[tokio::test]
 async fn agent_spawn_uses_custom_command() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping custom-command spawn test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-custom-it-{}", std::process::id());

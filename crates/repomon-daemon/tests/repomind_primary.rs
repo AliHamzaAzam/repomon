@@ -38,8 +38,7 @@ async fn call(stream: &mut IpcStream, id: u64, method: &str, params: Option<Valu
 
 #[tokio::test]
 async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping repomind primary-window staleness test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-primary-it-{}", std::process::id());
@@ -133,8 +132,7 @@ async fn repomind_instruct_reaches_the_live_window_when_the_record_is_stale() {
 /// controller lane exists but nothing in it is currently live.
 #[tokio::test]
 async fn repomind_status_reports_null_window_when_nothing_is_live() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping repomind primary-window staleness test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-primary-none-it-{}", std::process::id());

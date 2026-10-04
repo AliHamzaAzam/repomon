@@ -42,8 +42,7 @@ async fn call(
 
 #[tokio::test]
 async fn antigravity_backend_starts_degrades_transcript_and_stops() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping antigravity orchestrator test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-orch-agy-it-{}", std::process::id());

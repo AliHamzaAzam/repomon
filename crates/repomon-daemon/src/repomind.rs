@@ -830,8 +830,7 @@ mod tests {
     /// A live fallback controller must repair a stale primary record.
     #[tokio::test]
     async fn primary_window_resolves_a_stale_recorded_window_to_the_live_session() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping primary_window liveness test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -877,8 +876,7 @@ mod tests {
     /// than being switched to the earliest one just because both are live.
     #[tokio::test]
     async fn primary_window_keeps_the_recorded_window_when_two_sessions_are_live() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping primary_window liveness test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -917,8 +915,7 @@ mod tests {
     /// `window: null` and `repomind.instruct` refuse.
     #[tokio::test]
     async fn primary_window_is_none_when_no_session_is_live() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping primary_window liveness test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();

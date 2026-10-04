@@ -12,6 +12,8 @@ jobs:
       matrix:
         os: [macos-14, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      REPOMON_REQUIRE_TMUX: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup show # installs the rust-toolchain.toml version

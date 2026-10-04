@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn duplicate_legacy_servers_adopt_reachable_owner_and_cleanup_both_verified_pids() {
         use crate::agent::TmuxRuntime;
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let runtime = TmuxRuntime::isolated("repomon");
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn panic_cleanup_terminates_owned_pid_even_when_socket_is_unlinked() {
         use crate::agent::TmuxRuntime;
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let runtime = TmuxRuntime::isolated("panic-cleanup");
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn real_legacy_server_survives_socket_unlink_and_runtime_adoption() {
         use crate::agent::TmuxRuntime;
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let session = format!("i1-legacy-{}", std::process::id());

@@ -44,8 +44,7 @@ async fn call(
 
 #[tokio::test]
 async fn codex_backend_degrades_and_mcpless_agents_are_rejected() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping codex orchestrator test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-orch-codex-it-{}", std::process::id());

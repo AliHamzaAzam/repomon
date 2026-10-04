@@ -87,8 +87,7 @@ async fn wait_for_token(token_file: &std::path::Path) -> String {
 
 #[tokio::test]
 async fn fleet_mail_identity_survives_spawn_and_adopt_for_every_wiring_style() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping fleet-mail invariant test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-fleetmail-it-{}", std::process::id());

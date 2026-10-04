@@ -208,8 +208,7 @@ fn bodies(page: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn broadcast_and_list_mail_fan_out_and_self_exclude_while_single_send_is_unchanged() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping fleet-mail broadcast test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-broadcast-it-{}", std::process::id());

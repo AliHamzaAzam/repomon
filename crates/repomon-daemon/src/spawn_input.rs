@@ -251,10 +251,109 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
 
+    struct MissingWindow;
+
+    impl SessionBackend for MissingWindow {
+        fn available(&self) -> bool {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn label(&self) -> String {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn session_exists(&self) -> bool {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn claim_or_verify_owner(&self, _me: &str) -> repomon_core::agent::backend::OwnerState {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn list_windows(&self) -> repomon_core::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn list_windows_with_activity(
+            &self,
+        ) -> repomon_core::Result<Vec<repomon_core::agent::backend::WindowActivity>> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn spawn(
+            &self,
+            _lane: repomon_core::LaneId,
+            _spec: &SpawnSpec,
+        ) -> repomon_core::Result<String> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn spawn_named(&self, _window: &str, _spec: &SpawnSpec) -> repomon_core::Result<String> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn open_named(
+            &self,
+            _window: &str,
+            _cwd: &std::path::Path,
+        ) -> repomon_core::Result<String> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn capture_named(&self, _window: &str, _opts: CaptureOpts) -> repomon_core::Result<String> {
+            Ok(String::new())
+        }
+        fn cursor_named(&self, _window: &str) -> Option<repomon_core::agent::backend::Cursor> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn size_named(&self, _window: &str) -> Option<(u16, u16)> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn resize_named(&self, _window: &str, _cols: u16, _rows: u16) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn follow_client_named(&self, _window: &str) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn alternate_on_named(&self, _window: &str) -> bool {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn scroll_wheel_named(
+            &self,
+            _window: &str,
+            _event: repomon_core::agent::backend::ScrollEvent,
+        ) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn send_literal_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn send_text_named(&self, _window: &str, _text: &str) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn send_key_named(&self, _window: &str, _key: &str) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn kill_named(&self, _window: &str) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn configure(&self) {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn target_named(&self, _window: &str) -> String {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn exact_target_named(&self, _window: &str) -> String {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn attach_command(&self, _target: &str) -> repomon_core::agent::backend::AttachCommand {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn open_byte_stream(
+            &self,
+            _window: &str,
+        ) -> repomon_core::Result<repomon_core::agent::backend::ByteStream> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+        fn close_byte_stream(&self, _window: &str, _tag: u64) -> repomon_core::Result<()> {
+            unreachable!("unexpected backend call for a vanished window")
+        }
+    }
+
     #[test]
-    #[cfg(unix)]
     fn vanished_window_is_a_launch_error_even_without_a_task() {
-        let backend = repomon_core::TmuxRuntime::isolated("missing-launch");
+        let backend = MissingWindow;
         let error = finish(&backend, "lane-1", &AgentKind::Codex, None, None).unwrap_err();
         assert!(error.to_string().contains("window disappeared"));
         assert!(error.to_string().contains("No pane output was available"));

@@ -57,7 +57,9 @@ async fn call(
 async fn agent_spawn_reports_immediate_exit_with_pane_error() {
     use std::os::unix::fs::PermissionsExt;
 
-    assert!(TmuxRuntime::available(), "this regression requires tmux");
+    if !TmuxRuntime::available_for_test() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));

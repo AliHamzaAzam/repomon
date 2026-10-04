@@ -104,8 +104,7 @@ async fn spawn_claude(
 
 #[tokio::test]
 async fn reply_to_on_a_broadcast_only_reverses_for_the_actual_thread_partner() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping fleet-mail broadcast reply_to test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-broadcast-reply-it-{}", std::process::id());

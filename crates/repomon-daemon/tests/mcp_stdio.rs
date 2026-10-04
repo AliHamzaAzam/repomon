@@ -786,8 +786,7 @@ async fn mcp_stdio_repo_notes_round_trip() {
 
 #[tokio::test]
 async fn mcp_stdio_spawn_agent_embeds_repo_notes() {
-    if !repomon_core::TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping spawn_agent notes-embed test");
+    if !repomon_core::TmuxRuntime::available_for_test() {
         return;
     }
     // A distinct session name for diagnostics; TestCtx owns private temporary socket paths.

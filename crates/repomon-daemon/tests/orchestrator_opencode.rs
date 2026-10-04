@@ -42,8 +42,7 @@ async fn call(
 
 #[tokio::test]
 async fn opencode_backend_starts_degrades_transcript_and_stops() {
-    if !TmuxRuntime::available() {
-        eprintln!("tmux not available; skipping opencode orchestrator test");
+    if !TmuxRuntime::available_for_test() {
         return;
     }
     let session = format!("repomon-orch-opencode-it-{}", std::process::id());

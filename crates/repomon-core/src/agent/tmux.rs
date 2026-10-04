@@ -188,6 +188,23 @@ impl TmuxRuntime {
         }
     }
 
+    /// Skip optional live tests, but fail if CI requires tmux coverage.
+    #[cfg(any(test, feature = "test-support"))]
+    #[track_caller]
+    pub fn available_for_test() -> bool {
+        if Self::available() {
+            return true;
+        }
+        assert!(
+            std::env::var_os("REPOMON_REQUIRE_TMUX").as_deref() != Some(std::ffi::OsStr::new("1")),
+            "tmux not available, but REPOMON_REQUIRE_TMUX=1 requires live tmux tests to run"
+        );
+        eprintln!(
+            "tmux not available; skipping live tmux test (set REPOMON_REQUIRE_TMUX=1 to require it)"
+        );
+        false
+    }
+
     /// Disposable backend for tests. Owns private temporary sockets and terminates only verified
     /// server PIDs at final drop, including during unwinding and after socket loss.
     #[cfg(any(test, feature = "test-support"))]
@@ -2172,8 +2189,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_named_terminates_pane_process_tree() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-killtree-{}", std::process::id()));
@@ -2244,7 +2260,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn scroll_wheel_respects_current_mouse_protocol() {
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-c1-scroll-{}", std::process::id()));
@@ -2304,7 +2320,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn scrolling_rechecks_modes_and_does_not_claim_a_missing_target() {
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-c1-scroll-modes-{}", std::process::id()));
@@ -2367,7 +2383,7 @@ while True:
     #[test]
     #[cfg(unix)]
     fn long_send_text_respects_each_composers_bracketed_paste_mode() {
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-f1-paste-{}", std::process::id()));
@@ -2439,7 +2455,9 @@ while True:
     #[test]
     #[cfg(unix)]
     fn successful_launch_releases_exit_retention() {
-        assert!(TmuxRuntime::available(), "this regression requires tmux");
+        if !TmuxRuntime::available_for_test() {
+            return;
+        }
         let rt = TmuxRuntime::isolated("launch-retention");
         let dir = tempfile::tempdir().unwrap();
         let window = SessionBackend::spawn_for_launch(
@@ -2464,7 +2482,7 @@ while True:
     #[test]
     #[cfg(unix)]
     fn spawning_beside_an_idle_window_does_not_adopt_it() {
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-f1-existing-{}", std::process::id()));
@@ -2502,8 +2520,7 @@ while True:
 
     #[test]
     fn spawn_capture_send_kill_roundtrip() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-test-{}", std::process::id()));
@@ -2542,7 +2559,7 @@ while True:
 
     #[test]
     fn window_started_at_uses_live_pane_pid_when_stamp_is_absent() {
-        if !TmuxRuntime::available() {
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-pane-age-{}", std::process::id()));
@@ -2577,8 +2594,7 @@ while True:
 
     #[test]
     fn pipe_pane_streams_raw_bytes_to_a_fifo() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-pipetest-{}", std::process::id()));
@@ -2671,8 +2687,7 @@ while True:
 
     #[test]
     fn control_stream_orders_grid_before_new_size_output_and_ignores_client_size() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let backend = TmuxRuntime::isolated(format!("repomon-controltest-{}", std::process::id()));
@@ -2733,8 +2748,7 @@ while True:
 
     #[test]
     fn control_stream_closes_when_its_window_dies_but_session_survives() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let backend =
@@ -2777,8 +2791,7 @@ while True:
 
     #[test]
     fn single_owner_guard_claims_then_blocks_others() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-ownertest-{}", std::process::id()));
@@ -2826,8 +2839,7 @@ while True:
 
     #[test]
     fn spawning_a_window_does_not_steal_the_active_window() {
-        if !TmuxRuntime::available() {
-            eprintln!("tmux not available; skipping live runtime test");
+        if !TmuxRuntime::available_for_test() {
             return;
         }
         let rt = TmuxRuntime::isolated(format!("repomon-activetest-{}", std::process::id()));
