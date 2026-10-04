@@ -114,30 +114,54 @@ pub struct UsageRefreshed {
 
 /// Parse Claude's `/usage` screen. Sections: "Current session" (the 5-hour window), "Current week
 /// (all models)", and a model-specific weekly ("(Opus)"/"(Sonnet only)"). Returns `None` when no
-/// percentage is found anywhere (a blank/loading/trust screen yields nothing, never fake zeros).
+/// percentage is found in the newest screen (a blank/loading/trust screen yields no fake zeros).
 pub fn parse_usage(pane: &str) -> Option<UsageReport> {
     let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
+    let start = lines
+        .iter()
+        .rposition(|line| {
+            let low = screen_text(line).to_ascii_lowercase();
+            low == "/usage"
+                || low.starts_with("current session")
+                || (low.starts_with("settings ")
+                    && low.split_whitespace().any(|word| word == "usage"))
+        })
+        .unwrap_or(0);
+    let lines = &lines[start..];
     let now = Local::now();
     let mut windows = Vec::new();
+    let mut in_limits = false;
 
     for (i, line) in lines.iter().enumerate() {
-        let low = line.to_lowercase();
-        if low.contains("current session") {
-            if let Some((pct, reset)) = section_after(&lines, i, now) {
+        let low = screen_text(line).to_ascii_lowercase();
+        if low.starts_with('❯') || low.starts_with('╰') {
+            break;
+        }
+        if low.starts_with("current session") {
+            in_limits = true;
+            if let Some((pct, reset)) = section_after(lines, i, now) {
                 windows.push(window("5h", pct, reset));
             }
-        } else if low.contains("current week") {
+        } else if low.starts_with("current week") {
+            in_limits = true;
             let label = if low.contains("all models") {
                 "wk".to_string()
             } else {
                 week_model_label(&low)
             };
-            if let Some((pct, reset)) = section_after(&lines, i, now) {
+            if let Some((pct, reset)) = section_after(lines, i, now) {
                 windows.push(window(&label, pct, reset));
             }
+        } else if in_limits
+            && !low.is_empty()
+            && !low.contains("% used")
+            && !low.starts_with("resets ")
+        {
+            break;
         }
     }
 
+    windows.sort_by_key(|w| w.label != "5h");
     (!windows.is_empty()).then_some(UsageReport { windows })
 }
 
@@ -145,17 +169,39 @@ pub fn parse_usage(pane: &str) -> Option<UsageReport> {
 /// `│  Monthly limit:  [bars] 95% left (resets 04:00 on 19 Jul) │` - note Codex reports **% left**
 /// (converted to % used here) and may show 5-hour, weekly, or (Free) monthly windows.
 pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
+    let lines: Vec<String> = pane.lines().map(strip_ansi).collect();
+    // Retries append status blocks to the visible pane; even an unfinished newer block supersedes
+    // the old one so the probe can wait for fresh limits instead of reporting stale values.
+    let start = lines
+        .iter()
+        .rposition(|line| {
+            let low = screen_text(line).to_ascii_lowercase();
+            low == "/status" || low.starts_with(">_ openai codex")
+        })
+        .map_or(0, |i| i + 1);
     let now = Local::now();
     let mut windows = Vec::new();
+    let mut in_limits = false;
 
-    for line in pane.lines() {
-        let clean = strip_ansi(line);
-        let low = clean.to_lowercase();
+    for line in &lines[start..] {
+        let clean = screen_text(line);
+        if clean.starts_with(['╰', '›', '/']) {
+            break;
+        }
+        let low = clean.to_ascii_lowercase();
         // Anchor on "<name> limit:"; the "rate limits and credits" hint has no colon and is skipped.
         let Some(lpos) = low.find("limit:") else {
+            if in_limits {
+                break;
+            }
             continue;
         };
-        let Some(left) = parse_pct(&clean) else {
+        in_limits = true;
+        let value = &low[lpos + "limit:".len()..];
+        if !value.contains("% left") {
+            continue;
+        }
+        let Some(left) = parse_pct(value) else {
             continue;
         };
         let pct_used = 100u8.saturating_sub(left);
@@ -164,9 +210,12 @@ pub fn parse_codex_status(pane: &str) -> Option<UsageReport> {
         } else {
             None
         };
-        windows.push(window(&codex_label(&low[..lpos]), pct_used, reset));
+        let (order, label) = codex_label(&clean[..lpos]);
+        windows.push((order, window(&label, pct_used, reset)));
     }
 
+    windows.sort_by_key(|(order, _)| *order);
+    let windows: Vec<_> = windows.into_iter().map(|(_, w)| w).collect();
     (!windows.is_empty()).then_some(UsageReport { windows })
 }
 
@@ -247,6 +296,10 @@ fn window(label: &str, pct_used: u8, reset_at: Option<DateTime<Utc>>) -> UsageWi
     }
 }
 
+fn screen_text(line: &str) -> &str {
+    line.trim().trim_matches('│').trim()
+}
+
 /// Read a Claude section's `NN% used` and `Resets …` from the few lines after its header. Stops at
 /// the next section header so one section never borrows another's numbers. `None` if no percentage.
 fn section_after(
@@ -257,15 +310,17 @@ fn section_after(
     let mut pct = None;
     let mut reset = None;
     for line in lines.iter().skip(header + 1).take(4) {
-        let low = line.to_lowercase();
-        if low.contains("current session") || low.contains("current week") {
+        let low = screen_text(line).to_ascii_lowercase();
+        if low.contains("% used") {
+            if pct.is_none() {
+                pct = parse_pct(line);
+            }
+        } else if low.starts_with("resets ") {
+            if reset.is_none() {
+                reset = parse_reset_datetime(&low, now);
+            }
+        } else if !low.is_empty() {
             break;
-        }
-        if pct.is_none() {
-            pct = parse_pct(line);
-        }
-        if reset.is_none() && low.contains("reset") {
-            reset = parse_reset_datetime(&low, now);
         }
     }
     pct.map(|p| (p, reset))
@@ -284,23 +339,32 @@ fn week_model_label(low: &str) -> String {
     "wk2".to_string()
 }
 
-/// A short label for a Codex limit, from the text before "limit:" (e.g. `"│  monthly "` → `"mo"`).
-fn codex_label(before_limit: &str) -> String {
-    let n = before_limit.to_lowercase();
+/// Duration order and display label from a Codex limit's name, preserving weekly quota scopes.
+fn codex_label(before_limit: &str) -> (u8, String) {
+    let n = before_limit.to_ascii_lowercase();
     if n.contains("5h") || n.contains("hour") {
-        "5h".to_string()
+        (0, "5h".to_string())
     } else if n.contains("week") {
-        "wk".to_string()
+        let scope = before_limit
+            .split_whitespace()
+            .filter(|word| {
+                !word.eq_ignore_ascii_case("weekly") && !word.eq_ignore_ascii_case("week")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        (2, if scope.is_empty() { "wk".into() } else { scope })
     } else if n.contains("month") {
-        "mo".to_string()
+        (3, "mo".to_string())
     } else if n.contains("day") || n.contains("daily") {
-        "day".to_string()
+        (1, "day".to_string())
     } else {
         // Fall back to the last alphanumeric word before "limit:".
-        n.split(|c: char| !c.is_alphanumeric())
+        let label = n
+            .split(|c: char| !c.is_alphanumeric())
             .rfind(|w| !w.is_empty())
             .unwrap_or("lim")
-            .to_string()
+            .to_string();
+        (4, label)
     }
 }
 
@@ -345,6 +409,124 @@ mod tests {
     }
 
     #[test]
+    fn codex_repeated_pro_status_uses_latest_block() {
+        let pane = include_str!("fixtures/codex_status_pro_v0.160_repeated.ansi");
+        let r = parse_codex_status(pane).expect("Pro status parsed");
+        assert_eq!(
+            r.windows.len(),
+            2,
+            "one pair of limits from the latest status"
+        );
+        assert_eq!(r.windows[0].pct_used, 70);
+        assert_eq!(r.windows[1].pct_used, 82);
+    }
+
+    #[test]
+    fn codex_pro_weekly_scopes_are_distinct() {
+        let pane = include_str!("fixtures/codex_status_pro_v0.160.ansi");
+        let r = parse_codex_status(pane).expect("Pro status parsed");
+        assert_eq!(r.windows.len(), 2);
+        assert_eq!(win(&r, "wk").pct_used, 68);
+        assert_eq!(win(&r, "Luna Reserve").pct_used, 82);
+        let reset = win(&r, "Luna Reserve")
+            .reset_at
+            .expect("reserve reset")
+            .with_timezone(&Local);
+        assert_eq!((reset.month(), reset.day()), (10, 3));
+        assert_eq!((reset.hour(), reset.minute()), (18, 14));
+    }
+
+    #[test]
+    fn claude_repeated_usage_uses_latest_block() {
+        let pane = include_str!("fixtures/usage_v2.ansi");
+        let newer = pane.replace("15% used", "22% used");
+        let r = parse_usage(&format!("{pane}\n{newer}")).expect("latest usage parsed");
+        assert_eq!(r.windows.len(), 3);
+        assert_eq!(win(&r, "5h").pct_used, 22);
+        assert_eq!(win(&r, "wk").pct_used, 41);
+        assert_eq!(win(&r, "sonnet").pct_used, 0);
+    }
+
+    #[test]
+    fn codex_loading_status_does_not_reuse_previous_block() {
+        let pane = include_str!("fixtures/codex_status_pro_v0.160.ansi");
+        for latest in ["/status\n", ">_ OpenAI Codex (v0.160.0)\nLoading limits\n"] {
+            assert!(parse_codex_status(&format!("{pane}\n{latest}")).is_none());
+        }
+    }
+
+    #[test]
+    fn codex_limit_group_ends_before_unrelated_output() {
+        let pane = ">_ OpenAI Codex (v0.160.0)\nWeekly limit: 30% left\n\n\
+                    Example output:\nWeekly limit: 1% left\n";
+        let r = parse_codex_status(pane).expect("status parsed");
+        assert_eq!(r.windows, vec![window("wk", 70, None)]);
+
+        let pane = include_str!("fixtures/codex_status_v0.ansi");
+        let r = parse_codex_status(&format!("{pane}\nWeekly limit: 1% left\n"))
+            .expect("boxed status parsed");
+        assert_eq!(r.windows.len(), 1);
+        assert_eq!(r.windows[0].label, "mo");
+    }
+
+    #[test]
+    fn codex_preserves_repeated_windows_within_one_block() {
+        let pane = "/status\n>_ OpenAI Codex (v0.160.0)\n\
+                    Weekly limit: 30% left\nWeekly limit: 30% left\n";
+        let r = parse_codex_status(pane).expect("status parsed");
+        assert_eq!(r.windows, vec![window("wk", 70, None); 2]);
+    }
+
+    #[test]
+    fn codex_windows_are_shortest_first_with_stable_weekly_scopes() {
+        let pane = "/status\n>_ OpenAI Codex (v0.160.0)\n\
+                    Monthly limit: 90% left\nLuna Reserve Weekly limit: 70% left\n\
+                    Daily limit: 80% left\nWeekly limit: 60% left\n5h limit: 50% left\n";
+        let r = parse_codex_status(pane).expect("status parsed");
+        assert_eq!(
+            r.windows,
+            vec![
+                window("5h", 50, None),
+                window("day", 20, None),
+                window("Luna Reserve", 30, None),
+                window("wk", 40, None),
+                window("mo", 10, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_loading_usage_does_not_reuse_previous_block() {
+        let pane = include_str!("fixtures/usage_v2.ansi");
+        for latest in [
+            "/usage\n",
+            "Settings Status Config Usage Stats\nLoading usage\n",
+        ] {
+            assert!(parse_usage(&format!("{pane}\n{latest}")).is_none());
+        }
+    }
+
+    #[test]
+    fn claude_repeated_partial_usage_uses_latest_session() {
+        let pane = "Current session\n15% used\nCurrent week (all models)\n41% used\n\
+                    Current session\n22% used\nCurrent week (all models)\n51% used\n";
+        let r = parse_usage(pane).expect("latest partial usage parsed");
+        assert_eq!(
+            r.windows,
+            vec![window("5h", 22, None), window("wk", 51, None)]
+        );
+    }
+
+    #[test]
+    fn claude_limits_do_not_borrow_diagnostic_percentages() {
+        let pane = "Current session\n22% used\nCurrent week (all models)\n\n\
+                    What's contributing to your limits usage?\n78% of your usage came from long sessions\n\
+                    Current week (Sonnet only)\n12% used\n";
+        let r = parse_usage(pane).expect("session parsed");
+        assert_eq!(r.windows, vec![window("5h", 22, None)]);
+    }
+
+    #[test]
     fn trust_prompt_yields_none() {
         let pane = include_str!("fixtures/trust_prompt.txt");
         assert!(parse_usage(pane).is_none());
@@ -376,8 +558,8 @@ mod tests {
     }
 
     #[test]
-    fn codex_paid_style_5h_and_weekly() {
-        // Inferred paid layout (only the Free capture is a real fixture): 5h + weekly windows.
+    fn codex_synthetic_5h_and_weekly() {
+        // Synthetic layout; the real Pro 100 captures have only weekly windows.
         let pane = "  5h limit:      [██░] 32% left (resets 14:00)\n  \
                     Weekly limit:  [█░] 88% left (resets 09:00 on 21 Jun)\n";
         let r = parse_codex_status(pane).expect("paid parse");
